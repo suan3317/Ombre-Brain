@@ -121,11 +121,11 @@ def limits_cfg() -> dict:
 
 
 def max_bucket_bytes() -> int:
-    return int(limits_cfg().get("max_bucket_bytes", _DEFAULT_MAX_BUCKET_BYTES))
+    return int(limits_cfg().get("max_bucket_bytes") or _DEFAULT_MAX_BUCKET_BYTES)
 
 
 def max_pinned() -> int:
-    return int(limits_cfg().get("max_pinned", _DEFAULT_MAX_PINNED))
+    return int(limits_cfg().get("max_pinned") or _DEFAULT_MAX_PINNED)
 
 
 def check_content_size(content: str) -> str | None:

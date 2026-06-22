@@ -296,7 +296,7 @@ def _restart_github_auto_task(interval_minutes: int) -> None:
 
 
 # 启动时若配置了自动同步间隔，推迟到事件循环就绪后启动（用 lifespan 钩子）
-_gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes", 0))
+_gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
@@ -3106,8 +3106,8 @@ async def api_config_update(request: Request) -> Response:
         # Hot-reload dehydrator — sync ALL attributes so dashboard changes take effect immediately
         dehydrator.model = dehy.get("model", dehydrator.model)
         dehydrator.base_url = dehy.get("base_url", dehydrator.base_url)
-        dehydrator.max_tokens = int(dehy.get("max_tokens", dehydrator.max_tokens))
-        dehydrator.temperature = float(dehy.get("temperature", dehydrator.temperature))
+        dehydrator.max_tokens = int(dehy.get("max_tokens") or dehydrator.max_tokens)
+        dehydrator.temperature = float(dehy.get("temperature") or dehydrator.temperature)
         dehydrator.api_format = dehy.get("api_format", getattr(dehydrator, "api_format", "openai_compat"))
         if "api_key" in d and d["api_key"]:
             dehydrator.api_key = dehy["api_key"]
@@ -3646,7 +3646,7 @@ async def api_github_status(request: Request) -> Response:
     if err:
         return err
     _gh_cfg_now = config.get("github_sync", {}) or {}
-    _auto_min = int(_gh_cfg_now.get("auto_interval_minutes", 0))
+    _auto_min = int(_gh_cfg_now.get("auto_interval_minutes") or 0)
     if github_sync_instance is None:
         return JSONResponse({
             "ok": True,
