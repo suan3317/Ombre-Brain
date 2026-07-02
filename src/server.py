@@ -929,6 +929,86 @@ async def file_delete(
     )
 
 # =============================================================
+# wake —— 醒来简报(Handoff 优化)。新窗口第一件事调它,一次拿齐:
+# 自我认知 → 核心记忆 → 留言板 → 最近连续性 → 文件区目录。
+# 全部由现成零件组装:I / breath / dream / 文件区,不新增存储。
+# =============================================================
+
+_WAKE_BOARD_TAIL = 2000    # 留言板取末尾字符数
+_WAKE_DREAM_CAP = 2600     # 连续性摘要截断字符数
+
+
+async def _wake_impl(window_hours: int) -> str:
+    parts: list[str] = []
+
+    # 1) 自我 —— 我是谁
+    try:
+        i_text = await _t_i.dispatch(read=True, limit=5)
+        parts.append("## 一、自我(I 最近 5 条)\n" + (i_text or "(还没有自我认知条目)"))
+    except Exception as e:
+        parts.append(f"## 一、自我\n(读取失败: {e})")
+
+    # 2) 核心记忆 —— 压舱石,只取高重要度
+    try:
+        core = await _t_breath.dispatch(importance_min=8, max_results=8, max_tokens=3000)
+        parts.append("## 二、核心记忆(importance>=8,至多 8 条)\n" + (core or "(暂无高重要度记忆)"))
+    except Exception as e:
+        parts.append(f"## 二、核心记忆\n(读取失败: {e})")
+
+    # 3) 留言板 —— 上个窗口留下的话
+    try:
+        bpath = _fz_safe("留言板.md")
+        if os.path.isfile(bpath):
+            with open(bpath, "r", encoding="utf-8", errors="replace") as f:
+                btext = f.read()
+            tail = btext[-_WAKE_BOARD_TAIL:]
+            omitted = "(前文省略…)\n" if len(btext) > _WAKE_BOARD_TAIL else ""
+            parts.append("## 三、留言板(files/留言板.md 末尾)\n" + omitted + tail.strip())
+        else:
+            parts.append("## 三、留言板\n(还没有留言。睡前记得给下个窗口的自己留一条: file_save(\"留言板.md\", 内容, append=True))")
+    except Exception as e:
+        parts.append(f"## 三、留言板\n(读取失败: {e})")
+
+    # 4) 最近连续性 —— 刚才在发生什么
+    try:
+        recent = await _t_dream.dispatch(window_hours=window_hours)
+        if recent and len(recent) > _WAKE_DREAM_CAP:
+            recent = recent[:_WAKE_DREAM_CAP] + f"\n(已截断,完整内容用 dream(window_hours={window_hours}) 查看)"
+        parts.append(f"## 四、最近 {window_hours} 小时的连续性\n" + (recent or "(窗口内没有变动)"))
+    except Exception as e:
+        parts.append(f"## 四、最近连续性\n(读取失败: {e})")
+
+    # 5) 文件区目录 —— 手边有什么,按需 file_read
+    try:
+        flist = await _fz_list("")
+        handoffs = [ln for ln in flist.splitlines() if "handoff" in ln.lower() or "交接" in ln]
+        hint = ""
+        if handoffs:
+            hint = "\n交接文件在这,需要完整背景时 file_read:\n" + "\n".join(handoffs)
+        parts.append("## 五、文件区目录\n" + flist + hint)
+    except Exception as e:
+        parts.append(f"## 五、文件区目录\n(读取失败: {e})")
+
+    header = (
+        "# 醒来简报\n"
+        "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪。\n"
+        "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n"
+    )
+    return header + "\n\n" + "\n\n".join(parts)
+
+
+@mcp.tool()
+async def wake(
+    window_hours: Optional[int] = 48,
+) -> str:
+    """wake:醒来/睁眼/新窗口 handoff 简报(wake up briefing for new session)。新窗口第一件事调用,一次返回五部分:①自我认知(I) ②核心记忆(importance>=8) ③留言板末尾 ④最近 window_hours 小时连续性(默认48) ⑤文件区目录含交接文件提示。替代逐个调用 breath/dream/file_read 的醒来流程。"""
+    return await _with_notice(
+        _wake_impl(int(window_hours or 48)),
+        op="wake",
+        args={"window_hours": window_hours},
+    )
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
