@@ -863,7 +863,7 @@ async def _fz_list(folder: str) -> str:
             p = os.path.join(r, fn)
             rel = os.path.relpath(p, root).replace("\\", "/")
             st = os.stat(p)
-            ts = _fz_dt.datetime.utcfromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M UTC")
+            ts = _fz_dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
             rows.append(f"- {rel}  ({st.st_size} 字节, 改于 {ts})")
     if not rows:
         return "文件区是空的。用 file_save 存入第一个文件。"
