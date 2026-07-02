@@ -58,7 +58,7 @@ def _listing() -> list[dict]:
             rows.append({
                 "name": os.path.relpath(p, root).replace("\\", "/"),
                 "size": st.st_size,
-                "mtime": _dt.datetime.utcfromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M UTC"),
+                "mtime": _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
             })
     return rows
 
@@ -104,7 +104,7 @@ _PAGE = """<!doctype html>
   <div id="msg"></div>
 </div>
 <div class="card"><b>文件列表</b>
-  <table><thead><tr><th>文件</th><th>大小</th><th>修改时间(UTC)</th><th></th></tr></thead>
+  <table><thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
   <tbody id="rows"></tbody></table>
 </div>
 <script>
@@ -257,7 +257,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": "留言不能为空"}, status_code=400)
         if len(body) > 20000:
             return JSONResponse({"error": "单条留言太长了"}, status_code=413)
-        stamp = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        utcnow
         block = f"---\n**{stamp} · {author}**\n\n{body}\n"
         path = _safe(_BOARD)
         prefix = ""
