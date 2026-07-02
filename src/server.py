@@ -786,6 +786,149 @@ async def dream(window_hours: Optional[int] = 48) -> str:
 
 
 # =============================================================
+# 文件区 File Zone —— 文件柜:日记、交接文件、留言板、任意文档的存取。
+# 存储在 <buckets_dir>/files/ (持久卷上,重启不丢;.md 文件随 GitHub 同步备份)。
+# 留言板约定:file_save("留言板.md", 内容, append=True) 追加,file_read 读取。
+# =============================================================
+import re as _fz_re
+import datetime as _fz_dt
+
+_FZ_MAX_BYTES = 2 * 1024 * 1024   # 单文件上限 2MB
+_FZ_READ_CHUNK = 50000            # file_read 单次最多返回字符数
+
+
+def _fz_root() -> str:
+    root = os.path.join(config.get("buckets_dir", "buckets"), "files")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _fz_safe(name: str) -> str:
+    """校验文件名,拦路径穿越;允许至多一层子文件夹。返回绝对路径。"""
+    name = (name or "").strip().replace("\\", "/")
+    if not name or name.startswith("/") or ".." in name:
+        raise ValueError(f"非法文件名: {name!r}")
+    parts = [p for p in name.split("/") if p]
+    if len(parts) > 2:
+        raise ValueError(f"最多一层子文件夹: {name}")
+    for p in parts:
+        if not _fz_re.match(r"^[\w\u4e00-\u9fff.\- ]{1,80}$", p) or p.startswith("."):
+            raise ValueError(f"文件名含非法字符: {p!r}")
+    return os.path.join(_fz_root(), *parts)
+
+
+async def _fz_save(name: str, content: str, append: bool) -> str:
+    path = _fz_safe(name)
+    data = content or ""
+    if len(data.encode("utf-8")) > _FZ_MAX_BYTES:
+        return "OB-FZ01 内容超过 2MB 上限,拒绝写入。请拆分后再存。"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existed = os.path.exists(path)
+    if append and existed and os.path.getsize(path) > 0:
+        data = "\n\n" + data
+    with open(path, "a" if append else "w", encoding="utf-8") as f:
+        f.write(data)
+    size = os.path.getsize(path)
+    verb = "追加到" if (append and existed) else ("覆盖" if existed else "创建")
+    return f"已{verb} files/{name} (当前 {size} 字节)。"
+
+
+async def _fz_read(name: str, offset: int) -> str:
+    path = _fz_safe(name)
+    if not os.path.isfile(path):
+        return f"OB-FZ02 文件不存在: files/{name} 。用 file_list 查看现有文件。"
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    total = len(text)
+    start = max(0, int(offset or 0))
+    chunk = text[start:start + _FZ_READ_CHUNK]
+    head = f"[files/{name} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]"
+    tail = ""
+    if start + len(chunk) < total:
+        tail = f"\n[未完,续读请用 offset={start + len(chunk)}]"
+    return f"{head}\n{chunk}{tail}"
+
+
+async def _fz_list(folder: str) -> str:
+    root = _fz_root()
+    base = _fz_safe(folder) if (folder or "").strip() else root
+    if not os.path.isdir(base):
+        return f"OB-FZ03 文件夹不存在: files/{folder}"
+    rows = []
+    for r, dirs, fnames in os.walk(base):
+        dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
+        for fn in sorted(fnames):
+            if fn.startswith("."):
+                continue
+            p = os.path.join(r, fn)
+            rel = os.path.relpath(p, root).replace("\\", "/")
+            st = os.stat(p)
+            ts = _fz_dt.datetime.utcfromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M UTC")
+            rows.append(f"- {rel}  ({st.st_size} 字节, 改于 {ts})")
+    if not rows:
+        return "文件区是空的。用 file_save 存入第一个文件。"
+    return f"文件区共 {len(rows)} 个文件:\n" + "\n".join(rows)
+
+
+async def _fz_delete(name: str) -> str:
+    path = _fz_safe(name)
+    if not os.path.isfile(path):
+        return f"OB-FZ02 文件不存在: files/{name}"
+    os.remove(path)
+    return f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。"
+
+
+@mcp.tool()
+async def file_save(
+    name: str,
+    content: str,
+    append: Optional[bool] = False,
+) -> str:
+    """file_save:文件区存文件(save file to file zone)。写入日记 diary、交接文件 handoff、留言板 message board、文档 document。name=文件名,可带一层子文件夹如 diary/20260702.md,建议 .md 后缀(自动随 GitHub 备份)。append=True 在文件末尾追加(留言板用),默认覆盖写。单文件上限 2MB。"""
+    return await _with_notice(
+        _fz_save(name, content, bool(append)),
+        op="file_save",
+        args={"name": name, "content_len": len(content or ""), "append": bool(append)},
+    )
+
+
+@mcp.tool()
+async def file_read(
+    name: str,
+    offset: Optional[int] = 0,
+) -> str:
+    """file_read:文件区读文件(read file from file zone)。读取日记 diary、交接文件 handoff、留言板 message board。name=文件名(含子文件夹路径)。超长文件分页返回,续读传 offset。先用 file_list 查看有哪些文件。"""
+    return await _with_notice(
+        _fz_read(name, offset or 0),
+        op="file_read",
+        args={"name": name, "offset": offset},
+    )
+
+
+@mcp.tool()
+async def file_list(
+    folder: Optional[str] = "",
+) -> str:
+    """file_list:列出文件区所有文件(list files in file zone)。返回文件名、大小、修改时间。folder 可选,只看某个子文件夹。文件区是持久存储,窗口和模型更换都不丢。"""
+    return await _with_notice(
+        _fz_list(folder or ""),
+        op="file_list",
+        args={"folder": folder},
+    )
+
+
+@mcp.tool()
+async def file_delete(
+    name: str,
+) -> str:
+    """file_delete:删除文件区的一个文件(delete file from file zone)。name 必须精确匹配。误删可从 GitHub 备份仓库找回历史版本。"""
+    return await _with_notice(
+        _fz_delete(name),
+        op="file_delete",
+        args={"name": name},
+    )
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
