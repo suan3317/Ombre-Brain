@@ -5,6 +5,8 @@
 - PUT  /api/files/raw?name=xx     上传文件(请求体=文件原始内容,免 multipart 依赖)
 - GET  /api/files/download?name=  下载/查看文件
 - POST /api/files/delete?name=    删除文件
+- GET  /api/files/board           读留言板
+- POST /api/files/board?author=   给留言板追加一条(请求体=留言内容)
 
 存储位置: <buckets_dir>/files/ ,与 MCP 端 file_save / file_read / file_list / file_delete
 是同一个柜子:这边传的那边能读,那边存的这边能下载。
@@ -21,6 +23,7 @@ from starlette.responses import Response, JSONResponse, HTMLResponse, RedirectRe
 from . import _shared as sh
 
 _MAX_UPLOAD = 10 * 1024 * 1024  # 网页上传上限 10MB
+_BOARD = "留言板.md"              # 留言板文件,与 MCP 端 file_save/file_read 共用
 
 
 def _root() -> str:
@@ -84,6 +87,16 @@ _PAGE = """<!doctype html>
 你传的文件那边能读,那边存的日记这里能下载。.md 文件随 GitHub 同步自动备份。
 <a href="/dashboard">← 返回 Dashboard</a></p>
 <div class="card">
+  <b>留言板</b> <span style="font-size:12px;color:#6b6357">(files/留言板.md — 两边共用,他 file_read 收信,file_save append 回信)</span>
+  <pre id="board" style="white-space:pre-wrap;background:#fff;border-radius:8px;
+       padding:10px 12px;max-height:280px;overflow:auto;font-size:13px;"></pre>
+  署名: <input type="text" id="author" value="Silv" size="6">
+  <br><textarea id="note" rows="3" style="width:100%;margin:8px 0;border:1px solid #d8d2c4;
+       border-radius:8px;padding:8px;font-family:inherit;box-sizing:border-box;"
+       placeholder="写给他的话"></textarea>
+  <button onclick="post()">留言</button> <span id="bmsg" style="font-size:13px;color:#6b6357"></span>
+</div>
+<div class="card">
   <b>上传</b><br><br>
   <input type="file" id="f" multiple>
   子文件夹(可选): <input type="text" id="folder" placeholder="如 diary" size="10">
@@ -141,6 +154,26 @@ async function up() {
   document.getElementById('f').value = '';
   refresh();
 }
+async function loadBoard() {
+  const r = await fetch('/api/files/board');
+  if (!r.ok) return;
+  const j = await r.json();
+  const el = document.getElementById('board');
+  el.textContent = j.content || '(还没有留言)';
+  el.scrollTop = el.scrollHeight;
+}
+async function post() {
+  const note = document.getElementById('note').value.trim();
+  const author = document.getElementById('author').value.trim() || 'Silv';
+  const bmsg = document.getElementById('bmsg');
+  if (!note) { bmsg.textContent = '先写点什么。'; return; }
+  const r = await fetch('/api/files/board?author=' + encodeURIComponent(author),
+                        {method:'POST', body: note});
+  if (!r.ok) { bmsg.textContent = '失败了。'; return; }
+  document.getElementById('note').value = ''; bmsg.textContent = '已留言。';
+  loadBoard(); refresh();
+}
+loadBoard();
 refresh();
 </script></body></html>"""
 
@@ -200,6 +233,39 @@ def register(mcp) -> None:
         media = "text/plain; charset=utf-8" if inline else "application/octet-stream"
         headers = {"Content-Disposition": f"{disp}; filename*=UTF-8''{__import__('urllib.parse', fromlist=['quote']).quote(fn)}"}
         return Response(content=data, media_type=media, headers=headers)
+
+    @mcp.custom_route("/api/files/board", methods=["GET"])
+    async def board_read(request: Request) -> Response:
+        err = sh._require_auth(request)
+        if err:
+            return err
+        path = _safe(_BOARD)
+        content = ""
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        return JSONResponse({"content": content})
+
+    @mcp.custom_route("/api/files/board", methods=["POST"])
+    async def board_post(request: Request) -> Response:
+        err = sh._require_auth(request)
+        if err:
+            return err
+        author = (request.query_params.get("author") or "Silv").strip()[:24]
+        body = (await request.body()).decode("utf-8", errors="replace").strip()
+        if not body:
+            return JSONResponse({"error": "留言不能为空"}, status_code=400)
+        if len(body) > 20000:
+            return JSONResponse({"error": "单条留言太长了"}, status_code=413)
+        stamp = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        block = f"---\n**{stamp} · {author}**\n\n{body}\n"
+        path = _safe(_BOARD)
+        prefix = ""
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            prefix = "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(prefix + block)
+        return JSONResponse({"ok": True})
 
     @mcp.custom_route("/api/files/delete", methods=["POST"])
     async def files_delete(request: Request) -> Response:
