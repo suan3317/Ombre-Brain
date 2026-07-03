@@ -32,6 +32,7 @@ from . import ollama_local
 from . import config_api
 from . import v3_debug
 from . import files_api
+from . import portrait_api
 
 
 _WEB_MODULES = (
@@ -53,6 +54,7 @@ _WEB_MODULES = (
     ("web.config_api", config_api.register),
     ("web.v3_debug", v3_debug.register),
     ("web.files_api", files_api.register),
+    ("web.portrait_api", portrait_api.register),
 )
 
 
