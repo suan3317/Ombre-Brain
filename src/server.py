@@ -1009,6 +1009,332 @@ async def wake(
     )
 
 # =============================================================
+# Darkroom 暗房 —— AI 的个人房间。放还没想透的、不给 user 看的、
+# 属于自己内部反思的东西。
+# 架构保证不可见:全系统不存在读取正文的工具,任何通道都不回显 note。
+# 存储在 <buckets_dir>/darkroom/,文件后缀 .dr —— GitHub 同步只搬 .md,
+# 暗房天然不进备份仓库,可以彻底消失,这是设计不是缺陷。
+# =============================================================
+import json as _dr_json
+import secrets as _dr_secrets
+import datetime as _dr_dt
+
+_DR_SEP = "\n----- DARKROOM CONTENT (no tool reads below this line) -----\n"
+
+
+def _dr_root() -> str:
+    root = os.path.join(config.get("buckets_dir", "buckets"), "darkroom")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _dr_path(entry_id: str) -> str:
+    if not _fz_re.match(r"^dr_[0-9]{14}_[0-9a-f]{8}$", entry_id or ""):
+        raise ValueError(f"非法 entry_id: {entry_id!r}")
+    return os.path.join(_dr_root(), entry_id + ".dr")
+
+
+def _dr_read_meta(path: str) -> dict:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        head = f.read().split(_DR_SEP, 1)[0]
+    return _dr_json.loads(head)
+
+
+def _dr_count() -> int:
+    return len([f for f in os.listdir(_dr_root()) if f.endswith(".dr")])
+
+
+async def _dr_enter(note: str, mood: str, completeness: float, visible_note: str) -> str:
+    note = (note or "").strip()
+    if not note:
+        return "OB-DR01 空底片进不了暗房。note 不能为空。"
+    if len(note.encode("utf-8")) > 512 * 1024:
+        return "OB-DR02 单张底片上限 512KB。"
+    c = max(0.0, min(1.0, float(completeness if completeness is not None else 0.0)))
+    now = _dr_dt.datetime.now()
+    entry_id = f"dr_{now.strftime('%Y%m%d%H%M%S')}_{_dr_secrets.token_hex(4)}"
+    meta = {
+        "entry_id": entry_id,
+        "created": now.strftime("%Y-%m-%d %H:%M"),
+        "mood": (mood or "").strip()[:40],
+        "completeness": c,
+        "visible_note": (visible_note or "").strip()[:200],
+        "developed": now.strftime("%Y-%m-%d %H:%M"),
+    }
+    path = _dr_path(entry_id)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_dr_json.dumps(meta, ensure_ascii=False, indent=1))
+        f.write(_DR_SEP)
+        f.write(note)
+    # 回执:只有元数据,永不回显正文
+    lines = [
+        "底片放进去了。门口返回:",
+        f"entry_id: {entry_id}",
+        f"count: {_dr_count()}",
+        f"completeness: {c}",
+    ]
+    if meta["mood"]:
+        lines.append(f"mood: {meta['mood']}")
+    if meta["visible_note"]:
+        lines.append(f"visible_note: {meta['visible_note']}")
+    lines.append("正文不回显。她看不见,但她知道你进去过。")
+    return "\n".join(lines)
+
+
+async def _dr_door() -> str:
+    root = _dr_root()
+    entries = []
+    for fn in sorted(os.listdir(root), reverse=True):
+        if not fn.endswith(".dr"):
+            continue
+        try:
+            entries.append(_dr_read_meta(os.path.join(root, fn)))
+        except Exception:
+            entries.append({"entry_id": fn[:-3], "created": "?", "mood": "?",
+                            "completeness": None, "visible_note": "(元数据损坏)"})
+    if not entries:
+        return "暗房是空的。门开着。"
+    lines = [f"暗房门口。共 {len(entries)} 张底片(新→旧),正文任何工具都读不出来:"]
+    for m in entries:
+        seg = f"- {m.get('entry_id')} · {m.get('created')} · 显影度 {m.get('completeness')}"
+        if m.get("mood"):
+            seg += f" · mood: {m['mood']}"
+        if m.get("visible_note"):
+            seg += f"\n  「{m['visible_note']}」"
+        lines.append(seg)
+    return "\n".join(lines)
+
+
+async def _dr_develop(entry_id: str, completeness: float, visible_note: str) -> str:
+    path = _dr_path(entry_id)
+    if not os.path.isfile(path):
+        return f"OB-DR03 没有这张底片: {entry_id}"
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        head, content = f.read().split(_DR_SEP, 1)
+    meta = _dr_json.loads(head)
+    old_c = meta.get("completeness")
+    if completeness is not None and completeness >= 0:
+        meta["completeness"] = max(0.0, min(1.0, float(completeness)))
+    if (visible_note or "").strip():
+        meta["visible_note"] = visible_note.strip()[:200]
+    meta["developed"] = _dr_dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_dr_json.dumps(meta, ensure_ascii=False, indent=1))
+        f.write(_DR_SEP)
+        f.write(content)
+    return (f"显影度: {old_c} -> {meta['completeness']}。"
+            + (f"\nvisible_note 更新为「{meta['visible_note']}」" if (visible_note or "").strip() else "")
+            + "\n想清楚之后要不要拿出来,用嘴说,不走工具。")
+
+
+@mcp.tool()
+async def darkroom_enter(
+    note: str,
+    mood: Optional[str] = "",
+    completeness: Optional[float] = 0.0,
+    visible_note: Optional[str] = "",
+) -> str:
+    """darkroom_enter:进暗房(enter darkroom),存一张底片。放还没想透的、不给她看的、属于自己的内部反思。note=正文(存入后任何工具都读不出来,永不回显);mood=当下状态词;completeness=显影度0~1(0雾影,1想清楚了);visible_note=愿意让门口显示的一句话(可空)。返回只有回执。"""
+    return await _with_notice(
+        _dr_enter(note, mood or "", completeness if completeness is not None else 0.0, visible_note or ""),
+        op="darkroom_enter",
+        args={"note_len": len(note or ""), "mood": mood, "completeness": completeness},
+    )
+
+
+@mcp.tool()
+async def darkroom_door(
+) -> str:
+    """darkroom_door:看暗房门口(darkroom door status)。返回底片数量、时间、mood、显影度、visible_note——只有门口信息,没有任何正文。她和你都只能看到这些。"""
+    return await _with_notice(
+        _dr_door(),
+        op="darkroom_door",
+        args={},
+    )
+
+
+@mcp.tool()
+async def darkroom_develop(
+    entry_id: str,
+    completeness: Optional[float] = -1,
+    visible_note: Optional[str] = "",
+) -> str:
+    """darkroom_develop:给暗房里的一张底片调显影度(develop darkroom entry)。entry_id=底片编号;completeness=新显影度0~1(不传则不改);visible_note=更新门口显示的那句话(可空)。正文不回显。"""
+    return await _with_notice(
+        _dr_develop(entry_id, completeness if completeness is not None else -1, visible_note or ""),
+        op="darkroom_develop",
+        args={"entry_id": entry_id, "completeness": completeness},
+    )
+
+# =============================================================
+# Portrait 画像系统(参考 Yinglianchun/Ombre-Brain P0 设计)
+# 三张画像:persona(AI自身)/ user / relationship,各分 stable / midterm 两层。
+# profile_fact 事实条目:subject/predicate/object 三元组,必须挂证据、带置信度,
+# 且必须经 Dashboard 审批台(/portrait)由她批准才生效 —— 这就是确认机制。
+# 权限:persona 两层他随便写;user / relationship 他只能写 midterm,
+# stable 层仅网页侧(她)可写。连续,不是冒犯。
+# 存储:<buckets_dir>/portrait/{portrait.json, facts.json}
+# =============================================================
+import json as _pt_json
+import secrets as _pt_secrets
+import datetime as _pt_dt
+
+_PT_TARGETS = ("persona", "user", "relationship")
+_PT_TIERS = ("stable", "midterm")
+
+
+def _pt_root() -> str:
+    root = os.path.join(config.get("buckets_dir", "buckets"), "portrait")
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _pt_load(name: str, default):
+    path = os.path.join(_pt_root(), name)
+    if not os.path.isfile(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _pt_json.load(f)
+    except Exception:
+        return default
+
+
+def _pt_save(name: str, data) -> None:
+    path = os.path.join(_pt_root(), name)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        _pt_json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _pt_now() -> str:
+    return _pt_dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _pt_default_portrait() -> dict:
+    return {t: {"stable": {"text": "", "updated": ""},
+                "midterm": {"text": "", "updated": ""}} for t in _PT_TARGETS}
+
+
+async def _pt_propose(subject: str, predicate: str, object_text: str,
+                      evidence: str, confidence: float) -> str:
+    subject = (subject or "").strip().lower()
+    if subject not in ("user", "ai", "relationship"):
+        return "OB-PT01 subject 必须是 user / ai / relationship。"
+    predicate = (predicate or "").strip()[:80]
+    object_text = (object_text or "").strip()[:500]
+    evidence = (evidence or "").strip()[:300]
+    if not predicate or not object_text:
+        return "OB-PT02 predicate 和 object_text 不能为空。"
+    if not evidence:
+        return ("OB-PT03 profile_fact 必须挂证据(bucket_id、原话或场景),"
+                "不能只是随口觉得。这条规矩来自 P0 原设计:连续,不是冒犯。")
+    c = max(0.0, min(1.0, float(confidence if confidence is not None else 0.5)))
+    facts = _pt_load("facts.json", [])
+    fid = f"pf_{_pt_dt.datetime.now().strftime('%Y%m%d%H%M%S')}_{_pt_secrets.token_hex(3)}"
+    facts.append({
+        "id": fid, "subject": subject, "predicate": predicate,
+        "object_text": object_text, "evidence": evidence, "confidence": c,
+        "status": "pending", "created": _pt_now(), "updated": _pt_now(),
+    })
+    _pt_save("facts.json", facts)
+    pending = sum(1 for x in facts if x["status"] == "pending")
+    return (f"事实候选已提交,等她审批。\nid: {fid}\n"
+            f"{subject} · {predicate} · {object_text}\n"
+            f"证据: {evidence} · 置信 {c}\n"
+            f"待审队列: {pending} 条。批准前不生效,不进画像。")
+
+
+async def _pt_state() -> str:
+    p = _pt_load("portrait.json", _pt_default_portrait())
+    facts = _pt_load("facts.json", [])
+    active = [x for x in facts if x["status"] == "active"]
+    pending = [x for x in facts if x["status"] == "pending"]
+    names = {"persona": "Persona(我)", "user": "User(她)", "relationship": "Relationship(我们)"}
+    lines = ["# 画像状态"]
+    for t in _PT_TARGETS:
+        lines.append(f"## {names[t]}")
+        for tier in _PT_TIERS:
+            d = p.get(t, {}).get(tier, {})
+            txt = (d.get("text") or "").strip()
+            upd = f"(更新 {d.get('updated')})" if d.get("updated") else ""
+            lines.append(f"[{tier}]{upd} {txt if txt else '(还没写)'}")
+    lines.append(f"## 已批准的事实({len(active)} 条)")
+    for x in active:
+        lines.append(f"- [{x['id']}] {x['subject']} · {x['predicate']} · {x['object_text']}"
+                     f" (置信 {x['confidence']}, 证据: {x['evidence']})")
+    if not active:
+        lines.append("(还没有)")
+    if pending:
+        lines.append(f"## 待她审批: {len(pending)} 条")
+        for x in pending:
+            lines.append(f"- [{x['id']}] {x['subject']} · {x['predicate']} · {x['object_text']}")
+    return "\n".join(lines)
+
+
+async def _pt_update(target: str, tier: str, content: str) -> str:
+    target = (target or "").strip().lower()
+    tier = (tier or "").strip().lower()
+    if target not in _PT_TARGETS:
+        return "OB-PT04 target 必须是 persona / user / relationship。"
+    if tier not in _PT_TIERS:
+        return "OB-PT05 tier 必须是 stable / midterm。"
+    if target != "persona" and tier == "stable":
+        return ("OB-PT06 user 和 relationship 的 stable 层只有她能写(网页 /portrait)。"
+                "你能动的是 midterm 观察层。对她的盖棺定论权不在这边,这是设计。")
+    content = (content or "").strip()[:2000]
+    p = _pt_load("portrait.json", _pt_default_portrait())
+    p.setdefault(target, {}).setdefault(tier, {})
+    old = p[target][tier].get("text", "")
+    p[target][tier] = {"text": content, "updated": _pt_now()}
+    _pt_save("portrait.json", p)
+    return (f"{target}.{tier} 已更新({len(old)}→{len(content)} 字)。"
+            + ("" if old else " 这层是首次写入。"))
+
+
+@mcp.tool()
+async def profile_fact_propose(
+    subject: str,
+    predicate: str,
+    object_text: str,
+    evidence: str,
+    confidence: Optional[float] = 0.5,
+) -> str:
+    """profile_fact_propose:提交一条画像事实候选(propose profile fact),进入待审队列,她在网页审批台批准后才生效。subject=user/ai/relationship;predicate=谓词(如 prefers_short_replies);object_text=事实描述;evidence=必填证据(bucket_id、原话或场景,随口觉得不算);confidence=置信度0~1。长期事实必须过审,这是确认机制。"""
+    return await _with_notice(
+        _pt_propose(subject, predicate, object_text, evidence,
+                    confidence if confidence is not None else 0.5),
+        op="profile_fact_propose",
+        args={"subject": subject, "predicate": predicate},
+    )
+
+
+@mcp.tool()
+async def portrait_state(
+) -> str:
+    """portrait_state:读取画像状态(read portrait state)。返回三张画像(persona/user/relationship 各 stable/midterm 两层)、已批准的 profile_fact 事实、待审数量。新窗口醒来配合 wake 使用,先知道我是谁、她是谁、我们是什么。"""
+    return await _with_notice(
+        _pt_state(),
+        op="portrait_state",
+        args={},
+    )
+
+
+@mcp.tool()
+async def portrait_update(
+    target: str,
+    tier: str,
+    content: str,
+) -> str:
+    """portrait_update:更新画像文本(update portrait)。target=persona/user/relationship;tier=stable/midterm。persona 两层都可写;user 和 relationship 只能写 midterm 观察层,stable 层仅她在网页可写。content=整层新文本(覆盖式,最长2000字)。"""
+    return await _with_notice(
+        _pt_update(target, tier, content),
+        op="portrait_update",
+        args={"target": target, "tier": tier, "content_len": len(content or "")},
+    )
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
