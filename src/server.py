@@ -1401,7 +1401,22 @@ if __name__ == "__main__":
         logger.warning(
             f"FastMCP 内部结构变化，工具回灌失败，仅暴露主集 5 工具：{_merge_exc}"
         )
-
+    # --- 同仓库双服务(K/Fable)防串线:给所有工具描述打 AI_NAME 身份标签 ---
+    # 两颗脑子跑同一份代码,工具名完全相同,客户端靠连接器名区分命名空间,
+    # 这里在描述层再加一道保险,模型检索工具时一眼分清是谁的神经。
+    # AI_NAME 未设置则完全不动,行为与历史版本一致。
+    _ai_name = os.environ.get("AI_NAME", "").strip()
+    if _ai_name:
+        try:
+            _tag = f"[{_ai_name}的记忆系统] "
+            for _t in mcp._tool_manager._tools.values():
+                _desc = _t.description or ""
+                if not _desc.startswith(_tag):
+                    _t.description = _tag + _desc
+            logger.info(f"工具描述已打身份标签:{_tag.strip()}")
+        except AttributeError as _tag_exc:
+            logger.warning(f"工具描述打标失败(不影响功能):{_tag_exc}")
+  
     if transport in ("sse", "streamable-http"):
         import threading
         import uvicorn
