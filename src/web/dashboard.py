@@ -57,7 +57,7 @@ def register(mcp) -> None:
                 )
                 html = html.replace(
                     'Ombre Brain<span class="version-badge" id="version-badge"></span>',
-                    f'{_brand}<span class="version-badge" id="version-badge"></span>',
+                    f'{_ai}<span class="version-badge" id="version-badge"></span>',
                     1,
                 )
             # 别让浏览器缓存仪表板 HTML：否则改了 dashboard.html 重新下发后，
