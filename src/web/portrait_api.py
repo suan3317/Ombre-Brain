@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse, HTMLResponse, RedirectResponse
 
 from . import _shared as sh
+from . import _ui
 
 _TARGETS = ("persona", "user", "relationship")
 _TIERS = ("stable", "midterm")
@@ -57,28 +58,7 @@ def _now() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-_PAGE = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>画像审批台 · Ombre Brain</title>
-<style>
-  body { font-family: 'Noto Sans SC', ui-monospace, Menlo, monospace; background:#f4f1ea;
-         color:#3a3630; max-width:900px; margin:32px auto; padding:0 16px; }
-  h1 { font-size:20px; } h2 { font-size:16px; margin:6px 0 10px; } a { color:#8a6d3b; }
-  .card { background:#faf8f3; border-radius:12px; padding:16px 20px; margin:14px 0;
-          box-shadow:2px 2px 6px rgba(0,0,0,.08); }
-  textarea { width:100%; box-sizing:border-box; border:1px solid #d8d2c4; border-radius:8px;
-             padding:8px; font-family:inherit; font-size:13px; background:#fff; }
-  button { background:#efe9dd; border:none; border-radius:8px; padding:6px 12px;
-           cursor:pointer; font-family:inherit; margin-right:6px; }
-  button:hover { background:#e3dbc9; }
-  .ok { background:#dcead2; } .no { color:#a33; }
-  .fact { border-top:1px solid #e4dfd4; padding:10px 0; font-size:14px; }
-  .meta { font-size:12px; color:#6b6357; }
-  .tierlabel { font-size:12px; color:#6b6357; margin-top:8px; }
-  .pill { display:inline-block; background:#efe9dd; border-radius:999px; padding:1px 10px;
-          font-size:12px; margin-left:6px; }
-</style></head><body>
+_PAGE = _ui.page_head("画像审批台 · Ombre Brain") + """<body>
 <h1>画像审批台</h1>
 <p class="meta">三张画像的 stable 层只有这里能写。K 提交的事实停在待审区,批准才生效。
 <a href="/dashboard">← 返回 Dashboard</a> · <a href="/files">文件区</a></p>
