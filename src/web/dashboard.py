@@ -44,6 +44,22 @@ def register(mcp) -> None:
             html = html.replace(_fzs, "<style>.tab > span:first-child { font-family: 'Noto Sans SC', system-ui, sans-serif !important; font-weight: 500; }</style></head>", 1)
             _pt = '<div class="tab" onclick="location.href=\'/files\'"><span>文件区</span><span class="tab-en">Files</span></div>'
             html = html.replace(_pt, _pt + '<div class="tab" onclick="location.href=\'/portrait\'"><span>画像</span><span class="tab-en">Portrait</span></div>', 1)
+            # 双服务铭牌:用 AI_NAME 区分两个 Dashboard(K / Fable)。
+            # 标签页静态标题、JS动态标题、页头显示名,三处一起盖章。
+            _ai = os.environ.get("AI_NAME", "").strip()
+            if _ai:
+                _brand = f"{_ai} · Ombre Brain"
+                html = html.replace("<title>Ombre Brain</title>", f"<title>{_brand}</title>", 1)
+                html = html.replace(
+                    "document.title = 'Ombre Brain · v' + (d.version || '');",
+                    f"document.title = '{_brand} · v' + (d.version || '');",
+                    1,
+                )
+                html = html.replace(
+                    'Ombre Brain<span class="version-badge" id="version-badge"></span>',
+                    f'{_brand}<span class="version-badge" id="version-badge"></span>',
+                    1,
+                )
             # 别让浏览器缓存仪表板 HTML：否则改了 dashboard.html 重新下发后，
             # 用户看到的还是旧版面（U-09 只 cache-bust 了 SVG，HTML 本身没设）。
             # HTML 很小、又是每次从磁盘读，禁缓存代价可忽略，省掉「为什么改了没生效」。
