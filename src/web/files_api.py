@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse, HTMLResponse, RedirectResponse
 
 from . import _shared as sh
+from . import _ui
 
 _MAX_UPLOAD = 10 * 1024 * 1024  # 网页上传上限 10MB
 _BOARD = "留言板.md"              # 留言板文件,与 MCP 端 file_save/file_read 共用
@@ -63,38 +64,18 @@ def _listing() -> list[dict]:
     return rows
 
 
-_PAGE = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>文件区 · Ombre Brain</title>
-<style>
-  body { font-family: ui-monospace, Menlo, Consolas, monospace; background:#f4f1ea;
-         color:#3a3630; max-width:820px; margin:32px auto; padding:0 16px; }
-  h1 { font-size:20px; } a { color:#8a6d3b; }
-  .card { background:#faf8f3; border-radius:12px; padding:16px 20px; margin:14px 0;
-          box-shadow:2px 2px 6px rgba(0,0,0,.08); }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  td,th { padding:7px 6px; border-bottom:1px solid #e4dfd4; text-align:left; }
-  button { background:#efe9dd; border:none; border-radius:8px; padding:6px 12px;
-           cursor:pointer; font-family:inherit; }
-  button:hover { background:#e3dbc9; }
-  .del { color:#a33; } input[type=text] { padding:6px 8px; border:1px solid #d8d2c4;
-         border-radius:8px; background:#fff; font-family:inherit; }
-  #msg { min-height:20px; font-size:13px; color:#6b6357; }
-</style></head><body>
+_PAGE = _ui.page_head("文件区 · Ombre Brain") + """<body>
 <h1>文件区</h1>
-<p style="font-size:13px;color:#6b6357">这里和 MCP 端的 file_save / file_read 是同一个柜子。
+<p class="meta">这里和 MCP 端的 file_save / file_read 是同一个柜子。
 你传的文件那边能读,那边存的日记这里能下载。.md 文件随 GitHub 同步自动备份。
 <a href="/dashboard">← 返回 Dashboard</a></p>
 <div class="card">
-  <b>留言板</b> <span style="font-size:12px;color:#6b6357">(files/留言板.md — 两边共用,他 file_read 收信,file_save append 回信)</span>
-  <pre id="board" style="white-space:pre-wrap;background:#fff;border-radius:8px;
-       padding:10px 12px;max-height:280px;overflow:auto;font-size:13px;"></pre>
+  <b>留言板</b> <span class="meta">(files/留言板.md — 两边共用,他 file_read 收信,file_save append 回信)</span>
+  <pre id="board" class="board"></pre>
   署名: <input type="text" id="author" value="Silv" size="6">
-  <br><textarea id="note" rows="3" style="width:100%;margin:8px 0;border:1px solid #d8d2c4;
-       border-radius:8px;padding:8px;font-family:inherit;box-sizing:border-box;"
+  <br><textarea id="note" rows="3" style="width:100%;margin:8px 0;"
        placeholder="写给他的话"></textarea>
-  <button onclick="post()">留言</button> <span id="bmsg" style="font-size:13px;color:#6b6357"></span>
+  <button onclick="post()">留言</button> <span id="bmsg"></span>
 </div>
 <div class="card">
   <b>上传</b><br><br>
@@ -257,7 +238,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": "留言不能为空"}, status_code=400)
         if len(body) > 20000:
             return JSONResponse({"error": "单条留言太长了"}, status_code=413)
-        utcnow
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         block = f"---\n**{stamp} · {author}**\n\n{body}\n"
         path = _safe(_BOARD)
         prefix = ""
