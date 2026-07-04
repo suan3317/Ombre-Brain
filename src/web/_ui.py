@@ -67,6 +67,7 @@ input[type=text]:focus, textarea:focus {
   outline:none; border-color:var(--accent);
   box-shadow:0 0 0 3px var(--accent-glow), inset 2px 2px 4px var(--shadow-dark-subtle);
 }
+textarea { display:block; width:100%; min-height:110px; margin:6px 0 8px; resize:vertical; }
 table { width:100%; border-collapse:collapse; font-size:14px; }
 td,th { padding:8px 6px; border-bottom:1px solid var(--border); text-align:left; }
 th { color:var(--text-dim); font-weight:400; font-size:12px; letter-spacing:.4px; }
