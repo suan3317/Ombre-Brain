@@ -72,7 +72,7 @@ table { width:100%; border-collapse:collapse; font-size:14px; }
 td,th { padding:8px 6px; border-bottom:1px solid var(--border); text-align:left; }
 th { color:var(--text-dim); font-weight:400; font-size:12px; letter-spacing:.4px; }
 pre.board {
-  white-space:pre-wrap; background:var(--surface-solid); border-radius:10px;
+  white-space:pre-wrap; font-family:inherit; background:var(--surface-solid); border-radius:10px;
   padding:12px 14px; max-height:300px; overflow:auto; font-size:13px;
   box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle), inset -2px -2px 5px var(--shadow-light);
 }
