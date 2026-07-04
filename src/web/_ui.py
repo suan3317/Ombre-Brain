@@ -8,6 +8,8 @@ dashboard.html 的大体量 CSS 是页面专属的,这里抽取它的设计 toke
 非路由模块,不需要在 web/__init__.py 的 _WEB_MODULES 里注册,普通 import 即可。
 """
 
+import os
+
 _FONTS = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500'
@@ -87,6 +89,9 @@ pre.board {
 
 def page_head(title: str) -> str:
     """返回统一风格的 <!doctype html>...</head> 头部,title 为页面标题。"""
+    _ai = os.environ.get("AI_NAME", "").strip()
+    if _ai:
+        title = title.replace("Ombre Brain", _ai)
     return (
         '<!doctype html>\n<html lang="zh"><head><meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
