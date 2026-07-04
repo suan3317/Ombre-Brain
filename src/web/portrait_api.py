@@ -141,7 +141,8 @@ def register(mcp) -> None:
     async def portrait_page(request: Request) -> Response:
         if sh._require_auth(request) is not None:
             return RedirectResponse("/dashboard")
-        return HTMLResponse(_PAGE)
+        _ai = os.environ.get("AI_NAME", "").strip() or "K"
+        return HTMLResponse(_PAGE.replace("K 提交的事实", f"{_ai} 提交的事实", 1))
 
     @mcp.custom_route("/api/portrait/state", methods=["GET"])
     async def portrait_get(request: Request) -> Response:
