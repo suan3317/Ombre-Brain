@@ -155,6 +155,11 @@ class TestFeelLifecycle:
             with open(fpath, "w", encoding="utf-8") as f:
                 f.write(fm.dumps(post))
 
+        # 本测试绕过 bucket_mgr 直接改文件（改 created 时间戳），必须手动让活跃桶缓存失效，
+        # 否则下面的 list_all 会拿到改时间戳之前的缓存。生产里唯一直写 .md 的 GitHub 导入
+        # 同样在写完后调 _invalidate_bm25()（见 web/github.py），此处遵循同一契约。
+        bm._invalidate_bm25()
+
         all_b = await bm.list_all()
         feels = [b for b in all_b if b["metadata"].get("type") == "feel"]
         feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)

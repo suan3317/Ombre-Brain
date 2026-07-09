@@ -513,6 +513,32 @@ def get_ai_name() -> str:
     return os.environ.get("AI_NAME", "").strip() or "AI"
 
 
+def get_owner_name() -> str:
+    """当前实例记忆归属者的显示名 / display name of this instance's memory owner.
+
+    多人共用一套 OB 时，每个人跑一个独立实例（独立数据目录 + 端口），实例通过
+    环境变量 `OMBRE_OWNER_NAME` 标明「这份记忆是谁的」，供 Dashboard 顶部归属徽标
+    显示。未设置时回退空串（前端配合 owner_count 决定是否显示）。
+    只从进程环境读取，绝不写入共享的 .env——否则同码多实例会互相串名。
+    Read from the `OMBRE_OWNER_NAME` env var; empty when unset.
+    """
+    return os.environ.get("OMBRE_OWNER_NAME", "").strip()
+
+
+def get_owner_count() -> int:
+    """共用这套 OB 的总人数 / total number of people sharing this OB.
+
+    由启动器按配置的人数注入 `OMBRE_OWNER_COUNT`（手动部署时自行设置）。前端据此
+    决定是否显示归属徽标：`>= 2` 才显示（单人不打扰）。非法 / 未设置回退 1。
+    Read from the `OMBRE_OWNER_COUNT` env var; falls back to 1 when unset/invalid.
+    """
+    raw = os.environ.get("OMBRE_OWNER_COUNT", "").strip()
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
 def sanitize_name(name: str) -> str:
     """
     Sanitize bucket name, keeping only safe characters.

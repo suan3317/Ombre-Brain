@@ -67,6 +67,41 @@ def in_docker() -> bool:
     return found
 
 
+def data_dir_persistence(buckets_dir: str) -> dict:
+    """判断记忆数据目录是不是真的在持久盘上（记忆最怕的就是「以为存住了其实没有」）。
+
+    - 裸机：目录就在用户磁盘上 → 本地持久。
+    - Docker 且该目录不是挂载点：躺在容器临时层，容器一重建/删除记忆全丢 → 危险，硬告警。
+    - Docker 且已挂载：至少能扛住重启/常规重建；若显式挂了宿主/命名卷则更稳。
+
+    只做检测与提示，绝不阻断启动（阻断会伤部署体验）。返回 {persistent, mode, note}。
+    """
+    if not in_docker():
+        return {"persistent": True, "mode": "local",
+                "note": "本地部署：记忆就存在你磁盘上的这个目录里。"}
+    is_mount = False
+    try:
+        is_mount = os.path.ismount(buckets_dir) if buckets_dir else False
+    except Exception:
+        is_mount = False
+    if not is_mount:
+        return {
+            "persistent": False,
+            "mode": "ephemeral",
+            "note": ("记忆目录没有挂到持久卷，正躺在容器的临时层——容器一旦重建或删除，"
+                     "记忆会全部丢失。请在 docker-compose 里把它挂到命名卷或宿主机目录。"),
+        }
+    if os.environ.get("OMBRE_HOST_VAULT_DIR", "").strip():
+        return {"persistent": True, "mode": "host_mount",
+                "note": "记忆目录已挂到宿主机/命名卷，重建容器也不会丢。"}
+    return {
+        "persistent": True,
+        "mode": "volume",
+        "note": ("记忆目录在 Docker 卷上，重启和常规重建都不会丢。若你用的是匿名卷，"
+                 "建议改成命名卷或宿主机目录，避免 `docker compose down -v` 等操作误删。"),
+    }
+
+
 # --- 注入的运行期配置（server.py 启动时 init 进来）---
 config: dict = {}
 
@@ -242,6 +277,65 @@ _SESSION_TTL = _SESSION_TTL_SECONDS
 _sessions: dict[str, float] = {}  # {token: expiry_timestamp}
 
 
+# --- 登录失败限流 / 指数退避锁定（防在线密码爆破）---
+# 纯内存滑窗，无外部依赖；进程重启即清零（可接受：重启本身打断了攻击者的连续尝试）。
+# 按客户端标识（X-Forwarded-For 首段，回退 request.client.host）分桶，避免一个坏客户端
+# 把所有人都锁死。成功登录立即清零。
+_LOGIN_WINDOW_SECONDS = 900          # 15 分钟滑窗内统计失败
+_LOGIN_MAX_FAILURES = 5              # 窗口内允许的失败次数，超过即进入锁定
+_LOGIN_BASE_LOCK_SECONDS = 60        # 首次锁定时长，按超出次数指数增长
+_LOGIN_MAX_LOCK_SECONDS = 3600       # 锁定时长上限（1 小时）
+
+_login_failures: dict[str, list[float]] = {}      # {client_key: [失败时间戳...]}
+_login_locked_until: dict[str, float] = {}        # {client_key: 解锁时间戳}
+
+
+def _client_key(request: Request) -> str:
+    """限流分桶标识：优先反代透传的真实 IP，回退直连 IP。"""
+    try:
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    except Exception:
+        xff = ""
+    if xff:
+        return xff
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "") if client else ""
+    return host or "unknown"
+
+
+def _login_retry_after(request: Request) -> int:
+    """>0 = 当前被锁，返回建议等待秒数；0 = 允许尝试。"""
+    key = _client_key(request)
+    now = time.time()
+    until = _login_locked_until.get(key, 0.0)
+    if until > now:
+        return int(until - now) + 1
+    if until:
+        _login_locked_until.pop(key, None)
+    return 0
+
+
+def _record_login_failure(request: Request) -> None:
+    """记一次失败；窗口内累计超阈值则按指数退避锁定该客户端。"""
+    key = _client_key(request)
+    now = time.time()
+    fails = [t for t in _login_failures.get(key, []) if now - t < _LOGIN_WINDOW_SECONDS]
+    fails.append(now)
+    _login_failures[key] = fails
+    if len(fails) >= _LOGIN_MAX_FAILURES:
+        over = len(fails) - _LOGIN_MAX_FAILURES
+        lock = min(_LOGIN_BASE_LOCK_SECONDS * (2 ** over), _LOGIN_MAX_LOCK_SECONDS)
+        _login_locked_until[key] = now + lock
+        logger.warning(f"[auth] login rate-limit: client {key} locked for {int(lock)}s after {len(fails)} failures")
+
+
+def _record_login_success(request: Request) -> None:
+    """成功登录：清空该客户端的失败计数与锁定。"""
+    key = _client_key(request)
+    _login_failures.pop(key, None)
+    _login_locked_until.pop(key, None)
+
+
 def _get_auth_file() -> str:
     return os.path.join(config["buckets_dir"], ".dashboard_auth.json")
 
@@ -302,12 +396,54 @@ def _load_password_hash() -> str | None:
     return _load_auth_data().get("password_hash")
 
 
-def _save_password_hash(password: str, *, keep_qa: bool = True) -> None:
+# --- 密钥派生（密码 / 安全问题答案）---
+# 历史格式是单轮 `salt:sha256hex`，auth 文件一旦泄露离线爆破成本极低。
+# 改用 PBKDF2-HMAC-SHA256（慢 KDF）。存储格式：pbkdf2_sha256$<迭代数>$<salt_hex>$<hash_hex>。
+# 旧格式仍能校验（向后兼容），并在下次校验成功时静默升级到新格式（见 _verify_any_password）。
+_PBKDF2_ALGO = "pbkdf2_sha256"
+_PBKDF2_ITERATIONS = 240_000
+
+
+def _hash_secret(secret: str) -> str:
+    """把明文口令/答案派生成 pbkdf2_sha256$iter$salt$hash 存储串。"""
     salt = secrets.token_hex(_PASSWORD_SALT_BYTES)
-    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    dk = hashlib.pbkdf2_hmac("sha256", secret.encode(), bytes.fromhex(salt), _PBKDF2_ITERATIONS)
+    return f"{_PBKDF2_ALGO}${_PBKDF2_ITERATIONS}${salt}${dk.hex()}"
+
+
+def _verify_secret(secret: str, stored: str) -> bool:
+    """校验明文与存储串是否匹配。支持新 PBKDF2 格式与旧 `salt:sha256hex` 格式。"""
+    if not stored:
+        return False
+    if stored.startswith(_PBKDF2_ALGO + "$"):
+        try:
+            _algo, iter_s, salt, expected = stored.split("$", 3)
+            iterations = int(iter_s)
+            dk = hashlib.pbkdf2_hmac("sha256", secret.encode(), bytes.fromhex(salt), iterations)
+        except (ValueError, TypeError):
+            return False
+        return hmac.compare_digest(dk.hex(), expected)
+    # 旧格式：salt:sha256(salt:secret)
+    if ":" in stored:
+        salt, h = stored.split(":", 1)
+        return hmac.compare_digest(h, hashlib.sha256(f"{salt}:{secret}".encode()).hexdigest())
+    return False
+
+
+def _needs_rehash(stored: str) -> bool:
+    """旧格式或迭代数低于当前标准 → 建议校验成功时静默升级。"""
+    if not stored or not stored.startswith(_PBKDF2_ALGO + "$"):
+        return True
+    try:
+        return int(stored.split("$", 3)[1]) < _PBKDF2_ITERATIONS
+    except (ValueError, IndexError):
+        return True
+
+
+def _save_password_hash(password: str, *, keep_qa: bool = True) -> None:
     auth_file = _get_auth_file()
     os.makedirs(os.path.dirname(auth_file), exist_ok=True)
-    data: dict = {"password_hash": f"{salt}:{h}"}
+    data: dict = {"password_hash": _hash_secret(password)}
     if keep_qa:
         existing = _load_auth_data()
         if existing.get("security_question"):
@@ -319,34 +455,22 @@ def _save_password_hash(password: str, *, keep_qa: bool = True) -> None:
 
 
 def _save_security_qa(question: str, answer: str) -> None:
-    salt = secrets.token_hex(_PASSWORD_SALT_BYTES)
-    h = hashlib.sha256(f"{salt}:{answer.strip().lower()}".encode()).hexdigest()
     auth_file = _get_auth_file()
     os.makedirs(os.path.dirname(auth_file), exist_ok=True)
     data = _load_auth_data()
     data["security_question"] = question.strip()
-    data["security_answer_hash"] = f"{salt}:{h}"
+    data["security_answer_hash"] = _hash_secret(answer.strip().lower())
     with open(auth_file, "w", encoding="utf-8") as f:
         _json_lib.dump(data, f, ensure_ascii=False)
 
 
 def _verify_security_answer(answer: str) -> bool:
     stored = _load_auth_data().get("security_answer_hash", "")
-    if not stored or ":" not in stored:
-        return False
-    salt, h = stored.split(":", 1)
-    return hmac.compare_digest(
-        h, hashlib.sha256(f"{salt}:{answer.strip().lower()}".encode()).hexdigest()
-    )
+    return _verify_secret(answer.strip().lower(), stored)
 
 
 def _verify_password_hash(password: str, stored: str) -> bool:
-    if ":" not in stored:
-        return False
-    salt, h = stored.split(":", 1)
-    return hmac.compare_digest(
-        h, hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
-    )
+    return _verify_secret(password, stored)
 
 
 def _is_setup_needed() -> bool:
@@ -364,7 +488,15 @@ def _verify_any_password(password: str) -> bool:
     stored = _load_password_hash()
     if not stored:
         return False
-    return _verify_password_hash(password, stored)
+    if not _verify_secret(password, stored):
+        return False
+    # 校验通过：若存的是旧格式或低迭代数，趁手里有明文静默升级到当前 PBKDF2 标准。
+    if _needs_rehash(stored):
+        try:
+            _save_password_hash(password)
+        except Exception as e:
+            logger.warning(f"[auth] password hash upgrade failed: {e}")
+    return True
 
 
 def _create_session() -> str:

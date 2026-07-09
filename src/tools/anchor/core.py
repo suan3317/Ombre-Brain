@@ -67,8 +67,9 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         f"固化桶: {stats['permanent_count']} 个\n"
         f"动态桶: {stats['dynamic_count']} 个\n"
         f"归档桶: {stats['archive_count']} 个\n"
-        f"feel/plan/letter: {stats.get('feel_count', 0)}/"
-        f"{stats.get('plan_count', 0)}/{stats.get('letter_count', 0)} 条\n"
+        f"feel 桶: {stats.get('feel_count', 0)} 条\n"
+        f"plan 桶: {stats.get('plan_count', 0)} 条\n"
+        f"letter 桶: {stats.get('letter_count', 0)} 封\n"
         f"总占用: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if rt.decay_engine.is_running else '已停止'}\n"
     )

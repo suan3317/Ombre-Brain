@@ -203,13 +203,13 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/letter/{letter_id}", methods=["DELETE"])
     async def api_letter_delete(request: Request) -> Response:
-        """Hard delete a letter. Requires ?confirm=true."""
+        """Delete a letter to archive. Requires ?confirm=true."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
         if request.query_params.get("confirm", "").lower() not in ("true", "1", "yes"):
-            return JSONResponse({"error": "confirm=true required"}, status_code=400)
+            return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         letter_id = request.path_params["letter_id"]
         bucket = await sh.bucket_mgr.get(letter_id)
         if not bucket or bucket["metadata"].get("type") != "letter":

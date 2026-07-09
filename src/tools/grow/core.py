@@ -97,3 +97,72 @@ async def grow_core(content: str) -> str:
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
     return summary
+
+
+async def grow_items(items: list) -> str:
+    """预拆分模式：上层 AI 已把长文拆成 N 条最终正文，直接逐字入库。
+
+    与 grow_core 的关键差别（issue 的诉求）：
+    - **不调 digest**：跳过廉价 LLM 的二次拆分+改写，正文一字不动（消除第二次失真）；
+    - 每条只调 analyze() 打元数据（domain/valence/arousal/tags/name），不碰正文；
+    - 合并走 raw_merge=True（原文追加，不 LLM 压缩老+新），消除第三次失真。
+    存储沿用 grow 风格：共享 grow_batch_id，source_tool=grow，dashboard 仍可按批展示。
+    """
+    # 规整：接受字符串条目；也容忍 {"content": "..."} 形式，取其正文。空条目丢弃。
+    clean: list[str] = []
+    for it in items:
+        if isinstance(it, str):
+            s = it.strip()
+        elif isinstance(it, dict):
+            s = str(it.get("content", "")).strip()
+        else:
+            s = ""
+        if s:
+            clean.append(s)
+    if not clean:
+        return "items 为空或都不合法，未创建任何桶。"
+
+    batch_id = f"g_{uuid.uuid4().hex[:12]}"
+    results = []
+    created = 0
+    merged = 0
+    embed_warnings = []
+
+    for content_str in clean:
+        try:
+            size_err = check_content_size(content_str)
+            if size_err:
+                results.append(f"⚠️（{size_err}）")
+                continue
+            # 只打标，不改写正文
+            meta = await rt.dehydrator.analyze(content_str)
+            result_name, is_merged, embed_warn = await merge_or_create(
+                content=content_str,
+                tags=meta.get("tags") or [],
+                importance=5,
+                domain=meta.get("domain") or ["未分类"],
+                valence=meta.get("valence", 0.5),
+                arousal=meta.get("arousal", 0.3),
+                name=meta.get("suggested_name", ""),
+                source_tool="grow",
+                grow_batch_id=batch_id,
+                raw_merge=True,  # 逐字追加，合并不压缩
+            )
+            if embed_warn and embed_warn not in embed_warnings:
+                embed_warnings.append(embed_warn)
+            if is_merged:
+                results.append(f"📎{result_name}")
+                merged += 1
+            else:
+                results.append(f"📝{result_name}")
+                created += 1
+                asyncio.create_task(check_duplicate_for(result_name, content_str))
+        except Exception as e:
+            rt.logger.warning(f"grow items 条目处理失败 / verbatim item failed: {e}")
+            results.append("⚠️")
+
+    asyncio.create_task(check_plan_resolution("\n".join(clean)))
+    summary = f"{len(clean)}条(预拆分·逐字)|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
+    if embed_warnings:
+        summary += f"\n⚠️ {embed_warnings[0]}"
+    return summary

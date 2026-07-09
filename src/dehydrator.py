@@ -691,7 +691,23 @@ class Dehydrator:
             name = metadata.get("name", "未命名")
             domains = ", ".join(metadata.get("domain", []))
             valence, arousal = self._clamp_va(metadata)
-            header = f"📌 记忆桶: {name}"
+            # 图标语义与 pulse 一致：📌 只给钉住/保护的核心桶，其余按类型区分，
+            # 普通动态桶用 💭。此前无条件用 📌 会让 breath 浮现里每条都像「核心准则」，
+            # 与 docs/CLAUDE_PROMPT.md「带 📌 的是我钉的核心准则」的约定冲突。
+            _btype = metadata.get("type")
+            if metadata.get("pinned") or metadata.get("protected"):
+                _icon = "📌"
+            elif _btype == "permanent":
+                _icon = "📦"
+            elif _btype == "feel":
+                _icon = "🫧"
+            elif _btype == "plan":
+                _icon = "📋"
+            elif _btype == "letter":
+                _icon = "💌"
+            else:
+                _icon = "💭"
+            header = f"{_icon} 记忆桶: {name}"
             if domains:
                 header += f" [主题:{domains}]"
             header += f" [情感:V{valence:.1f}/A{arousal:.1f}]"
@@ -706,16 +722,43 @@ class Dehydrator:
                 header += " [已消化]"
             header += "\n"
 
-        # 去掉 keywords 字段：LLM 返回的 JSON 里 keywords 是内部索引用途，不暴露给上下文
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, dict) and "keywords" in parsed:
-                parsed.pop("keywords", None)
-                content = json.dumps(parsed, ensure_ascii=False)
-        except Exception:
-            pass  # 非 JSON 内容直接透传
+        # 脱水结果可能是结构化 JSON（core_facts/emotion_state/todos/keywords/summary）。
+        # 渲染成可读文本，而不是把整坨原始 JSON 塞进上下文——后者又丑又费 token，且与
+        # 短内容「原文透传」的形态不一致（长桶显示 JSON、短桶显示纯文本）。
+        content = self._render_dehydrated(content)
         content = re.sub(r'\[\[([^\]]+)\]\]', r'\1', content)
         return f"{header}{content}"
+
+    @staticmethod
+    def _render_dehydrated(content: str) -> str:
+        """把脱水 LLM 返回的结构化 JSON 渲染成可读文本。
+
+        识别到 core_facts/summary schema → 输出 summary + 核心事实 + 待办（丢弃仅供
+        内部索引的 keywords、以及已由情感坐标承载的 emotion_state）。非该 schema 的
+        内容（如短内容直接透传的原文、或普通字符串）原样返回。
+        """
+        try:
+            parsed = json.loads(content)
+        except (ValueError, TypeError):
+            return content  # 非 JSON，原样透传
+        if not isinstance(parsed, dict) or ("summary" not in parsed and "core_facts" not in parsed):
+            return content  # 不是脱水 schema，原样透传
+
+        lines: list[str] = []
+        summary = str(parsed.get("summary") or "").strip()
+        facts = [str(f).strip() for f in (parsed.get("core_facts") or []) if str(f).strip()]
+        if summary:
+            lines.append(summary)
+        elif facts:
+            # 没有 summary 时，用核心事实兜底成正文，避免只剩空壳
+            lines.append("；".join(facts))
+            facts = []
+        for f in facts:
+            lines.append(f"· {f}")
+        todos = [str(t).strip() for t in (parsed.get("todos") or []) if str(t).strip()]
+        if todos:
+            lines.append("待办：" + "；".join(todos))
+        return "\n".join(lines) if lines else content
 
     # ---------------------------------------------------------
     # Auto-tagging: analyze content for domain + emotion + tags

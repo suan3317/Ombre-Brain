@@ -25,10 +25,15 @@ embedding_engine 向量近邻，结果合并去重，逐条 dehydrate 后塞 tok
 ========================================
 """
 
+import asyncio
 import random
 
 from .. import _runtime as rt
 from utils import strip_wikilinks, count_tokens_approx
+
+
+# 性能 P3：并发脱水的并发上限。够小以免瞬间打爆 LLM 速率限制，够大以显著压缩冷启动延迟。
+_DEHY_CONCURRENCY = 5
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -92,47 +97,64 @@ async def surface_search(
                 matches.append(bucket)
                 matched_ids.add(bucket_id)
 
-    results = []
-    token_used = 0
-    for bucket in matches:
-        if token_used >= max_tokens:
-            break
-        try:
-            clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-            meta_b = bucket["metadata"]
-            is_core = meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent"
-            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-            if q_valence is not None and "valence" in clean_meta:
-                original_v = float(clean_meta.get("valence") or 0.5)
-                shift = (q_valence - 0.5) * 0.2
-                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
+    # 性能 P3：候选桶并发脱水（有界信号量），再按原顺序套 token 预算。
+    # 冷缓存时 N 次 LLM 往返从串行变并发；matches 已被上游截到 ~20，量可控。
+    _sem = asyncio.Semaphore(_DEHY_CONCURRENCY)
+
+    async def _dehydrate_one(bucket):
+        """返回 (is_core, is_vector, bucket_id, summary) 或 None（普通桶脱水失败即跳过）。"""
+        meta_b = bucket["metadata"]
+        is_core = meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent"
+        clean_meta = {k: v for k, v in meta_b.items() if k != "tags"}
+        # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
+        if q_valence is not None and "valence" in clean_meta:
+            original_v = float(clean_meta.get("valence") or 0.5)
+            shift = (q_valence - 0.5) * 0.2
+            clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
+        async with _sem:
             try:
                 summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
             except Exception as dehy_err:
                 if not is_core:
-                    raise
+                    rt.logger.error(
+                        f"Failed to dehydrate search result / 检索结果脱水失败: "
+                        f"{type(dehy_err).__name__}: {dehy_err}"
+                    )
+                    return None
                 rt.logger.warning(f"core search result dehydrate failed, using raw fallback: {dehy_err}")
                 summary = _raw_core_fallback(bucket["content"])
-            if is_core and not str(summary or "").strip():
-                summary = _raw_core_fallback(bucket["content"])
-            summary_tokens = count_tokens_approx(summary)
-            if token_used + summary_tokens > max_tokens:
-                break
-            await rt.bucket_mgr.touch(bucket["id"])
-            if is_core:
-                summary = f"📌 [核心准则] [bucket_id:{bucket['id']}] {summary}"
-            elif bucket.get("vector_match"):
-                summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
-            else:
-                summary = f"[bucket_id:{bucket['id']}] {summary}"
-            results.append(summary)
-            token_used += summary_tokens
-        except Exception as e:
-            rt.logger.error(
-                f"Failed to dehydrate search result / 检索结果脱水失败: {type(e).__name__}: {e}",
-                exc_info=True,
-            )
+        if is_core and not str(summary or "").strip():
+            summary = _raw_core_fallback(bucket["content"])
+        return (is_core, bool(bucket.get("vector_match")), bucket["id"], summary)
+
+    dehydrated = await asyncio.gather(*[_dehydrate_one(b) for b in matches])
+
+    results = []
+    token_used = 0
+    touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
+    for item in dehydrated:
+        if item is None:
             continue
+        if token_used >= max_tokens:
+            break
+        is_core, is_vector, bucket_id, summary = item
+        summary_tokens = count_tokens_approx(summary)
+        if token_used + summary_tokens > max_tokens:
+            break
+        touched_ids.append(bucket_id)
+        if is_core:
+            summary = f"📌 [核心准则] [bucket_id:{bucket_id}] {summary}"
+        elif is_vector:
+            summary = f"[语义关联] [bucket_id:{bucket_id}] {summary}"
+        else:
+            summary = f"[bucket_id:{bucket_id}] {summary}"
+        results.append(summary)
+        token_used += summary_tokens
+
+    # 性能 P2：把 touch 移出响应路径 —— 浮现完的桶在后台一次性更新激活，
+    # ripple=False 跳过读全库的时间涟漪。响应不再等这些写盘/涟漪。
+    if touched_ids:
+        asyncio.create_task(rt.bucket_mgr.touch_many(touched_ids, ripple=False))
 
     # --- 检索结果 < 3 时 40% 概率随机浮现 ---
     if len(matches) < 3 and random.random() < 0.4:

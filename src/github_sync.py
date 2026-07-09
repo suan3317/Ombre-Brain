@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -58,6 +59,9 @@ class GitHubSync:
         self.last_error: str = ""
         self.last_count: int = 0
         self.is_validated: bool = False   # validate() 成功后置 True
+        # A3：连续失败计数。自动备份可能连挂几次而用户毫无察觉（以为有备份其实没有）。
+        # 每次成功归零、每次失败 +1，供诊断面板判断要不要升级为醒目告警。
+        self.consecutive_failures: int = 0
 
     # --------------------------------------------------------
     # 公开接口
@@ -79,11 +83,13 @@ class GitHubSync:
             self.last_status = "ok"
             self.last_error = ""
             self.last_count = count
+            self.consecutive_failures = 0
             return {"ok": True, "uploaded": count}
         except Exception as e:
             self.last_status = "error"
             self.last_error = str(e)
-            logger.error(f"[github_sync] sync failed: {e}")
+            self.consecutive_failures += 1
+            logger.error(f"[github_sync] sync failed (连续 {self.consecutive_failures} 次): {e}")
             return {"ok": False, "error": str(e)}
 
     async def import_from_github(self, buckets_dir: str) -> dict[str, Any]:
@@ -160,8 +166,21 @@ class GitHubSync:
                         else:
                             data = (bj.get("content", "") or "").encode("utf-8")
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with open(dest, "wb") as f:
-                            f.write(data)
+                        # 原子写：导入是覆盖本地记忆的操作，写到一半被中断绝不能留半截文件。
+                        _tmp = f"{dest}.{uuid.uuid4().hex}.tmp"
+                        try:
+                            with open(_tmp, "wb") as f:
+                                f.write(data)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.replace(_tmp, dest)
+                        except Exception:
+                            if os.path.exists(_tmp):
+                                try:
+                                    os.remove(_tmp)
+                                except OSError:
+                                    pass
+                            raise
                         imported += 1
                     except Exception as e:
                         skipped += 1
@@ -226,6 +245,7 @@ class GitHubSync:
             "last_error": self.last_error,
             "last_count": self.last_count,
             "is_validated": self.is_validated,
+            "consecutive_failures": self.consecutive_failures,
         }
 
     # --------------------------------------------------------

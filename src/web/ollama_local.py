@@ -261,10 +261,38 @@ def _extract_zst(path: str, dest: str) -> bool:
         return False
 
 
+# 运行时下载的是**可执行安装器**（Win 直接静默运行、Linux/mac 解出二进制），
+# 所以下载源必须严格约束。默认只信官方 ollama 与 GitHub Releases 的分发域。
+# 自定义 mirror（如 GFW 下的 GitHub 代理）确有正当需求 —— 但必须由部署者显式
+# 开 OMBRE_ALLOW_UNTRUSTED_MIRROR=1 主动承担风险，绝不默认放行任意主机。
+_TRUSTED_DOWNLOAD_HOSTS = (
+    "ollama.com",
+    "github.com",
+    "githubusercontent.com",   # objects.githubusercontent.com：GitHub Release 资产实际落点
+)
+
+
+def _host_is_trusted(host: str) -> bool:
+    host = (host or "").lower().split(":", 1)[0].strip(".")
+    return any(host == h or host.endswith("." + h) for h in _TRUSTED_DOWNLOAD_HOSTS)
+
+
+def _allow_untrusted_mirror() -> bool:
+    return os.environ.get("OMBRE_ALLOW_UNTRUSTED_MIRROR", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _validate_download_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("download URL must be http(s)")
+    if not _host_is_trusted(parsed.hostname or ""):
+        if not _allow_untrusted_mirror():
+            raise ValueError(
+                f"下载主机不在可信白名单：{parsed.hostname!r}。"
+                f"只信任 {', '.join(_TRUSTED_DOWNLOAD_HOSTS)}；"
+                f"如确需自定义镜像，请在部署环境设置 OMBRE_ALLOW_UNTRUSTED_MIRROR=1 后重试。"
+            )
+        logger.warning(f"[ollama-install] 使用非白名单下载主机（已由 OMBRE_ALLOW_UNTRUSTED_MIRROR 放行）：{parsed.hostname}")
     return url
 
 
@@ -288,6 +316,32 @@ def _download(url: str, dest: str) -> None:
     _install_state["percent"] = 100.0
 
 
+# 各系统安装产物的「魔数」（文件头），执行/解压前用来确认下到的是真东西，
+# 而不是镜像返回的 200 HTML 错误页或半截文件（那些被直接运行/解压很危险）。
+_ARTIFACT_MAGICS = {
+    "windows": (b"MZ",),                    # PE 可执行（安装器）
+    "macos": (b"PK\x03\x04", b"PK\x05\x06"),  # zip
+    "linux": (b"\x28\xB5\x2F\xFD",),         # zstd（.tar.zst）
+}
+_ARTIFACT_MIN_BYTES = 100 * 1024            # <100KB 基本可判定是错误页/截断
+
+
+def _verify_downloaded_artifact(path: str, osk: str) -> None:
+    """执行/解压前校验下载产物：大小合理 + 文件头匹配。不符抛异常，中止安装。"""
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        raise RuntimeError(f"下载文件不可读：{e}")
+    if size < _ARTIFACT_MIN_BYTES:
+        raise RuntimeError(f"下载文件过小（{size} 字节），疑似错误页或未下全，已中止")
+    magics = _ARTIFACT_MAGICS.get(osk, ())
+    if magics:
+        with open(path, "rb") as f:
+            head = f.read(8)
+        if not any(head.startswith(m) for m in magics):
+            raise RuntimeError("下载文件的格式不对（文件头不匹配预期），疑似被劫持/损坏，已中止")
+
+
 def _install_run(osk: str, arch: str, mirror: str) -> None:
     """阻塞安装流程（在线程里）。任何失败都落到 _install_state.error + hint，不抛。"""
     global _install_state
@@ -301,6 +355,7 @@ def _install_run(osk: str, arch: str, mirror: str) -> None:
         if osk == "windows":
             exe = os.path.join(tmpdir, "OllamaSetup.exe")
             _download(url, exe)
+            _verify_downloaded_artifact(exe, osk)   # 执行前先确认是真的安装器
             _install_state.update(phase="installing", msg="静默安装中（per-user，无需管理员）…")
             # Ollama 的 Windows 安装器（Inno Setup）默认就装到 %LOCALAPPDATA%\Programs\Ollama，
             # per-user、不需管理员。静默装即可；不传 /CURRENTUSER 以免个别版本不允许覆盖而报错。
@@ -314,6 +369,7 @@ def _install_run(osk: str, arch: str, mirror: str) -> None:
         elif osk == "linux":
             tzst = os.path.join(tmpdir, "ollama.tar.zst")
             _download(url, tzst)
+            _verify_downloaded_artifact(tzst, osk)   # 解压前先确认是真的 zstd 包
             _install_state.update(phase="extracting", msg="解压到用户目录（无需 sudo）…")
             root = _user_install_root()
             os.makedirs(root, exist_ok=True)
@@ -329,6 +385,7 @@ def _install_run(osk: str, arch: str, mirror: str) -> None:
         elif osk == "macos":
             zp = os.path.join(tmpdir, "Ollama-darwin.zip")
             _download(url, zp)
+            _verify_downloaded_artifact(zp, osk)   # 解压前先确认是真的 zip
             _install_state.update(phase="extracting", msg="解压 App 到用户目录…")
             root = _user_install_root()
             os.makedirs(root, exist_ok=True)

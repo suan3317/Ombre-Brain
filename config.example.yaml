@@ -148,12 +148,6 @@ bucket_type_defaults:
   plan:
     weight: 0.5
 
-# --- Obsidian wikilinks / Obsidian 双链自动注入 ---
-wikilink:
-  enabled: true
-  use_tags: false
-  use_domain: true
-  use_auto_keywords: true
-  auto_top_k: 4
-  min_keyword_len: 3
-  exclude_keywords: []
+# --- Deprecated: Obsidian wikilinks auto injection / 已废弃 ---
+# wikilink 自动注入已禁用；OB 只读取正文里的 [[wikilink]] 做网络图。
+# 旧版 config.yaml 中残留的 wikilink.* 配置会被忽略。

@@ -53,16 +53,25 @@ def register(mcp) -> None:
     async def auth_login(request: Request) -> Response:
         """Login with password."""
         from starlette.responses import JSONResponse
+        retry = sh._login_retry_after(request)
+        if retry:
+            return JSONResponse(
+                {"error": f"尝试过于频繁，请 {retry} 秒后再试"},
+                status_code=429,
+                headers={"Retry-After": str(retry)},
+            )
         try:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         password = body.get("password", "")
         if sh._verify_any_password(password):
+            sh._record_login_success(request)
             token = sh._create_session()
             resp = JSONResponse({"ok": True})
             sh._set_session_cookie(resp, token, request)
             return resp
+        sh._record_login_failure(request)
         return JSONResponse({"error": "密码错误"}, status_code=401)
 
     @mcp.custom_route("/auth/logout", methods=["POST"])
@@ -119,6 +128,13 @@ def register(mcp) -> None:
             return JSONResponse({"error": "当前使用环境变量密码，无法通过安全问题重置"}, status_code=400)
         if not sh._load_auth_data().get("security_answer_hash"):
             return JSONResponse({"error": "未设置安全问题，无法使用急救模式"}, status_code=400)
+        retry = sh._login_retry_after(request)
+        if retry:
+            return JSONResponse(
+                {"error": f"尝试过于频繁，请 {retry} 秒后再试"},
+                status_code=429,
+                headers={"Retry-After": str(retry)},
+            )
         try:
             body = await request.json()
         except Exception:
@@ -126,7 +142,9 @@ def register(mcp) -> None:
         answer = body.get("answer", "")
         new_pwd = body.get("new_password", "").strip()
         if not sh._verify_security_answer(answer):
+            sh._record_login_failure(request)
             return JSONResponse({"error": "答案不正确"}, status_code=401)
+        sh._record_login_success(request)
         if len(new_pwd) < 6:
             return JSONResponse({"error": "新密码不能少于6位"}, status_code=400)
         sh._save_password_hash(new_pwd, keep_qa=True)

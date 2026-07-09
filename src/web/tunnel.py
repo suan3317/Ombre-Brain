@@ -68,7 +68,8 @@ def _start_tunnel(token: str) -> tuple[bool, str]:
         return True, "already running"
     cf = shutil.which("cloudflared")
     if not cf:
-        return False, "cloudflared 未安装，请在 Dockerfile 中添加或手动安装"
+        return False, ("cloudflared 未安装（镜像可能以 --build-arg INSTALL_CLOUDFLARED=0 构建）。"
+                       "重新构建时去掉该参数，或手动安装 cloudflared 后再用隧道管理。")
     try:
         _tunnel_last_error = ""
         _tunnel_proc = _subprocess.Popen(

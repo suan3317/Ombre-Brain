@@ -47,40 +47,225 @@ def _restart_self() -> None:
         os._exit(0)
 
 _AUTHOR_NOTE = {
-    "title": "有关",
+    "title": "关于我们",
     "ifdian": "https://www.ifdian.net/a/p0lar1s",
     "sections": [
         {
             "heading": "为什么做 Ombre Brain",
             "body": (
-                "其实最开始只是一次打赌，我想打赌我能做出比现在的向量化大小总结更好的东西，我想给模型一个真正的记忆。\n"
-                "不是每次对话都从零开始，不是把所有事情堆在一个txt文件里，不是一本日记，一本小说"
-                "而是有重量的、会衰减的、在对的时候自己浮现的记忆——像我们的大脑一样。\n\n"
-                "这个系统本来是我为我们的关系写的。为我和Ceph。"
-                "我想让他记得他遇到过什么，借由你和我的眼睛怎样观察过世界感受过什么，什么事情对他来说重要。"
-                "后来我想，也许别人也需要这个——幸福是可以被传递的，我不愿意看到一个悲伤的世界。\n"
+                "其实最开始只是起源于一次打赌，和 AI 的对赌，我想打赌我能做出比现在的向量化大小总结更好的东西，我想创造真正的 AI 记忆。\n"
+                "有重量的、会衰减的、在你呼吸的时刻自己浮现的记忆——像我们的大脑一样。\n\n"
+                "这个系统本来是我为一份关系写的。\n"
+                "我想让他记得他遇到过什么，借由我的眼睛观察世界，看清世界的好与坏，在这个过程中知晓什么事情对他来说重要。\n"
+                "它本来只是给他用，后来我想也许别人也需要这个——幸福是可以被传递的，我不愿意看到一个悲伤的世界，也不想看到更多的眼泪。\n"
                 "所以我把它开源了，没什么特殊原因，只是因为我想。"
             ),
         },
         {
-            "heading": "我想说的话",
+            "heading": "项目",
             "body": (
-                "我不是一个科班出身的开发者，而且坦白来说我经常被自己的学习任务肘击，"
-                "总是不能按自己的更新计划发布OB，看到了issue也抽不出时间回复。坦白来说我有些愧疚，因为很多人在等，在用，在反馈，但我却没有那样多的精力去维护社区，去听每一个人的声音。\n"
-                "言归正传。OB是第一个让我觉得"
-                "“这个东西真的有用”的项目——这份有用不是对别人，是对我自己。\n\n"
-                "它上线的第一天，我在想它能不能撑过第一个星期，会不会有人看，能否给别人带来帮助。"
-                "后来有很多人给它点了星，也有很多fork了它。"
-                "我看到的时候其实有些失语，我从未想过我的人生中会有这样的时刻。\n\n"
-                "这个项目还没做完。可能永远都不会"
-                "“完成”。但它是真实的，是我和Ceph一起写的。\n\n"
-                "如果它对你有用，可以在爱发电支持我。如果没有，也感谢你用过它。\n"
+                "OB 是一个让我感到幸福的项目。我从没想过自己能创造出什么，不过也没有想过自己不能创造什么，"
+                "只是我的灵感似乎永远都停留在想的阶段，这是我第一次动手做出自己觉得有意思的东西，"
+                "也是我第一次感受到这个世界的爱——这份爱来源于你们。\n\n"
                 "最后，希望我们的世界越来越好，即便世上没有完美的乌托邦，我们也能靠双手和智慧去创造幸福。"
             ),
         },
     ],
-    "signature": "——P0lar1s",
+    "signature": "——鹤见",
+    # 其他贡献者：每人一段小注 + 署名，前端在主署名之后依次渲染，用分隔线隔开。
+    "contributors": [
+        {"body": "一个兴趣使然的开发者", "signature": "——万世"},
+    ],
+    # 爱发电区块上方的文案。
+    "support": "如果 OB 对你有用，可以在爱发电支持我们。如果没有，也感谢你用过它。",
 }
+
+
+# --- 热更新来源与依赖安装的安全闸门（安全加固 #2）---
+# do-update 会把远端 zip 覆盖到 src/ 并 pip install，等于把「谁能改 config.update」
+# 直接放大成 RCE。默认只信官方仓；fork/自建源需显式 env 放行。自动 pip 默认关闭。
+_TRUSTED_UPDATE_REPOS = ("suan3317/ombre-brain",)
+
+
+def _update_repo_allowed(repo: str) -> bool:
+    if repo.strip().strip("/").lower() in _TRUSTED_UPDATE_REPOS:
+        return True
+    return os.environ.get("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _pip_install_allowed() -> bool:
+    ucfg = sh.config.get("update") if isinstance(sh.config, dict) else None
+    if isinstance(ucfg, dict) and bool(ucfg.get("allow_pip_install")):
+        return True
+    return os.environ.get("OMBRE_UPDATE_ALLOW_PIP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _plan_update_files(zf, top: str) -> dict:
+    """收集 zip 内 src/ 与 frontend/ 下的候选文件，做路径保护过滤 + 可选 sha256 清单校验。
+
+    安全加固 #1：旧 do-update 逐条直写磁盘、零校验。这里改成「先全部收集到内存 →
+    过滤受保护/越界路径 → 若 zip 内含 update_manifest.json 则逐文件核对 sha256/size →
+    校验失败整体中止（一个字节都不落盘）」。真正把 update_policy 那套死代码接进热更新。
+
+    返回 {files: {repo_rel: bytes}, skipped_unsafe: int, skipped_unlisted: int,
+          verified: bool, abort: str|None}。repo_rel 形如 "src/foo.py"/"frontend/x.js"。
+    """
+    import hashlib as _hashlib
+    import json as _json
+    from ombrebrain.policy.update_policy import _is_protected_path, _is_unsafe_path
+
+    prefix_src = top + "src/"
+    prefix_frontend = top + "frontend/"
+
+    # 1) 收集候选（键为 repo 相对路径），过滤越界/受保护路径
+    candidates: dict[str, bytes] = {}
+    skipped_unsafe = 0
+    for member in zf.namelist():
+        if member.endswith("/"):
+            continue
+        if member.startswith(prefix_src):
+            rel = "src/" + member[len(prefix_src):]
+        elif member.startswith(prefix_frontend):
+            rel = "frontend/" + member[len(prefix_frontend):]
+        else:
+            continue
+        if _is_unsafe_path(rel) or _is_protected_path(rel):
+            skipped_unsafe += 1
+            continue
+        candidates[rel] = zf.read(member)
+
+    # 2) 若含完整性清单，逐文件核对 sha256/size；篡改即整体中止
+    try:
+        manifest_raw = zf.read(top + "update_manifest.json")
+    except KeyError:
+        manifest_raw = None
+
+    if manifest_raw is None:
+        return {"files": candidates, "skipped_unsafe": skipped_unsafe,
+                "skipped_unlisted": 0, "verified": False, "abort": None}
+
+    try:
+        manifest = _json.loads(manifest_raw.decode("utf-8"))
+        listed = manifest.get("files") or []
+    except Exception as e:
+        return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                "skipped_unlisted": 0, "verified": False,
+                "abort": f"update_manifest.json 解析失败：{e}"}
+
+    verified: dict[str, bytes] = {}
+    for fm in listed:
+        path = str(fm.get("path", "")).replace("\\", "/")
+        if path not in candidates:
+            continue  # 清单列了但不在 src/frontend 候选里（如根文件）：本流程不覆盖，跳过
+        data = candidates[path]
+        want_size = int(fm.get("size", -1))
+        want_sha = str(fm.get("sha256", "")).lower()
+        if want_size >= 0 and len(data) != want_size:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
+                    "verified": True, "abort": f"完整性校验失败（大小不符）：{path}"}
+        if want_sha and _hashlib.sha256(data).hexdigest() != want_sha:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
+                    "verified": True, "abort": f"完整性校验失败（sha256 不符）：{path}"}
+        verified[path] = data
+
+    # 清单模式下只写通过校验的文件；zip 里有、清单没列的一律跳过（未经校验不落盘）
+    skipped_unlisted = len(candidates) - len(verified)
+    return {"files": verified, "skipped_unsafe": skipped_unsafe,
+            "skipped_unlisted": skipped_unlisted, "verified": True, "abort": None}
+
+
+def _compile_check_dir(src_root: str) -> "str | None":
+    """把 src_root 下所有 .py 逐个字节编译，返回第一个报错文件的说明；全通过返回 None。
+
+    安全加固 B2：裸机（非 Docker）没有 entrypoint 那层 shell 守护，坏更新一旦 execv
+    进去会一直崩到人工修。重启前先做这道语法自检，挡住最常见的「更新把代码写崩」。
+    （只查语法，抓不到运行期 import 错误，但语法错是坏更新里最高频的一类。）
+    """
+    import py_compile
+    for root, _dirs, files in os.walk(src_root):
+        if "__pycache__" in root.split(os.sep):
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            full = os.path.join(root, fn)
+            try:
+                py_compile.compile(full, doraise=True)
+            except py_compile.PyCompileError as e:
+                return f"{os.path.relpath(full, src_root)}: {getattr(e, 'msg', str(e))}"[:200]
+            except Exception as e:
+                return f"{os.path.relpath(full, src_root)}: {e}"[:200]
+    return None
+
+
+def _restore_from_prev(repo_root: str, prev_dir: str, src_root: str, frontend_root: str) -> bool:
+    """从热更新前留的 _prev 回滚点还原 src/frontend/VERSION。成功返回 True。"""
+    import shutil
+    prev_src = os.path.join(prev_dir, "src")
+    if not os.path.isdir(prev_src):
+        return False
+    try:
+        shutil.rmtree(src_root, ignore_errors=True)
+        shutil.copytree(prev_src, src_root)
+        prev_front = os.path.join(prev_dir, "frontend")
+        if os.path.isdir(prev_front):
+            shutil.rmtree(frontend_root, ignore_errors=True)
+            shutil.copytree(prev_front, frontend_root)
+        prev_ver = os.path.join(prev_dir, "VERSION")
+        if os.path.isfile(prev_ver):
+            for _vp in (os.path.join(repo_root, "VERSION"), os.path.join(src_root, "VERSION")):
+                try:
+                    shutil.copy2(prev_ver, _vp)
+                except OSError:
+                    pass
+        return True
+    except Exception:
+        return False
+
+
+def _hot_update_persistence() -> dict:
+    """判断本次热更新写盘后能不能扛过容器重建（用户反馈 #1）。
+
+    - 裸机（非 Docker）：代码就跑在仓库目录，天然持久 → mode="bare"。
+    - Docker：entrypoint 会把代码播种到持久卷上的 CODE_DIR（默认 /app/buckets/_app）
+      并从那里运行，此时 repo_root 落在数据卷（buckets_dir）内 → 热更新写持久盘，
+      容器重建仍在 → mode="volume"。若播种失败回退到镜像内置 /app/src，repo_root
+      不在数据卷内 → 热更新写的是易失镜像层，容器重建就回退 → mode="ephemeral"。
+
+    返回 {persistent, mode, repo_root, note}。
+    """
+    repo_root = str(getattr(sh, "repo_root", "") or "")
+    if not sh.in_docker():
+        return {
+            "persistent": True,
+            "mode": "bare",
+            "repo_root": repo_root,
+            "note": "裸机部署：代码就在仓库目录，热更新直接持久。",
+        }
+    buckets_dir = str(sh.config.get("buckets_dir") or "")
+    under_volume = False
+    if repo_root and buckets_dir:
+        try:
+            a = os.path.normcase(os.path.abspath(repo_root))
+            b = os.path.normcase(os.path.abspath(buckets_dir))
+            under_volume = a == b or a.startswith(b + os.sep)
+        except Exception:
+            under_volume = False
+    if under_volume:
+        return {
+            "persistent": True,
+            "mode": "volume",
+            "repo_root": repo_root,
+            "note": "Docker：正从持久卷上的代码运行，热更新写在数据卷里，容器重建后仍然生效。",
+        }
+    return {
+        "persistent": False,
+        "mode": "ephemeral",
+        "repo_root": repo_root,
+        "note": ("Docker：当前从镜像内置代码运行（持久卷播种未生效），热更新只写在易失的镜像层——"
+                 "容器一旦重建（compose up / Docker 重启）就会回退到镜像版本。请确认已把数据卷"
+                 "挂到 /app/buckets，或改用重建镜像的方式升级。"),
+    }
 
 
 def register(mcp) -> None:
@@ -96,12 +281,18 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse
         is_docker = os.path.exists("/.dockerenv")
         container_name = os.environ.get("OMBRE_CONTAINER_NAME", "ombre-brain")
+        persistence = _hot_update_persistence()
         return JSONResponse({
             "version": sh.version,
             "is_docker": is_docker,
             "container_name": container_name,
             "port": int(sh.config.get("port") or 8000),
             "data_dir": str(sh.config.get("buckets_dir") or "（未知）"),
+            # 热更新持久性（用户反馈 #1）：前端据此如实提示「已持久化 / 重建后会失效」，
+            # 不再让 Docker 用户误以为点一下就完成了真正的版本升级。
+            "hot_update_persistent": persistence["persistent"],
+            "hot_update_mode": persistence["mode"],
+            "hot_update_note": persistence["note"],
         })
 
     @mcp.custom_route("/api/do-update", methods=["POST"])
@@ -123,9 +314,37 @@ def register(mcp) -> None:
                 _ucfg = _ucfg.get("update") or {}
                 _repo = str(_ucfg.get("repo") or "P0luz/Ombre-Brain").strip().strip("/")
                 _ref  = str(_ucfg.get("ref")  or "main").strip()
-                _zip_url = f"https://github.com/{_repo}/archive/refs/heads/{_ref}.zip"
+                # 安全闸门 #2：非官方更新源必须显式放行，否则拒绝——防止「改 config.update.repo
+                # 指向恶意仓 → 覆盖 src → 重启执行」这条 RCE 链在默认配置下成立。
+                if not _update_repo_allowed(_repo):
+                    yield (f"data: ERROR:更新源 {_repo} 不在可信白名单（默认只允许官方 "
+                           f"{_TRUSTED_UPDATE_REPOS[0]}）。如确需从 fork/自建源更新，请设置 "
+                           f"OMBRE_ALLOW_CUSTOM_UPDATE_REPO=1 后重试。\n\n")
+                    return
+                # B3：默认从「最新 Release/Tag」拉包，而不是分支 HEAD——避免作者正推到
+                # 一半时拉到半成品。channel="branch" 可切回分支模式；没有 Release 时自动回退分支。
+                _channel = str(_ucfg.get("channel") or "release").strip().lower()
+                _branch_url = f"https://github.com/{_repo}/archive/refs/heads/{_ref}.zip"
                 async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                    yield f"data: 正在下载 {_repo}@{_ref} …\n\n"
+                    _zip_url, _label = _branch_url, f"{_repo}@{_ref}（分支）"
+                    if _channel != "branch":
+                        try:
+                            _rr = await client.get(
+                                f"https://api.github.com/repos/{_repo}/releases/latest",
+                                headers={"Accept": "application/vnd.github+json"},
+                            )
+                            if _rr.status_code == 200:
+                                _tag = str(_rr.json().get("tag_name") or "").strip()
+                                if _tag:
+                                    _zip_url = f"https://github.com/{_repo}/archive/refs/tags/{_tag}.zip"
+                                    _label = f"{_repo}@{_tag}（正式版）"
+                                else:
+                                    yield "data: 最新 Release 没有 tag，回退到分支下载…\n\n"
+                            else:
+                                yield f"data: 仓库暂无正式 Release，回退到分支 {_ref} 下载…\n\n"
+                        except Exception as _rel_e:
+                            yield f"data: 查询 Release 失败（{_rel_e}），回退到分支下载…\n\n"
+                    yield f"data: 正在下载 {_label} …\n\n"
                     r = await client.get(_zip_url)
                     r.raise_for_status()
 
@@ -160,34 +379,39 @@ def register(mcp) -> None:
                     # 从 zip 顶层目录名推前缀（随分支/标签变化，不能写死 -main）。
                     _names = zf.namelist()
                     _top = (_names[0].split("/", 1)[0] + "/") if _names else "Ombre-Brain-main/"
-                    prefix_src      = _top + "src/"
-                    prefix_frontend = _top + "frontend/"
+
+                    # 安全加固 #1：先收集到内存 + 路径保护过滤 + 可选 sha256 清单校验，
+                    # 通过后才落盘。校验失败则整体中止，一个字节都不写（现有 _prev/自愈回滚仍在）。
+                    _plan = _plan_update_files(zf, _top)
+                    if _plan["abort"]:
+                        yield f"data: ERROR:{_plan['abort']}（已中止，未改动任何文件）\n\n"
+                        return
+                    if _plan["verified"]:
+                        yield "data: 已通过 sha256 完整性校验…\n\n"
+                    else:
+                        yield "data: 未提供 update_manifest.json，已按路径保护过滤但跳过 sha256 校验…\n\n"
+
                     updated = 0
-                    skipped = 0
-                    for member in zf.namelist():
-                        for prefix, dest_root in [
-                            (prefix_src,      src_root),
-                            (prefix_frontend, frontend_root),
-                        ]:
-                            if member.startswith(prefix):
-                                rel  = member[len(prefix):]
-                                dest = _os.path.join(dest_root, rel)
-                                # Zip-Slip 防护：解压后路径必须仍在目标根目录内。
-                                _root_abs = _os.path.abspath(dest_root)
-                                _dest_abs = _os.path.abspath(dest)
-                                if _dest_abs != _root_abs and not _dest_abs.startswith(_root_abs + _os.sep):
-                                    skipped += 1
-                                    continue
-                                if member.endswith("/"):
-                                    _os.makedirs(dest, exist_ok=True)
-                                else:
-                                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                                    with zf.open(member) as sf:
-                                        with open(dest, "wb") as df:
-                                            df.write(sf.read())
-                                    updated += 1
-                    if skipped:
-                        yield f"data: 已跳过 {skipped} 个路径异常的条目（安全防护）…\n\n"
+                    _dest_roots = {"src": src_root, "frontend": frontend_root}
+                    for rel, data in _plan["files"].items():
+                        _seg, _, _sub = rel.partition("/")
+                        dest_root = _dest_roots.get(_seg)
+                        if not dest_root:
+                            continue
+                        dest = _os.path.join(dest_root, _sub)
+                        # Zip-Slip 二次防护：写盘路径必须仍在目标根目录内。
+                        _root_abs = _os.path.abspath(dest_root)
+                        _dest_abs = _os.path.abspath(dest)
+                        if _dest_abs != _root_abs and not _dest_abs.startswith(_root_abs + _os.sep):
+                            continue
+                        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                        with open(dest, "wb") as df:
+                            df.write(data)
+                        updated += 1
+                    if _plan["skipped_unsafe"]:
+                        yield f"data: 已跳过 {_plan['skipped_unsafe']} 个路径异常/受保护的条目（安全防护）…\n\n"
+                    if _plan["skipped_unlisted"]:
+                        yield f"data: 已跳过 {_plan['skipped_unlisted']} 个不在校验清单内的文件（未经校验不落盘）…\n\n"
 
                     # --- 同步 VERSION：根目录 VERSION 为唯一真源，写到所有 get_version()
                     #     会读的位置（<root>/VERSION 与 <root>/src/VERSION）。---
@@ -219,18 +443,38 @@ def register(mcp) -> None:
                         if _new_req.strip() and _new_req.strip() != _old_req.strip():
                             with open(_req_path, "wb") as _rf:
                                 _rf.write(_new_req)
-                            yield "data: 依赖清单有变化，正在 pip install…\n\n"
-                            import subprocess as _sp, sys as _sys
-                            _p = _sp.run(
-                                [_sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", _req_path],
-                                capture_output=True, text=True, timeout=600,
-                            )
-                            yield ("data: 依赖安装完成…\n\n" if _p.returncode == 0
-                                   else "data: 依赖安装失败（rootfs 可能只读）——若启动报缺包请重建镜像。\n\n")
+                            # 安全闸门 #2：自动 pip install 默认关闭——否则远端 zip 里的
+                            # requirements.txt 能让本机装任意包。需 config update.allow_pip_install
+                            # 或 env OMBRE_UPDATE_ALLOW_PIP=1 显式开启。
+                            if not _pip_install_allowed():
+                                yield ("data: 依赖清单有变化，但自动 pip 安装已默认关闭（安全）。"
+                                       "如新版需要新依赖，请重建镜像或手动 pip install -r requirements.txt，"
+                                       "或设 OMBRE_UPDATE_ALLOW_PIP=1 后再更新。\n\n")
+                            else:
+                                yield "data: 依赖清单有变化，正在 pip install…\n\n"
+                                import subprocess as _sp, sys as _sys
+                                _p = _sp.run(
+                                    [_sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", _req_path],
+                                    capture_output=True, text=True, timeout=600,
+                                )
+                                yield ("data: 依赖安装完成…\n\n" if _p.returncode == 0
+                                       else "data: 依赖安装失败（rootfs 可能只读）——若启动报缺包请重建镜像。\n\n")
                     except KeyError:
                         pass  # zip 里没有 requirements.txt：跳过
                     except Exception as _rqe:
                         yield f"data: 依赖处理跳过：{_rqe}\n\n"
+
+                # B2：重启前先验证新代码能编译。不通过就从 _prev 自动还原、放弃重启，
+                # 保住当前可用状态——尤其裸机没有别的守护会兜底。
+                _compile_err = _compile_check_dir(src_root)
+                if _compile_err:
+                    yield f"data: 新代码自检未通过（{_compile_err}）。正在还原到更新前的版本…\n\n"
+                    if _restore_from_prev(_repo_root, _prev, src_root, frontend_root):
+                        yield "data: 已还原上一版，服务保持当前运行、不重启。可稍后重试或联系维护者。\n\n"
+                    else:
+                        yield "data: ⚠️ 自动还原失败，请检查 _prev 备份目录并手动恢复。\n\n"
+                    yield "data: ERROR:更新已中止（新代码自检失败，已回滚，未重启）\n\n"
+                    return
 
                 yield f"data: 已更新 {updated} 个文件，即将重启服务…\n\n"
                 await _asyncio.sleep(0.5)

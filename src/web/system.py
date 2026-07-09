@@ -96,16 +96,33 @@ async def build_system_diagnostics() -> dict[str, Any]:
 
     buckets_dir = str(cfg.get("buckets_dir") or "").strip()
     writable, storage_error = _probe_writable_dir(buckets_dir)
+    persistence = sh.data_dir_persistence(buckets_dir)
+    if not writable:
+        storage_status = "error"
+        storage_msg = f"数据目录不可用：{storage_error}"
+        storage_action = "检查 buckets_dir / OMBRE_VAULT_DIR 挂载与写权限"
+    elif not persistence["persistent"]:
+        # 可写但不持久：容器重建即全丢，比不可写更隐蔽也更致命 → 高亮为 error。
+        storage_status = "error"
+        storage_msg = "数据目录可写，但没挂到持久卷——容器重建会丢记忆！"
+        storage_action = "在 docker-compose 里把数据目录挂到命名卷或宿主机目录"
+    else:
+        storage_status = "ok"
+        storage_msg = "数据目录存在、可写、且在持久位置"
+        storage_action = ""
     checks.append(_check(
         "storage",
         "数据目录",
-        "ok" if writable else "error",
-        "数据目录存在且可写" if writable else f"数据目录不可用：{storage_error}",
+        storage_status,
+        storage_msg,
         details={
             "buckets_dir": buckets_dir,
             "in_docker": sh.in_docker(),
+            "persistent": persistence["persistent"],
+            "persistence_mode": persistence["mode"],
+            "persistence_note": persistence["note"],
         },
-        action="检查 buckets_dir / OMBRE_VAULT_DIR 挂载与写权限" if not writable else "",
+        action=storage_action,
     ))
 
     try:
@@ -206,11 +223,19 @@ async def build_system_diagnostics() -> dict[str, Any]:
     gh_inst = sh.github_sync_instance
     if gh_inst is None:
         gh_repo = str(gh_cfg.get("repo") or "").strip()
+        # 没配异地备份时，风险高低取决于本地这份是否持久：
+        # 记忆目录不持久（Docker 未挂卷）+ 没备份 = 随时全丢 → error 级强提醒；
+        # 本地持久但只有一份 = 仍建议开备份（盘坏/换机找不回）→ warning。
+        only_copy_at_risk = not persistence["persistent"]
         checks.append(_check(
             "github",
             "GitHub 备份",
-            "warning",
-            "尚未配置 GitHub 同步" if not gh_repo else "GitHub 配置存在但运行时实例未创建",
+            "error" if only_copy_at_risk else "warning",
+            (
+                "还没配云端备份，而且本地这份也不持久——记忆随时可能全部丢失，请尽快开启备份"
+                if only_copy_at_risk else
+                "记忆目前只有本地一份，没有云端备份。建议开启 GitHub 备份，换电脑或磁盘损坏时也能找回"
+            ) if not gh_repo else "GitHub 配置存在但运行时实例未创建",
             details={
                 "configured": False,
                 "repo": gh_repo,
@@ -219,16 +244,24 @@ async def build_system_diagnostics() -> dict[str, Any]:
                 "token_set": _secret_is_set(gh_cfg.get("token", ""), "OMBRE_GITHUB_TOKEN"),
                 "auto_interval_minutes": int(gh_cfg.get("auto_interval_minutes") or 0),
             },
-            action="在 设置 -> GitHub 同步 中保存并验证" if gh_repo else "配置 GitHub 同步可作为备份",
+            action="在 设置 → GitHub 同步 里填仓库和 Token，开启云端备份" if not gh_repo else "在 设置 → GitHub 同步 中保存并验证",
         ))
     else:
         gh_status = gh_inst.status()
         last_status = gh_status.get("last_status", "idle")
         validated = bool(gh_status.get("is_validated"))
+        consecutive = int(gh_status.get("consecutive_failures") or 0)
+        last_sync = gh_status.get("last_sync")
         if last_status == "error":
-            status = "warning"
-            message = "最近一次 GitHub 同步失败"
-            action = "查看 GitHub 同步状态并重新验证"
+            # 连挂多次 = 用户很可能以为有备份其实没有 → 升级为醒目 error 并说清多久没成功。
+            if consecutive >= 3:
+                status = "error"
+                message = f"云端备份已连续失败 {consecutive} 次，可能一直没备份成功——请尽快检查"
+            else:
+                status = "warning"
+                message = "最近一次 GitHub 备份失败"
+            message += f"（上次成功：{last_sync}）" if last_sync else "（还没有过一次成功备份）"
+            action = "查看 GitHub 同步状态、点「验证」确认 Token/仓库是否还有效"
         elif not validated:
             status = "warning"
             message = "GitHub 同步已配置，但尚未验证权限"

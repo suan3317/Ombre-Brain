@@ -124,3 +124,66 @@ def test_safe_tar_extract_rejects_path_traversal(tmp_path):
 def test_ollama_download_rejects_non_http_url():
     with pytest.raises(ValueError):
         ollama_mod._validate_download_url("file:///tmp/ollama.tar.zst")
+
+
+def test_ollama_download_allows_trusted_hosts(monkeypatch):
+    monkeypatch.delenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", raising=False)
+    for url in (
+        "https://ollama.com/download/OllamaSetup.exe",
+        "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst",
+        "https://objects.githubusercontent.com/foo/ollama-linux-amd64.tar.zst",
+    ):
+        assert ollama_mod._validate_download_url(url) == url
+
+
+def test_ollama_download_rejects_untrusted_host_by_default(monkeypatch):
+    monkeypatch.delenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", raising=False)
+    with pytest.raises(ValueError):
+        ollama_mod._validate_download_url("https://evil.attacker.example/OllamaSetup.exe")
+    # 相似域名混淆也必须拒绝（后缀匹配不能被 github.com.evil.com 骗过）
+    with pytest.raises(ValueError):
+        ollama_mod._validate_download_url("https://github.com.evil.example/OllamaSetup.exe")
+
+
+def test_ollama_download_untrusted_host_allowed_via_optin(monkeypatch):
+    monkeypatch.setenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", "1")
+    url = "https://ghproxy.mycorp.internal/ollama/releases/ollama-linux-amd64.tar.zst"
+    assert ollama_mod._validate_download_url(url) == url
+
+
+def test_ollama_host_trust_matcher():
+    assert ollama_mod._host_is_trusted("ollama.com")
+    assert ollama_mod._host_is_trusted("objects.githubusercontent.com")
+    assert ollama_mod._host_is_trusted("GitHub.com")
+    assert not ollama_mod._host_is_trusted("github.com.evil.example")
+    assert not ollama_mod._host_is_trusted("notgithub.com")
+    assert not ollama_mod._host_is_trusted("")
+
+
+# --- C1：下载产物完整性校验（执行/解压前挡住错误页/损坏文件）---
+
+def test_artifact_verify_rejects_too_small(tmp_path):
+    p = tmp_path / "OllamaSetup.exe"
+    p.write_bytes(b"MZ" + b"\x00" * 100)  # 头对但太小
+    with pytest.raises(RuntimeError):
+        ollama_mod._verify_downloaded_artifact(str(p), "windows")
+
+
+def test_artifact_verify_rejects_wrong_magic(tmp_path):
+    p = tmp_path / "OllamaSetup.exe"
+    p.write_bytes(b"<html>404 Not Found</html>" + b"\x00" * (200 * 1024))  # 够大但头不对（HTML 错误页）
+    with pytest.raises(RuntimeError):
+        ollama_mod._verify_downloaded_artifact(str(p), "windows")
+
+
+def test_artifact_verify_accepts_valid(tmp_path):
+    big = b"\x00" * (200 * 1024)
+    cases = {
+        "windows": b"MZ" + big,
+        "linux": b"\x28\xB5\x2F\xFD" + big,
+        "macos": b"PK\x03\x04" + big,
+    }
+    for osk, data in cases.items():
+        p = tmp_path / f"art_{osk}"
+        p.write_bytes(data)
+        ollama_mod._verify_downloaded_artifact(str(p), osk)  # 不抛即通过

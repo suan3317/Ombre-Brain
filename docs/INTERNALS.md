@@ -321,9 +321,7 @@ feel 桶自身：
 
 签名：`pulse(include_archive=False)`
 
-返回：固化/动态/归档桶数、总 KB、衰减引擎状态、所有桶（带图标）的元数据摘要行。
-
-(已知局限：返回头部的统计行**不显示** `feel_count` / `plan_count` / `letter_count`，但底下的列表会列出这些桶——会让用户感到「数字对不上数量」。详见 §12 反逻辑点 1。)
+返回：固化/动态/归档桶数、feel/plan/letter 分项数量、总 KB、衰减引擎状态、所有桶（带图标）的元数据摘要行。
 
 ### 3.6 `dream` — 做梦自省
 
@@ -409,7 +407,7 @@ feel 桶自身：
 | `/api/settings/sampling` | GET / POST | 🔒 | iter 1.9：dashboard 的加权采样面板。GET 返回当前 `surfacing.sampling.{enabled,top_k,sample_k,temperature}`；POST 校验范围后热更新到内存 config（不写回 yaml） |
 | `/api/anchors` | GET | 🔒 | iter 2.0：列出所有 anchor 桶（按 `created` 升序），返回 `{ok, count, limit, anchors:[...]}` |
 | `/api/bucket/{id}/anchor` | POST | 🔒 | iter 2.0：toggle anchor 标记。Body 可传 `{value: bool}` 强制设置；不传则切换。已满 24 时返回 **409** + `{error, count, limit}` |
-| `/api/bucket/{id}` | DELETE | 🔒 | 硬删除，需 `?confirm=true` |
+| `/api/bucket/{id}` | DELETE | 🔒 | 删除到档案：移入 `archive/` 并写 `deleted_at`，需 `?confirm=true`；物理删除只走 `/api/buckets/purge` |
 | `/api/letters` | GET | 🔒 | 信件列表，支持 `?author=user\|claude` |
 | `/api/letter` | POST | 🔒 | Dashboard 写信入口 |
 | `/api/search?q=` | GET | 🔒 | 搜索 |
@@ -682,7 +680,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `surfacing.sampling.top_k` | `5` | 候选池大小（按衰减分取前 k） |
 | `surfacing.sampling.sample_k` | `2` | 从池里无放回抽 k 条返回 |
 | `surfacing.sampling.temperature` | `0.7` | 权重 = score^(1/temperature)；>1 更均匀，<1 更偏向高分桶 |
-| `wikilink.*` | （已废弃） | wikilink 自动注入已禁用，由 LLM prompt 直接生成 `[[]]` |
+| `wikilink.*` | （已废弃） | wikilink 自动注入已禁用，由 LLM prompt 直接生成 `[[]]`；`config.example.yaml` 不再给出可配置项 |
 
 ### 7.2 环境变量
 
@@ -888,25 +886,25 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 ## 12. 已知用户向反逻辑点
 
-> 这些点不是 bug，但用户/Claude 用起来会困惑。修复需要权衡，先记录。
+> 这些点是用户/Claude 用起来容易困惑的地方；已闭合的项保留为设计说明，未闭合项继续跟踪。
 
-1. **`pulse` 顶部统计行不显示 plan/letter/feel 数**。底下列表会列出这些桶，导致「数字对不上数量」。改动点：`server.py:pulse` 拼字符串处增加 `feel_count / plan_count / letter_count` 字段（`bucket_mgr.get_stats()` 已经返回，缺的只是显示）。
+1. **`pulse` 顶部统计行已显示 plan/letter/feel 数**。现在头部直接列出 `feel 桶` / `plan 桶` / `letter 桶`，不再出现「底下有桶但顶部数字对不上」。
 
 2. **README 与代码降级行为已对齐**（iter 2.0 doc-fix 闭合）。README 第三步与「常见问题」均改口为「无 key 时 hold/grow 仍能保存桶（自动兜底为「未分类」域，无打标、无向量），但 breath 浮现/检索阶段一旦触发脱水就会报错」。原冲突源自旧版 README 措辞「没有 API key 也能跑，只是脱水压缩功能不可用」与代码 `dehydrator.dehydrate()` 在 `api_available=False` 时直接 `RuntimeError` 的实情不符；现以代码实情为准。
 
 3. **`breath(domain="feel")` 文档说支持，但很多用户没意识到 `tags="feel"` 等价**。两条路径在 server.py:`breath` 顶部统一映射，已加在工具 docstring 里，但 dashboard 没暴露 feel 通道入口。
 
-4. **`grow` 短内容 < 30 字被静默走 hold 路径**，没有任何提示。用户传一句日记发现没被拆分会困惑。修复方向：返回串前加「（短内容，已直接保存为单桶）」标注。
+4. **`grow` 短内容 < 30 字走 hold 路径时已明确提示**。返回串会先说明「短内容已按 hold 路径保存为单条记忆，没有拆分」。
 
 5. **dream feel 历史折叠已实现**。iter 2.0 后 dream 末尾的 feel 历史段按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算，超出的老 feel 折叠为 60 字符单行摘要。原记录「dream 全量返回 feel 历史不限数量」问题已闭合。
 
-6. **`OMBRE_HOST_VAULT_DIR` 写入 .env 后无任何「需要重启」提示**。Dashboard 仅在 POST 响应里写了 note，但用户如果只看 UI 状态可能不会看到那段 JSON。修复方向：UI 上加 toast 提示。
+6. **`OMBRE_HOST_VAULT_DIR` 写入 .env 后已提示需要重启**。POST 返回 `restart_required/message`，Dashboard 保存成功后直接显示这句提示。
 
-7. **wikilink 配置项已废弃但仍在 `config.example.yaml`**。新用户会以为配 `wikilink.auto_top_k` 等参数有用，实际全被忽略。修复方向：从 example 删除整个 `wikilink:` 段，或注释掉并标 deprecated。
+7. **wikilink 配置项已废弃并从 `config.example.yaml` 移除 active stanza**。example 只保留 deprecated 说明，旧配置残留仍会被忽略。
 
-8. **`trace(resolved=1)` 与 `/api/bucket/{id}/resolve` 行为一致但提示不同**。CLI 端有「→ 已沉底，只在关键词触发时重新浮现」人话说明，REST 端只返回 `{ok: true}`。Dashboard 应自行渲染同样的提示。
+8. **`trace(resolved=1)` 与 `/api/bucket/{id}/resolve` 提示已统一**。两边共用 `resolved_hint()`，REST 返回 `message`，Dashboard 直接展示。
 
-9. **`/api/bucket/{id}` DELETE 需要 `?confirm=true`，但 archive POST 不需要**。同样是「移除一个桶」，DELETE 是硬删（不可逆）archive 是软删（可在文件系统手动恢复），semantics 没问题但用户容易混淆。Dashboard UI 应明确区分两个按钮。
+9. **Dashboard 已区分「归档」「删除到档案」「永久删除」**。单桶 DELETE 是移入 `archive/` 并写 `deleted_at`；真正物理删除只在清理模式的 `/api/buckets/purge` 中出现。
 
 10. **冷启动检测最多 2 个**。`importance >= 8` 的新桶超过 2 个时，第 3 个开始按普通衰减分排队，可能被压在 top-20 后随机洗牌。如果用户一次性钉选 5 条核心准则后又新建 3 个 importance=10 的事件桶，会感到「我刚建的核心事件没浮现」。
 

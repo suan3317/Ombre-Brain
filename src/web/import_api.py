@@ -119,6 +119,8 @@ def register(mcp) -> None:
             "ok": True,
             "value": value,
             "env_file": sh._project_env_path(),
+            "restart_required": True,
+            "message": "已保存 OMBRE_HOST_VAULT_DIR；需要重启容器/服务后挂载才会生效。",
             "note": "已写入 .env；需在宿主机执行 `docker compose down && docker compose up -d` 让新挂载生效。",
         })
 

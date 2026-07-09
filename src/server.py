@@ -335,6 +335,22 @@ mcp_extra = FastMCP(
 import web as _web
 import web._shared as _wsh
 _wsh.init(config)
+# 记忆持久性自检：容器里记忆目录若没挂持久卷，重建就全丢。开机就醒目告警，别让用户
+# 以为「存住了其实没有」。只提示不阻断（阻断会伤部署）。
+try:
+    _dp = _wsh.data_dir_persistence(config.get("buckets_dir", ""))
+    if not _dp["persistent"]:
+        logger.warning(
+            "=" * 60 + "\n"
+            "⚠️  记忆目录未挂载到持久卷：" + str(config.get("buckets_dir", "")) + "\n"
+            "    " + _dp["note"] + "\n"
+            "    （记忆比代码金贵：代码能重部署，记忆丢了找不回。请尽快修正挂载。）\n"
+            + "=" * 60
+        )
+    else:
+        logger.info(f"记忆目录持久性：{_dp['mode']} — {_dp['note']}")
+except Exception as _dpe:
+    logger.warning(f"数据目录持久性自检失败（不影响启动）：{_dpe}")
 # 注入业务引擎/版本/仓库根目录到 web 层（类比 tools/_runtime）。
 # 注意：embedding_engine 会被热重载替换 —— 待 embedding/config 路由迁到 web/ 时，
 # 替换处须同时写 _wsh.embedding_engine（目前这些路由仍在本文件、仍走 global）。
@@ -562,19 +578,20 @@ async def breath(
     max_results: Optional[int] = 0,
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
+    catalog: Optional[bool] = False,
 ) -> str:
-    """breath:呼吸/睁眼,检索并返回记忆桶(memory retrieval)。不传 query=返回权重最高的未解决记忆;传 query=按关键词+语义检索相关记忆。max_tokens=单次返回总 token 上限(默认 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 20,最大 50)。importance_min>=1=按重要度降序返回高重要度记忆。tags 逗号分隔 AND 过滤,tags=feel 与 domain=feel 等价,返回所有 feel 类记忆。 """
+    """breath:呼吸/睁眼,检索并返回记忆桶(memory retrieval)。不传 query=返回权重最高的未解决记忆;传 query=按关键词+语义检索相关记忆。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 20,最大 50)。importance_min>=1=按重要度降序返回高重要度记忆。tags 逗号分隔 AND 过滤,tags=feel 与 domain=feel 等价,返回所有 feel 类记忆。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
             valence=valence, arousal=arousal, max_results=max_results,
-            importance_min=importance_min, tags=tags,
+            importance_min=importance_min, tags=tags, catalog=catalog,
         ),
         op="breath",
         args={
             "query": query, "max_tokens": max_tokens, "domain": domain,
             "valence": valence, "arousal": arousal, "max_results": max_results,
-            "importance_min": importance_min, "tags": tags,
+            "importance_min": importance_min, "tags": tags, "catalog": catalog,
         },
     )
 
@@ -609,12 +626,14 @@ async def hold(
 
 
 @mcp.tool()
-async def grow(content: str) -> str:
-    """整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。"""
+async def grow(content: str = "", items: Optional[list] = None) -> str:
+    """整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
+
+    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。"""
     return await _with_notice(
-        _t_grow.dispatch(content),
+        _t_grow.dispatch(content, items=items),
         op="grow",
-        args={"content_len": len(content or "")},
+        args={"content_len": len(content or ""), "items": len(items or [])},
     )
 
 
@@ -680,7 +699,7 @@ async def release(bucket_id: str) -> str:
 
 @mcp_extra.tool()
 async def pulse(include_archive: Optional[bool] = False) -> str:
-    """返回记忆系统状态摘要:固化/动态/衰减/归档桶数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
+    """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
     return await _with_notice(
         _t_anchor.pulse(include_archive=include_archive),
         op="pulse",
@@ -1601,7 +1620,27 @@ if __name__ == "__main__":
         if _mcp_auth_required:
             logger.info("MCP OAuth middleware enabled / MCP OAuth 中间件已启用")
         else:
-            logger.info("MCP auth disabled (mcp_require_auth: false) — open access / MCP 认证已关闭，所有客户端可直连")
+            # 安全加固 #7：关掉鉴权 = /mcp 全裸奔，任何能连到端口的人都能读写全部记忆。
+            # 从 info 升级为显著 WARNING，避免用户无意识地把大脑暴露到公网。
+            logger.warning(
+                "=" * 60 + "\n"
+                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
+                "    12 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    本服务监听 0.0.0.0，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
+                "    或仅绑定 127.0.0.1 保护；仅在可信内网/本机自有前端场景才建议关闭鉴权。\n"
+                + "=" * 60
+            )
+        # 端口口径澄清（用户反馈：Docker 与裸机端口容易混淆）。容器内固定监听 8000，
+        # 对外端口由 host 映射（如 18001:8000）决定，改 host_port 不影响容器内监听；
+        # 裸机则直接监听本端口（默认 18001）。
+        if _wsh.in_docker():
+            logger.info(
+                f"Listening on :{OMBRE_PORT} INSIDE the container. "
+                f"外部访问端口由 host 映射决定（compose 里的 18001:{OMBRE_PORT}），"
+                f"改前端 host_port 不影响容器内监听。"
+            )
+        else:
+            logger.info(f"Listening on :{OMBRE_PORT} (bare-metal / 裸机默认 18001)")
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
     else:
         # stdio：工具已在启动入口处统一回灌进 mcp（12 个全暴露），这里直接跑。

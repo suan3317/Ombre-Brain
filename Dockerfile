@@ -17,16 +17,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install cloudflared + curl (for downloading cloudflared)
-# 安装 cloudflared（用于 Tunnel 一键管理功能）
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
-       -o /usr/local/bin/cloudflared \
-    && chmod +x /usr/local/bin/cloudflared \
-    && apt-get remove -y curl \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+# cloudflared（用于 Dashboard 的 Tunnel 一键管理）。
+# 用镜像自带的 python 直接从 GitHub Releases 下载（带重试），不装 curl、不跑
+# apt-get update —— 从根上避开 Debian 镜像源间歇性 502 导致的构建失败（用户反馈 #3）。
+# 不需要 Tunnel 的用户可 `docker build --build-arg INSTALL_CLOUDFLARED=0 ...` 完全跳过。
+ARG INSTALL_CLOUDFLARED=1
+COPY deploy/fetch_cloudflared.py /tmp/fetch_cloudflared.py
+RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
+        python /tmp/fetch_cloudflared.py /usr/local/bin/cloudflared \
+        && chmod +x /usr/local/bin/cloudflared; \
+    else \
+        echo "[build] INSTALL_CLOUDFLARED=0 → 跳过 cloudflared（Tunnel 一键管理将不可用）"; \
+    fi; \
+    rm -f /tmp/fetch_cloudflared.py
 
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）

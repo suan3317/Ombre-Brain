@@ -178,8 +178,22 @@ def register(mcp) -> None:
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
             return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        force = bool(body.get("force"))
         # 1) 导入前自动备份本地（合并覆盖会改动本地，留个后悔药）
         backup = _pre_import_backup(buckets_dir)
+        # 记忆安全闸门：备份没成功就默认不动本地记忆——覆盖不可逆，宁可拦下。
+        # 用户确认愿意冒险（force=true）才放行，并如实标注这次没有后悔药。
+        if not backup and not force:
+            return JSONResponse({
+                "ok": False,
+                "error": "导入前的本地备份没有成功，为避免覆盖后无法找回记忆，已取消本次导入。"
+                         "请检查数据目录是否可写、磁盘是否有空间后重试；确要强制导入可带 force=true。",
+                "backup_failed": True,
+            }, status_code=409)
         # 2) 从 GitHub 拉回
         result = await sh.github_sync_instance.import_from_github(buckets_dir)
         result["pre_import_backup"] = backup

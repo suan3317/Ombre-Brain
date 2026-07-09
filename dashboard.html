@@ -3830,7 +3830,7 @@ async function saveHostVault() {
     const d = await resp.json();
     if (resp.ok) {
       msg.style.color = 'var(--accent)';
-      msg.textContent = '已保存 → ' + (d.env_file || '.env') + '（需重启容器生效）';
+      msg.textContent = d.message || ('已保存 → ' + (d.env_file || '.env') + '（需重启容器生效）');
     } else {
       msg.style.color = 'var(--negative)';
       msg.textContent = d.error || '保存失败';
@@ -4139,7 +4139,7 @@ async function showDetail(id) {
         '<button onclick="bucketResolve(\'' + id + '\')" class="icon-btn">' + (meta.resolved ? '<i data-lucide="rotate-ccw"></i> 取消已解决' : '<i data-lucide="check"></i> 标记已解决') + '</button>' +
         '<button onclick="bucketForget(\'' + id + '\')" class="icon-btn">' + (meta.dont_surface ? '<i data-lucide="eye"></i> 重新允许浮现' : '<i data-lucide="moon-off"></i> 主动遗忘') + '</button>' +
         '<button onclick="bucketArchive(\'' + id + '\')" class="icon-btn"><i data-lucide="archive"></i> 归档</button>' +
-        '<button onclick="bucketDelete(\'' + id + '\')" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 彻底删除</button>' +
+        '<button onclick="bucketDelete(\'' + id + '\')" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 删除到档案</button>' +
       '</div>' +
       '<div class="detail-content">' + esc(b.content) + '</div>' +
       renderEditForm(id, Object.assign({}, meta, {_content_for_edit: b.content}));
@@ -4232,6 +4232,8 @@ async function bucketResolve(id) {
   try {
     var res = await fetch(BASE + '/api/bucket/' + id + '/resolve', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
+    var d = await res.json();
+    if (d.message) alert(d.message);
     await showDetail(id);
     loadBuckets();
   } catch (e) { alert('resolve 切换失败: ' + e.message); }
@@ -4248,8 +4250,8 @@ async function bucketArchive(id) {
 }
 
 async function bucketDelete(id) {
-  if (!confirm('这将彻底删除此记忆桶，文件不可恢复。确认删除？')) return;
-  if (!confirm('再次确认：你真的要永久删除吗？')) return;
+  if (!confirm('这会把此记忆桶移入删除档案，并从日常界面隐藏；文件仍保留在 archive/ 中。继续？')) return;
+  if (!confirm('再次确认：这不是物理抹除。彻底删除请使用清理模式。')) return;
   try {
     var res = await fetch(BASE + '/api/bucket/' + id + '?confirm=true', { method: 'DELETE' });
     if (!res.ok) throw new Error(await res.text());
@@ -6878,7 +6880,7 @@ async function loadImportResults() {
           <button onclick="reviewAction('${b.id}','pin')" class="icon-btn" title="固定为永久记忆"><i data-lucide="pin"></i> 固定</button>
           <button onclick="reviewAction('${b.id}','important')" class="icon-btn" title="标为重要"><i data-lucide="star"></i> 重要</button>
           <button onclick="reviewAction('${b.id}','noise')" class="icon-btn" title="标为噪声并resolve"><i data-lucide="trash-2"></i> 噪声</button>
-          <button onclick="if(confirm('确定删除？'))reviewAction('${b.id}','delete')" class="icon-btn" title="彻底删除" style="color:var(--negative);"><i data-lucide="x"></i> 删除</button>
+          <button onclick="if(confirm('确定移入删除档案？'))reviewAction('${b.id}','delete')" class="icon-btn" title="删除到档案" style="color:var(--negative);"><i data-lucide="x"></i> 删除到档案</button>
         </div>
       </div>
     `).join('');
@@ -7806,12 +7808,12 @@ async function editLetter(id) {
 }
 
 async function deleteLetter(id) {
-  if (!confirm('这将彻底删除这封信，文件不可恢复。确认删除？')) return;
-  if (!confirm('再次确认：你真的要永久删除这封信吗？')) return;
+  if (!confirm('这会把这封信移入删除档案；文件仍保留在 archive/ 中。继续？')) return;
+  if (!confirm('再次确认：这不是物理抹除。')) return;
   try {
     const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
     const d = await r.json();
-    if (d.ok) { alert('已删除'); loadLetters(); }
+    if (d.ok) { alert('已删除到档案'); loadLetters(); }
     else { alert(d.error || '删除失败'); }
   } catch (e) { alert(e.message); }
 }

@@ -27,9 +27,19 @@ from starlette.responses import Response
 from . import _shared as sh
 
 try:
-    from utils import get_ai_name as _get_ai_name, positive_float as _positive_float  # type: ignore
+    from utils import (  # type: ignore
+        get_ai_name as _get_ai_name,
+        get_owner_name as _get_owner_name,
+        get_owner_count as _get_owner_count,
+        positive_float as _positive_float,
+    )
 except ImportError:  # pragma: no cover
-    from ..utils import get_ai_name as _get_ai_name, positive_float as _positive_float  # type: ignore
+    from ..utils import (  # type: ignore
+        get_ai_name as _get_ai_name,
+        get_owner_name as _get_owner_name,
+        get_owner_count as _get_owner_count,
+        positive_float as _positive_float,
+    )
 
 logger = sh.logger
 
@@ -150,6 +160,10 @@ def register(mcp) -> None:
             # AI 一方的显示名（取自环境变量 AI_NAME，回退 "AI"）。前端只读，用于
             # 面向用户的文案（如删除确认、信件署名占位）。
             "ai_name": _get_ai_name(),
+            # 记忆归属：多人共用一套 OB 时标明「这份记忆是谁的」。owner_count>=2 时
+            # 前端顶部才显示归属徽标（单人不打扰）；owner_name 为徽标文字。均只读。
+            "owner_name": _get_owner_name(),
+            "owner_count": _get_owner_count(),
         })
 
 

@@ -11,14 +11,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;500;600&family=Noto+Sans+SC:wght@400;500&family=Cormorant+Garamond:ital,wght@0,400;0,500;1,400&family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
 <style>
-  @font-face {
-    font-family: 'RRPL';
-    src: url('/static/RRPL.ttf') format('truetype');
-    font-weight: normal;
-    font-style: normal;
-    font-display: swap;
-  }
-
   :root {
     /* === 复古掌机 retro-handheld palette — warm cream plastic + pale LCD + gold === */
     --bg: #E7E2D8;                    /* 外环境米灰（带颗粒感） */
@@ -841,7 +833,7 @@
     transition: transform .12s ease, box-shadow .15s ease, color .15s ease;
   }
   .tab .tab-en { font-family:'Share Tech Mono',monospace; font-style: normal; letter-spacing: 0.5px; }
-  .tab > span:first-child { font-family: 'RRPL', 'Noto Sans SC', sans-serif; font-weight: 700; letter-spacing: 0.3px; }
+  .tab > span:first-child { font-family: 'Share Tech Mono', 'Noto Sans SC', sans-serif; font-weight: 700; letter-spacing: 0.3px; }
   .tab:hover { transform: translateY(-1.5px); }
   .tab.active {
     color: var(--accent);
@@ -1756,6 +1748,12 @@
     Ombre Brain<span class="version-badge" id="version-badge"></span>
   </h1>
   <div class="header-meta">
+    <!-- 记忆归属徽标：多人共用一套 OB 时（owner_count>=2）显示「这份记忆是谁的」，单人隐藏。
+         由 loadOwnerBadge() 按 /api/config 的 owner_name / owner_count 填充。 -->
+    <span id="owner-badge" title="这份记忆的归属者（多人共用时显示）" style="display:none;font-size:11px;font-weight:600;color:var(--accent,#b85c3c);border:1px solid var(--accent,#b85c3c);border-radius:10px;padding:2px 9px;align-items:center;gap:4px;">
+      <i data-lucide="user" style="width:12px;height:12px;"></i>
+      <span id="owner-badge-text"></span>
+    </span>
     <span class="stats" id="stats">loading...</span>
     <span id="heartbeat-indicator" title="MCP 心跳" style="font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:4px;">
       <span id="heartbeat-dot" style="width:8px;height:8px;border-radius:50%;background:#bbb;display:inline-block;"></span>
@@ -2224,6 +2222,8 @@
           <span style="font-size:11px;color:var(--text-dim);margin-left:10px;">
             服务端自动下载新版并重启，记忆数据不受影响
           </span>
+          <!-- 热更新持久性提示（用户反馈 #1）：Docker 下如实说明「已持久化 / 重建后会失效」 -->
+          <div id="ver-persist-note" style="display:none;margin-top:10px;font-size:12px;line-height:1.5;border-radius:8px;padding:9px 12px;"></div>
         </div>
 
         <!-- 更新进度日志 -->
@@ -2833,9 +2833,10 @@
     <!-- ⑦ GitHub 同步 -->
     <div class="config-section" id="sec-github">
       <h3>⑦ GitHub 同步</h3>
-      <p style="font-size:12px;color:var(--text-light);margin:0 0 16px;line-height:1.6;">
-        将所有 bucket <code>.md</code> 文件备份到 GitHub 仓库，防止 VPS 实例丢失数据。<br>
-        每次同步创建一个 commit；embeddings.db 不上传（可用「重算所有向量」恢复）。
+      <p style="font-size:12px;color:var(--text-light);margin:0 0 16px;line-height:1.7;">
+        把你的记忆备份到自己的 GitHub 仓库，等于一份云端存档——换电脑、服务器挂了都能从这里拉回来。<br>
+        <b>同步</b>＝把本地记忆<b>上传</b>到 GitHub；<b>导入</b>＝把 GitHub 上的记忆<b>拉回</b>本地。两个方向别搞反。<br>
+        <span style="color:var(--text-dim);">（只备份记忆本身；用于加速搜索的「向量索引」不上传，导入后会自动重建，不影响记忆内容。）</span>
       </p>
 
       <div class="config-row">
@@ -3835,7 +3836,7 @@ async function saveHostVault() {
     const d = await resp.json();
     if (resp.ok) {
       msg.style.color = 'var(--accent)';
-      msg.textContent = '已保存 → ' + (d.env_file || '.env') + '（需重启容器生效）';
+      msg.textContent = d.message || ('已保存 → ' + (d.env_file || '.env') + '（需重启容器生效）');
     } else {
       msg.style.color = 'var(--negative)';
       msg.textContent = d.error || '保存失败';
@@ -4144,7 +4145,7 @@ async function showDetail(id) {
         '<button onclick="bucketResolve(\'' + id + '\')" class="icon-btn">' + (meta.resolved ? '<i data-lucide="rotate-ccw"></i> 取消已解决' : '<i data-lucide="check"></i> 标记已解决') + '</button>' +
         '<button onclick="bucketForget(\'' + id + '\')" class="icon-btn">' + (meta.dont_surface ? '<i data-lucide="eye"></i> 重新允许浮现' : '<i data-lucide="moon-off"></i> 主动遗忘') + '</button>' +
         '<button onclick="bucketArchive(\'' + id + '\')" class="icon-btn"><i data-lucide="archive"></i> 归档</button>' +
-        '<button onclick="bucketDelete(\'' + id + '\')" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 彻底删除</button>' +
+        '<button onclick="bucketDelete(\'' + id + '\')" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 删除到档案</button>' +
       '</div>' +
       '<div class="detail-content">' + esc(b.content) + '</div>' +
       renderEditForm(id, Object.assign({}, meta, {_content_for_edit: b.content}));
@@ -4237,6 +4238,8 @@ async function bucketResolve(id) {
   try {
     var res = await fetch(BASE + '/api/bucket/' + id + '/resolve', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
+    var d = await res.json();
+    if (d.message) alert(d.message);
     await showDetail(id);
     loadBuckets();
   } catch (e) { alert('resolve 切换失败: ' + e.message); }
@@ -4253,8 +4256,8 @@ async function bucketArchive(id) {
 }
 
 async function bucketDelete(id) {
-  if (!confirm('这将彻底删除此记忆桶，文件不可恢复。确认删除？')) return;
-  if (!confirm('再次确认：你真的要永久删除吗？')) return;
+  if (!confirm('这会把此记忆桶移入删除档案，并从日常界面隐藏；文件仍保留在 archive/ 中。继续？')) return;
+  if (!confirm('再次确认：这不是物理抹除。彻底删除请使用清理模式。')) return;
   try {
     var res = await fetch(BASE + '/api/bucket/' + id + '?confirm=true', { method: 'DELETE' });
     if (!res.ok) throw new Error(await res.text());
@@ -4702,7 +4705,7 @@ function animateConceptNetwork(canvas, ctx, W, H, data) {
         if (label.length > 14) label = label.slice(0, 14) + '…';
         var prefix = n.kind === 'tag' ? '#' : '';
         ctx.fillStyle  = 'rgba(160,120,30,0.95)';
-        ctx.font       = "bold 11px 'Share Tech Mono', 'RRPL', sans-serif";
+        ctx.font       = "bold 11px 'Share Tech Mono', sans-serif";
         ctx.textAlign  = 'center';
         ctx.textBaseline = 'top';
         ctx.fillText((n.anchor ? '⚓ ' : '') + prefix + label, 0, 0);
@@ -5937,14 +5940,18 @@ async function runGithubSync() {
 }
 
 // 从 GitHub 导入/恢复（会覆盖本地同名记忆）→ 导入后自动重建向量
-async function runGithubImport() {
+async function runGithubImport(force) {
   var msg = document.getElementById('gh-msg');
   var btn = document.getElementById('gh-import-btn');
-  if (!confirm('⚠️ 从 GitHub 导入记忆\n\n会用 GitHub 仓库里的记忆覆盖本地【同名】记忆（本地独有的保留）。\n导入前会自动存一份本地 zip 备份，导入后自动重建向量索引。\n\n常用于换机/数据丢失后的恢复或回滚。确定导入？')) return;
+  if (!force && !confirm('从 GitHub 把记忆拉回本地。\n\n同名记忆会被 GitHub 上的版本覆盖，本地独有的记忆保留不动。\n导入前会自动存一份本地备份，万一不对可以退回。\n\n继续吗？')) return;
   if (btn) { btn.disabled = true; }
-  msg.textContent = '正在从 GitHub 拉回记忆…（导入前已自动备份本地）'; msg.style.color = '';
+  msg.textContent = '正在从 GitHub 拉回记忆…（已先备份本地）'; msg.style.color = '';
   try {
-    var res = await authFetch('/api/github/import', { method: 'POST' });
+    var res = await authFetch('/api/github/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: !!force }),
+    });
     var d = await readJsonSafe(res);
     if (d.ok) {
       var extra = (d.skipped ? '，跳过 ' + d.skipped : '') + (d.truncated ? '（⚠️ 仓库文件过多被截断，部分未导入）' : '');
@@ -5958,6 +5965,15 @@ async function runGithubImport() {
       }
       await loadGithubStatus();
       if (typeof loadStatus === 'function') loadStatus();
+    } else if (d.backup_failed) {
+      // 备份没成功 → 后端已拦下，未动本地记忆。让用户决定要不要冒险强制导入。
+      msg.innerHTML = _SV.err + ' ' + esc(d.error || '备份失败，已取消导入');
+      msg.style.color = 'var(--accent)';
+      if (btn) { btn.disabled = false; }
+      if (confirm('导入前的本地备份没做成功，所以这次没有「后悔药」。\n\n仍要强制从 GitHub 覆盖本地同名记忆吗？（覆盖后无法找回）')) {
+        return runGithubImport(true);
+      }
+      return;
     } else {
       msg.innerHTML = _SV.err + ' ' + esc(d.error || '导入失败');
       msg.style.color = 'var(--accent)';
@@ -5984,11 +6000,35 @@ async function _runBackfillSilent() {
   });
 }
 
+// 记忆归属徽标。规则：owner_count>=2 才显示（单人不打扰），文字取 owner_name。
+// 接受一个可选的已解析 cfg，避免重复请求；无则自行拉一次 /api/config。
+async function loadOwnerBadge(cfg) {
+  try {
+    if (!cfg) {
+      var res = await authFetch('/api/config');
+      if (!res) return;
+      cfg = await res.json();
+    }
+    var badge = document.getElementById('owner-badge');
+    if (!badge) return;
+    var count = parseInt(cfg.owner_count, 10) || 1;
+    var name = (cfg.owner_name || '').trim();
+    if (count >= 2 && name) {
+      document.getElementById('owner-badge-text').textContent = name;
+      badge.style.display = 'inline-flex';
+      if (window.lucide) lucide.createIcons();
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { /* ignore：徽标是锦上添花，失败不影响主流程 */ }
+}
+
 async function loadConfig() {
   try {
     var res = await authFetch('/api/config');
     if (!res) return;
     var cfg = await res.json();
+    loadOwnerBadge(cfg);
     document.getElementById('cfg-dehy-model').value = cfg.dehydration.model || '';
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     var fmtEl = document.getElementById('cfg-dehy-format');
@@ -6363,7 +6403,32 @@ loadVersionBadge();
       }
     }
 
+    renderPersistNote(info);
     panel.style.display = '';
+  }
+
+  // 按 /api/update-info 的持久性字段如实提示热更新会不会扛过容器重建（用户反馈 #1）。
+  function renderPersistNote(info) {
+    var el = document.getElementById('ver-persist-note');
+    if (!el) return;
+    // 裸机天然持久，无需打扰
+    if (!info || !info.is_docker || info.hot_update_persistent === undefined) {
+      el.style.display = 'none';
+      return;
+    }
+    var note = info.hot_update_note || '';
+    if (info.hot_update_persistent) {
+      el.style.background = 'rgba(46,160,67,0.12)';
+      el.style.border = '1px solid rgba(46,160,67,0.35)';
+      el.style.color = 'var(--positive, #2ea043)';
+      el.textContent = '✓ 热更新可持久：' + note;
+    } else {
+      el.style.background = 'rgba(210,153,34,0.14)';
+      el.style.border = '1px solid rgba(210,153,34,0.45)';
+      el.style.color = 'var(--warning, #d29922)';
+      el.textContent = '⚠️ 热更新不持久：' + note;
+    }
+    el.style.display = '';
   }
 
   window.doHotUpdate = async function() {
@@ -6629,21 +6694,30 @@ async function loadAbout() {
     var html = '<div style="background:var(--surface);border-radius:var(--shell-radius);padding:34px 36px 30px;' +
       'box-shadow:8px 8px 22px var(--shadow-dark-subtle), -7px -7px 16px var(--shadow-light), inset 0 1px 0 rgba(255,255,255,0.55);">';
     html += '<div style="font-family:\'VT323\',monospace;font-size:46px;line-height:1;color:var(--accent);text-shadow:0 0 14px var(--accent-glow);letter-spacing:1px;">' + esc(d.title || '') + '</div>';
-    html += '<div style="font-family:\'Share Tech Mono\',monospace;font-size:11px;letter-spacing:2px;color:var(--text-light);text-transform:uppercase;margin-top:6px;">AUTHOR · 作者有话说</div>';
+    html += '<div style="font-family:\'Share Tech Mono\',monospace;font-size:11px;letter-spacing:2px;color:var(--text-light);text-transform:uppercase;margin-top:6px;">AUTHOR · 一些</div>';
     html += '<div style="height:1px;background:var(--border);margin:18px 0 24px;"></div>';
     (d.sections || []).forEach(function(s) {
       html += '<h3 style="font-family:\'Share Tech Mono\',monospace;font-size:14px;color:var(--accent);margin:22px 0 10px;font-weight:400;letter-spacing:1px;text-transform:uppercase;">' + esc(s.heading) + '</h3>';
       html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;">' + esc(s.body) + '</div>';
     });
     if (d.signature) html += '<div style="margin-top:30px;text-align:right;color:var(--text-dim);font-family:\'Share Tech Mono\',monospace;font-size:14px;letter-spacing:1px;">' + esc(d.signature) + '</div>';
+    var _divider = '<div style="height:1px;background:var(--border);margin:26px 0;"></div>';
+    (d.contributors || []).forEach(function(c) {
+      html += _divider;
+      if (c.body) html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;text-align:center;">' + esc(c.body) + '</div>';
+      if (c.signature) html += '<div style="margin-top:10px;text-align:right;color:var(--text-dim);font-family:\'Share Tech Mono\',monospace;font-size:14px;letter-spacing:1px;">' + esc(c.signature) + '</div>';
+    });
+    if (d.support) {
+      html += _divider;
+      html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;text-align:center;">' + esc(d.support) + '</div>';
+    }
     if (d.ifdian) {
-      html += '<div style="margin-top:30px;padding:22px;background:var(--surface-solid);border-radius:14px;text-align:center;' +
+      html += '<div style="margin-top:24px;padding:22px;background:var(--surface-solid);border-radius:14px;text-align:center;' +
         'box-shadow:inset 3px 3px 8px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);">' +
-        '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;font-family:\'Share Tech Mono\',monospace;letter-spacing:0.5px;">如果它对你有用 / IF IT HELPED</div>' +
         '<a href="' + esc(d.ifdian) + '" target="_blank" rel="noopener" style="display:inline-block;color:#fffdf5;text-decoration:none;font-size:14px;padding:11px 26px;border-radius:13px;' +
         'background:linear-gradient(150deg, var(--accent-light), var(--accent));text-shadow:0 1px 1px rgba(120,90,20,0.35);' +
         'box-shadow:5px 5px 13px var(--shadow-dark), -4px -4px 10px var(--shadow-light), inset 0 1px 0 rgba(255,255,255,0.35);">' +
-        _SV.coffee + ' 在爱发电支持我 / Support on Afdian</a></div>';
+        _SV.coffee + ' 在爱发电支持我们 / Support on Afdian</a></div>';
     }
     html += '</div>';
     el.innerHTML = html;
@@ -6664,6 +6738,7 @@ window.addEventListener('DOMContentLoaded', function() {
   updateChick(0);              // 小黄鸡蛋初始（loadBuckets 后会按真实总数更新）
   startPlaceholderRotation();  // 搜索框随机 placeholder
   checkEmptyMemoryBanner();    // 零记忆时红色提示「可从 GitHub 恢复」
+  loadOwnerBadge();            // 多人共用时顶部显示记忆归属徽标（单人隐藏）
 });
 
 // 更新/换机后发现一条记忆都没有 → 顶部红色横幅，引导从 GitHub 恢复。
@@ -6883,7 +6958,7 @@ async function loadImportResults() {
           <button onclick="reviewAction('${b.id}','pin')" class="icon-btn" title="固定为永久记忆"><i data-lucide="pin"></i> 固定</button>
           <button onclick="reviewAction('${b.id}','important')" class="icon-btn" title="标为重要"><i data-lucide="star"></i> 重要</button>
           <button onclick="reviewAction('${b.id}','noise')" class="icon-btn" title="标为噪声并resolve"><i data-lucide="trash-2"></i> 噪声</button>
-          <button onclick="if(confirm('确定删除？'))reviewAction('${b.id}','delete')" class="icon-btn" title="彻底删除" style="color:var(--negative);"><i data-lucide="x"></i> 删除</button>
+          <button onclick="if(confirm('确定移入删除档案？'))reviewAction('${b.id}','delete')" class="icon-btn" title="删除到档案" style="color:var(--negative);"><i data-lucide="x"></i> 删除到档案</button>
         </div>
       </div>
     `).join('');
@@ -7810,12 +7885,12 @@ async function editLetter(id) {
 }
 
 async function deleteLetter(id) {
-  if (!confirm('这将彻底删除这封信，文件不可恢复。确认删除？')) return;
-  if (!confirm('再次确认：你真的要永久删除这封信吗？')) return;
+  if (!confirm('这会把这封信移入删除档案；文件仍保留在 archive/ 中。继续？')) return;
+  if (!confirm('再次确认：这不是物理抹除。')) return;
   try {
     const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
     const d = await r.json();
-    if (d.ok) { alert('已删除'); loadLetters(); }
+    if (d.ok) { alert('已删除到档案'); loadLetters(); }
     else { alert(d.error || '删除失败'); }
   } catch (e) { alert(e.message); }
 }
