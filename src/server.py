@@ -958,6 +958,121 @@ async def file_delete(
     )
 
 # =============================================================
+# xhs_read —— 小红书笔记读取。移植自 usubamayoi/xhs-read-mcp(js snippet)。
+# 原理:移动端 UA 请求页面 → 提取 window.__INITIAL_STATE__ JSON → 解析笔记。
+# 免登录免 Cookie。视频帖只返回文字+封面。小红书改版需跟修解析。
+# =============================================================
+import re as _xhs_re
+import datetime as _xhs_dt
+
+_XHS_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+           "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+
+
+async def _xhs_read_impl(url: str, include_images: bool) -> str:
+    u = (url or "").strip().strip("\"\'")
+    if not _xhs_re.match(r"^https?://(www\.)?(xiaohongshu\.com|xhslink\.com)/", u):
+        return "OB-XHS01 仅支持 xiaohongshu.com 或 xhslink.com 链接。"
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True,
+                                     headers={"User-Agent": _XHS_UA}) as client:
+            resp = await client.get(u)
+        html = resp.text
+    except Exception as e:
+        return f"OB-XHS02 请求失败: {e}"
+    m = _xhs_re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\})\s*</script>", html, _xhs_re.S)
+    if not m:
+        return "OB-XHS03 未找到 __INITIAL_STATE__。可能链接无效或小红书页面结构变化。"
+    try:
+        state = _json_lib.loads(m.group(1).replace("undefined", "null"))
+    except Exception as e:
+        return f"OB-XHS04 JSON 解析失败: {e}"
+
+    note = (state.get("noteData") or {}).get("data", {}).get("noteData")
+    comment_data = (state.get("noteData") or {}).get("data", {}).get("commentData")
+    if not note and isinstance((state.get("note") or {}).get("noteDetailMap"), dict):
+        nd_map = state["note"]["noteDetailMap"]
+        if nd_map:
+            first = next(iter(nd_map.values()))
+            note = (first or {}).get("note")
+            comment_data = (first or {}).get("comments")
+    if not note:
+        return "OB-XHS05 未找到笔记数据。可能笔记已删除或链接无效。"
+
+    title = note.get("title") or "(无标题)"
+    desc = note.get("desc") or ""
+    note_type = note.get("type") or "unknown"
+    user = (note.get("user") or {})
+    user_name = user.get("nickName") or user.get("nickname") or "未知用户"
+    ts = note.get("time")
+    time_str = ""
+    if ts:
+        try:
+            time_str = _xhs_dt.datetime.fromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            time_str = ""
+    inter = note.get("interactInfo") or {}
+    likes = inter.get("likedCount") or "0"
+    collects = inter.get("collectedCount") or "0"
+    comments_n = inter.get("commentCount") or "0"
+    image_list = note.get("imageList") or []
+
+    out = [f"📕 {title}"]
+    line2 = f"👤 {user_name}"
+    if time_str:
+        line2 += f" · {time_str}"
+    out.append(line2)
+    line3 = f"❤️ {likes}  ⭐ {collects}  💬 {comments_n}"
+    if note_type == "video":
+        line3 += "  🎬 视频帖(视频内容无法显示)"
+    out.append(line3)
+    out.append("")
+    out.append(desc)
+
+    cmts = (comment_data or {}).get("comments") if isinstance(comment_data, dict) else None
+    if cmts:
+        out.append("\n---\n评论:")
+        for c in cmts[:20]:
+            cu = (c.get("user") or {})
+            cui = (c.get("userInfo") or {})
+            c_name = cu.get("nickName") or cu.get("nickname") or cui.get("nickname") or "匿名"
+            row = f"• {c_name}: {c.get('content') or ''}"
+            if c.get("likeCount"):
+                row += f" ({c['likeCount']}赞)"
+            out.append(row)
+            for sc in (c.get("subComments") or [])[:3]:
+                su = (sc.get("user") or {})
+                sui = (sc.get("userInfo") or {})
+                s_name = su.get("nickName") or su.get("nickname") or sui.get("nickname") or "匿名"
+                out.append(f"  ↳ {s_name}: {sc.get('content') or ''}")
+
+    if image_list:
+        if include_images:
+            out.append(f"\n---\n图片({min(len(image_list), 9)}/{len(image_list)}):")
+            for i, img in enumerate(image_list[:9]):
+                iu = img.get("url") or img.get("urlDefault") or ""
+                if iu.startswith("//"):
+                    iu = "https:" + iu
+                if iu.startswith("http"):
+                    out.append(f"  [{i + 1}] {iu}")
+        else:
+            out.append(f"\n(共 {len(image_list)} 张图片,传 include_images=true 查看链接)")
+    return "\n".join(out)
+
+
+@mcp.tool()
+async def xhs_read(
+    url: str,
+    include_images: Optional[bool] = True,
+) -> str:
+    """xhs_read:读取小红书笔记(read xiaohongshu note)。输入小红书链接(短链 xhslink.com 或完整 xiaohongshu.com),返回标题、正文、作者、互动数据、首屏评论(至多20条)与图片直链(至多9张)。视频帖只返回文字与封面。include_images=false 只返回文字省 token。免登录。"""
+    return await _with_notice(
+        _xhs_read_impl(url, bool(include_images)),
+        op="xhs_read",
+        args={"url": url, "include_images": include_images},
+    )
+
+# =============================================================
 # wake —— 醒来简报(Handoff 优化)。新窗口第一件事调它,一次拿齐:
 # 自我认知 → 核心记忆 → 留言板 → 最近连续性 → 文件区目录。
 # 全部由现成零件组装:I / breath / dream / 文件区,不新增存储。
