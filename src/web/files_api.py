@@ -85,16 +85,42 @@ _PAGE = _ui.page_head("文件区 · Ombre Brain") + """<body>
   <div id="msg"></div>
 </div>
 <div class="card"><b>文件列表</b>
-  <table><thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+  <input type="text" id="q" placeholder="搜索文件名 / 子文件夹…"
+         style="margin-left:12px;padding:4px 10px;width:220px;" oninput="render()">
+  <table><thead><tr>
+    <th onclick="setSort('name')" style="cursor:pointer;user-select:none">文件 <span id="s_name" class="meta"></span></th>
+    <th onclick="setSort('size')" style="cursor:pointer;user-select:none">大小 <span id="s_size" class="meta"></span></th>
+    <th onclick="setSort('mtime')" style="cursor:pointer;user-select:none">修改时间 <span id="s_mtime" class="meta"></span></th>
+    <th></th></tr></thead>
   <tbody id="rows"></tbody></table>
 </div>
 <script>
+let allFiles = [], sortKey = 'mtime', sortDir = -1;
+function setSort(k) {
+  if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = (k === 'name') ? 1 : -1; }
+  render();
+}
 async function refresh() {
   const r = await fetch('/api/files/list');
   if (r.status === 401) { location.href = '/dashboard'; return; }
   const data = await r.json();
+  allFiles = data.files || [];
+  render();
+}
+function render() {
+  for (const k of ['name','size','mtime']) {
+    const el = document.getElementById('s_' + k);
+    if (el) el.textContent = (sortKey === k) ? (sortDir > 0 ? '▲' : '▼') : '';
+  }
+  const kw = (document.getElementById('q').value || '').trim().toLowerCase();
+  const files = allFiles
+    .filter(f => !kw || f.name.toLowerCase().includes(kw))
+    .sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir;
+    });
   const tb = document.getElementById('rows'); tb.innerHTML = '';
-  for (const f of data.files) {
+  for (const f of files) {
     const tr = document.createElement('tr');
     const a = document.createElement('a');
     a.href = '/api/files/download?name=' + encodeURIComponent(f.name);
@@ -116,7 +142,7 @@ async function refresh() {
     td3.appendChild(del);
     tr.append(td0, td1, td2, td3); tb.appendChild(tr);
   }
-  if (!data.files.length) tb.innerHTML = '<tr><td colspan="4">柜子是空的。</td></tr>';
+  if (!files.length) tb.innerHTML = '<tr><td colspan="4">' + (kw ? '没有匹配的文件。' : '柜子是空的。') + '</td></tr>';
 }
 async function up() {
   const files = document.getElementById('f').files;

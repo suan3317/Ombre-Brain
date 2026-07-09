@@ -868,24 +868,31 @@ async def _fz_read(name: str, offset: int) -> str:
     return f"{head}\n{chunk}{tail}"
 
 
-async def _fz_list(folder: str) -> str:
+async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", keyword: str = "") -> str:
     root = _fz_root()
     base = _fz_safe(folder) if (folder or "").strip() else root
     if not os.path.isdir(base):
         return f"OB-FZ03 文件夹不存在: files/{folder}"
-    rows = []
+    kw = (keyword or "").strip().lower()
+    entries = []
     for r, dirs, fnames in os.walk(base):
         dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
-        for fn in sorted(fnames):
+        for fn in fnames:
             if fn.startswith("."):
                 continue
             p = os.path.join(r, fn)
             rel = os.path.relpath(p, root).replace("\\", "/")
+            if kw and kw not in rel.lower():
+                continue
             st = os.stat(p)
-            ts = _fz_dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
-            rows.append(f"- {rel}  ({st.st_size} 字节, 改于 {ts})")
+            entries.append((rel, st.st_size, st.st_mtime))
+    _keys = {"name": lambda e: e[0].lower(), "size": lambda e: e[1]}
+    entries.sort(key=_keys.get((sort_by or "mtime").lower(), lambda e: e[2]),
+                 reverse=(order or "desc").lower() != "asc")
+    rows = [f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})"
+            for rel, size, mt in entries]
     if not rows:
-        return "文件区是空的。用 file_save 存入第一个文件。"
+        return "没有匹配的文件。" if kw else "文件区是空的。用 file_save 存入第一个文件。"
     return f"文件区共 {len(rows)} 个文件:\n" + "\n".join(rows)
 
 
@@ -927,12 +934,15 @@ async def file_read(
 @mcp.tool()
 async def file_list(
     folder: Optional[str] = "",
+    sort_by: Optional[str] = "mtime",
+    order: Optional[str] = "desc",
+    keyword: Optional[str] = "",
 ) -> str:
-    """file_list:列出文件区所有文件(list files in file zone)。返回文件名、大小、修改时间。folder 可选,只看某个子文件夹。文件区是持久存储,窗口和模型更换都不丢。"""
+    """file_list:列出文件区所有文件(list files in file zone)。返回文件名、大小、修改时间。folder 可选,只看某个子文件夹。sort_by=mtime(默认,最新在顶)/name/size,order=desc(默认)/asc。keyword 可选,按文件名与子文件夹路径子串过滤。文件区是持久存储,窗口和模型更换都不丢。"""
     return await _with_notice(
-        _fz_list(folder or ""),
+        _fz_list(folder or "", sort_by=sort_by or "mtime", order=order or "desc", keyword=keyword or ""),
         op="file_list",
-        args={"folder": folder},
+        args={"folder": folder, "sort_by": sort_by, "order": order, "keyword": keyword},
     )
 
 
