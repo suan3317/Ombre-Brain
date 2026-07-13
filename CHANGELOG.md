@@ -2,6 +2,18 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.4
+
+### 修复 / Fixed
+
+- 修复 Dashboard“信”页面及桶详情的编辑、删除按钮偶发完全无响应：装饰性 Lucide 图标不再截获指针事件，鼠标按下与抬起稳定落在按钮本体。
+- 修复全局 `MutationObserver` 与 `lucide.createIcons()` 互相触发的无限 SVG 重绘循环；图标渲染期间暂时断开观察器，避免 Console 警告/计数持续暴涨、CPU 占用和页面卡顿。
+- 信件删除接口支持半删除状态的幂等自愈：Markdown 已不存在时，仍清理残留向量、embedding 待处理项和运行时桶缓存；正常存在的信件继续保留移入 archive 的软删除语义。
+
+### 测试 / Tests
+
+- 新增 Dashboard 图标点击与观察器防自噬、幽灵信派生状态清理回归；完整测试 `1049 passed, 45 skipped`。
+
 ## 2.6.3
 
 ### 安全 / Security

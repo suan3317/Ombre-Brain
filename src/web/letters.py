@@ -232,12 +232,34 @@ def register(mcp) -> None:
             return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         letter_id = request.path_params["letter_id"]
         bucket = await sh.bucket_mgr.get(letter_id)
-        if not bucket or bucket["metadata"].get("type") != "letter":
+        if bucket and bucket["metadata"].get("type") != "letter":
             return JSONResponse({"error": "letter not found"}, status_code=404)
         try:
-            ok = await sh.bucket_mgr.delete(letter_id)
-            if ok:
+            # Idempotent repair for a half-deleted letter: the Markdown file may
+            # already be gone while the active cache/vector still exposes it.
+            # Archive a real letter when present, then independently clean every
+            # derived layer even when no file remains.
+            archived = bool(bucket) and await sh.bucket_mgr.delete(letter_id)
+            if bucket and not archived:
+                return JSONResponse({"error": "letter archive failed"}, status_code=500)
+            outbox = getattr(sh.bucket_mgr, "embedding_outbox", None)
+            if outbox is not None:
+                try:
+                    outbox.discard(letter_id)
+                except Exception:
+                    pass
+            try:
                 sh.embedding_engine.delete_embedding(letter_id)
-            return JSONResponse({"ok": ok, "deleted": ok})
+            except Exception:
+                pass
+            invalidate = getattr(sh.bucket_mgr, "_invalidate_bm25", None)
+            if callable(invalidate):
+                invalidate()
+            return JSONResponse({
+                "ok": True,
+                "deleted": archived,
+                "cleaned": True,
+                "already_missing": not bool(bucket),
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)

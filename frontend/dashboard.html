@@ -165,6 +165,9 @@
     width: 14px; height: 14px; vertical-align: -2px;
     stroke-width: 1.6;
   }
+  /* Decorative icons must not become the click target. Lucide replaces these
+     SVG nodes during rendering, which can otherwise cancel an in-flight click. */
+  button i, button svg { pointer-events: none; }
   .icon-btn { display: inline-flex; align-items: center; gap: 5px; padding: 7px 12px !important; font-size: 12px !important; white-space: nowrap; }
   .header h1 .ob-logo { display: inline-block; vertical-align: -4px; width: 22px; height: 22px; margin-right: 6px; }
   .header .version-badge {
@@ -7034,7 +7037,16 @@ window.addEventListener('load', function() {
       for (var i = 0; i < muts.length; i++) {
         if (muts[i].addedNodes && muts[i].addedNodes.length) {
           if (rafToken) clearTimeout(rafToken);
-          rafToken = setTimeout(function() { lucide.createIcons(); rafToken = null; }, 50);
+          rafToken = setTimeout(function() {
+            // createIcons replaces <i> with <svg>. Disconnect while it mutates
+            // the DOM so the observer cannot recursively feed itself forever.
+            obs.disconnect();
+            try { lucide.createIcons(); }
+            finally {
+              obs.observe(document.body, {childList: true, subtree: true});
+              rafToken = null;
+            }
+          }, 50);
           break;
         }
       }
