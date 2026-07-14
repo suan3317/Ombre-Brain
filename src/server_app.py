@@ -104,6 +104,11 @@ def _first_forwarded_value(value: str) -> str:
 
 
 def _request_resource(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) -> tuple[str, str]:
+    override = os.environ.get("OMBRE_PUBLIC_BASE_URL", "").strip()
+    if override:
+        base = override.rstrip("/")
+        path = str(scope.get("path", ""))
+        return f"{base}{path.rstrip('/')}", base
     proto = _first_forwarded_value(
         headers.get(b"x-forwarded-proto", b"").decode("latin-1")
     ) or str(scope.get("scheme", "http"))

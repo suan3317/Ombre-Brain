@@ -92,6 +92,9 @@ def _first_forwarded(value: str) -> str:
 
 def _public_base_url(request: Request) -> str:
     """Return the externally-visible base URL, honoring Cloudflare/reverse-proxy headers."""
+    override = os.environ.get("OMBRE_PUBLIC_BASE_URL", "").strip()
+    if override:
+        return override.rstrip("/")
     proto = sh._trusted_forwarded_value(request, "x-forwarded-proto").lower()
     if proto not in ("http", "https"):
         proto = request.url.scheme

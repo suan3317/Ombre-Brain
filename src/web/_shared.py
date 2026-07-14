@@ -687,6 +687,9 @@ def _is_authenticated(request: Request) -> bool:
 
 def _is_https_request(request: Request) -> bool:
     """Detect HTTPS through Cloudflare/reverse-proxy via X-Forwarded-Proto header."""
+    override = os.environ.get("OMBRE_PUBLIC_BASE_URL", "").strip()
+    if override.lower().startswith("https"):
+        return True
     proto = _trusted_forwarded_value(request, "x-forwarded-proto").lower()
     if proto == "https":
         return True
