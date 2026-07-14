@@ -966,6 +966,7 @@ async def file_delete(
 # =============================================================
 import re as _xhs_re
 import datetime as _xhs_dt
+import json as _json_lib
 
 _XHS_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
