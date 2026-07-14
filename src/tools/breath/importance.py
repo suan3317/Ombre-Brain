@@ -11,7 +11,7 @@ tools/breath/importance.py — importance_min 模式
 - 列出所有非 feel/plan/letter、未主动遗忘、且 importance >= 阈值 的桶
 - tags 过滤同样生效（AND）
 - 按 importance 降序；若高分桶超过 20 条，仍保留阈值档位的最近更新桶
-- 截到 20 条后逐条 dehydrate，再塞进 max_tokens 预算
+- 截到 20 条后逐字返回存储正文，再塞进 max_tokens 预算
 
 不做什么（边界）：
 - 不做向量检索（这是「按重要度批量拉」而不是「找相似」）
@@ -22,7 +22,9 @@ tools/breath/importance.py — importance_min 模式
 """
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from ._verbatim import render_stored_bucket
+
+_BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -30,15 +32,6 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
         return True
     bucket_tags = set(meta.get("tags", []) or [])
     return all(t in bucket_tags for t in tag_filter)
-
-
-def _is_core_bucket(bucket: dict) -> bool:
-    meta = bucket.get("metadata", {}) or {}
-    return bool(meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent")
-
-
-def _raw_core_fallback(content: str) -> str:
-    return strip_wikilinks(content)[:300].strip() or "（空记忆）"
 
 
 def _importance_of(bucket: dict) -> int:
@@ -115,28 +108,23 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         return f"没有重要度 >= {importance_min} 的记忆。"
     results = []
     token_used = 0
+    budget_blocked = False
     for b in filtered:
-        if token_used >= max_tokens:
-            break
         try:
-            clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-            try:
-                summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-            except Exception as dehy_err:
-                rt.logger.warning(f"importance_min dehydrate failed / 脱水失败: {dehy_err}")
-                if _is_core_bucket(b):
-                    # Core buckets must remain readable even when dehydration fails.
-                    summary = _raw_core_fallback(b["content"])
-                else:
-                    continue
-            if _is_core_bucket(b) and not str(summary or "").strip():
-                summary = _raw_core_fallback(b["content"])
-            t = count_tokens_approx(summary)
-            if token_used + t > max_tokens:
-                break
             imp = b["metadata"].get("importance", 0)
-            results.append(f"[importance:{imp}] [bucket_id:{b['id']}] {summary}")
-            token_used += t
+            rendered, entry_tokens = render_stored_bucket(
+                b,
+                f"[importance:{imp}] [bucket_id:{b['id']}]",
+            )
+            if token_used + entry_tokens > max_tokens:
+                budget_blocked = True
+                break
+            results.append(rendered)
+            token_used += entry_tokens
         except Exception as e:
             rt.logger.warning(f"importance_min bucket processing failed: {e}")
-    return "\n---\n".join(results) if results else "没有可以展示的记忆。"
+    if not results:
+        return _BUDGET_NOTICE if budget_blocked else "没有可以展示的记忆。"
+    if budget_blocked:
+        results.append(_BUDGET_NOTICE)
+    return "\n---\n".join(results)

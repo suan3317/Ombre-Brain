@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 import web.buckets as buckets_web
+import web.config_api as config_api
 import web.import_api as import_api
+import utils
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +121,7 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
 @pytest.mark.asyncio
 async def test_host_vault_set_returns_restart_required_message(monkeypatch, tmp_path):
     monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "in_docker", lambda: False)
     monkeypatch.setattr(import_api.sh, "_project_env_path", lambda: str(tmp_path / ".env"))
     monkeypatch.setattr(import_api.sh, "_write_env_var", lambda _key, _value: None)
 
@@ -132,6 +136,52 @@ async def test_host_vault_set_returns_restart_required_message(monkeypatch, tmp_
     assert payload["ok"] is True
     assert payload["restart_required"] is True
     assert "重启" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_host_vault_set_rejects_container_local_fake_save(monkeypatch):
+    writes = []
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "in_docker", lambda: True)
+    monkeypatch.setattr(import_api.sh, "_write_env_var", lambda key, value: writes.append((key, value)))
+
+    mcp = FakeMCP()
+    import_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/host-vault")](
+        JsonRequest({"value": "D:/Vault/Ombre"})
+    )
+    payload = _json(response)
+
+    assert response.status_code == 409
+    assert payload["compose_managed"] is True
+    assert payload["restart_required"] is True
+    assert "compose" in payload["error"].lower()
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_host_vault_get_reports_compose_injected_value_in_container(monkeypatch):
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "in_docker", lambda: True)
+    monkeypatch.setenv("OMBRE_HOST_VAULT_DIR", "D:/Vault/Ombre")
+    monkeypatch.setattr(
+        import_api.sh,
+        "_read_env_var",
+        lambda _name: pytest.fail("container must not read its local .env for a host mount"),
+    )
+
+    mcp = FakeMCP()
+    import_api.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/host-vault")](JsonRequest())
+    payload = _json(response)
+
+    assert response.status_code == 200
+    assert payload["value"] == "D:/Vault/Ombre"
+    assert payload["source"] == "env"
+    assert payload["env_file"] is None
+    assert payload["compose_managed"] is True
 
 
 @pytest.mark.asyncio
@@ -174,7 +224,7 @@ def test_config_example_marks_wikilink_deprecated_without_active_stanza():
 
 
 def test_dashboard_single_bucket_delete_is_not_labeled_as_hard_delete():
-    for rel in ("dashboard.html", "frontend/dashboard.html"):
+    for rel in ("frontend/dashboard.html",):
         text = (ROOT / rel).read_text(encoding="utf-8")
 
         assert "删除到档案" in text
@@ -183,4 +233,79 @@ def test_dashboard_single_bucket_delete_is_not_labeled_as_hard_delete():
         assert "彻底删除这封信" not in text
         assert "你真的要永久删除这封信吗" not in text
         assert 'title="彻底删除"' not in text
-        assert "物理删除，不可恢复" in text
+        assert "/api/buckets/purge" not in text
+        assert "进入清理模式" not in text
+        assert "批量永久删除" not in text
+
+
+def test_dashboard_exposes_oauth_authentication_switch():
+    for rel in ("frontend/dashboard.html",):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+
+        assert 'id="cfg-mcp-auth"' in text
+        assert "开启 OAuth（Claude.ai 网页版 / Claude Code 远程需要）" in text
+        assert "saveMcpAuth()" in text
+        assert "mcp_require_auth: false, persist: true" in text
+        assert 'id="btn-restart"' in text
+        assert "restartService()" in text
+        assert "setRestartRequired(!!result.restart_required" in text
+
+
+def test_dashboard_exposes_mcp_static_token_mode():
+    for rel in ("frontend/dashboard.html",):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+
+        # 三态互斥：选 OAuth 就不认 Token，选 Token 就不认 OAuth。
+        assert '<option value="oauth">' in text
+        assert '<option value="token">' in text
+        assert '<option value="off">' in text
+        assert 'id="mcp-token-panel"' in text
+        assert "regenerateMcpToken()" in text
+        assert "/api/mcp-token/regenerate" in text
+        assert "Ombre-MCP-Token" in text
+
+
+@pytest.mark.asyncio
+async def test_dashboard_oauth_switch_persists_to_config(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", {"mcp_require_auth": True})
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"mcp_require_auth": False, "persist": True})
+    )
+    payload = _json(response)
+    persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["restart_required"] is True
+    assert payload["mcp_require_auth_effective"] is True
+    assert config_api.sh.config["mcp_require_auth"] is False
+    assert persisted["mcp_require_auth"] is False
+
+
+@pytest.mark.asyncio
+async def test_retired_purge_endpoint_never_deletes_memory(monkeypatch):
+    class ExplodingBucketManager:
+        def __getattr__(self, name):
+            raise AssertionError(f"retired purge endpoint touched bucket manager: {name}")
+
+    monkeypatch.setattr(buckets_web.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(
+        buckets_web.sh, "bucket_mgr", ExplodingBucketManager(), raising=False
+    )
+    mcp = FakeMCP()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/buckets/purge")](
+        JsonRequest({"ids": ["memory-1"]})
+    )
+    payload = _json(response)
+
+    assert response.status_code == 410
+    assert payload["error"] == "physical_deletion_forbidden"
+    assert "Markdown 文件会继续保留" in payload["message"]

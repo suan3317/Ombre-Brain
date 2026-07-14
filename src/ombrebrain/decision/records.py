@@ -151,6 +151,9 @@ def _summary(command_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "command_id": command_id,
         "command_kind": str(command_plan.get("command_kind", "")),
         "policy_allowed": bool(policy_verdict.get("allowed", True)),
+        "policy_effective_allowed": bool(
+            policy_verdict.get("effective_allowed", policy_verdict.get("allowed", True))
+        ),
         "missing_permissions": list(_as_list(policy_verdict.get("missing_permissions"))),
         "protected_surfaces": list(_as_list(policy_verdict.get("protected_surfaces"))),
         "consistency_ok": bool(consistency_report.get("ok", True)),

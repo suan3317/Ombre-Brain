@@ -27,8 +27,10 @@ logger = sh.logger
 
 try:
     from github_sync import GitHubSync  # type: ignore
+    from utils import parse_bool  # type: ignore
 except ImportError:  # pragma: no cover
     from ..github_sync import GitHubSync  # type: ignore
+    from ..utils import parse_bool  # type: ignore
 
 
 def _pre_import_backup(buckets_dir: str) -> str:
@@ -82,15 +84,27 @@ def register(mcp) -> None:
         if err:
             return err
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"ok": False, "error": "无效 JSON"}, status_code=400)
 
+        string_fields = ("token", "repo", "branch", "path_prefix")
+        if any(key in body and not isinstance(body[key], str) for key in string_fields):
+            return JSONResponse({"ok": False, "error": "GitHub 配置字段必须是字符串"}, status_code=400)
         token = str(body.get("token") or "").strip()
         repo = str(body.get("repo") or "").strip()
         branch = str(body.get("branch") or "main").strip() or "main"
         path_prefix = str(body.get("path_prefix") or "ombre").strip()
-        auto_interval = int(body.get("auto_interval_minutes") or 0)
+        try:
+            auto_interval = int(body.get("auto_interval_minutes") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return JSONResponse({"ok": False, "error": "auto_interval_minutes 必须是整数"}, status_code=400)
+        if not 0 <= auto_interval <= 10_080:
+            return JSONResponse({"ok": False, "error": "auto_interval_minutes 必须在 0-10080 之间"}, status_code=400)
+        if len(token) > 8192 or len(repo) > 255 or len(branch) > 255 or len(path_prefix) > 512:
+            return JSONResponse({"ok": False, "error": "GitHub 配置字段过长"}, status_code=400)
+        if any("\n" in value or "\r" in value for value in (token, repo, branch, path_prefix)):
+            return JSONResponse({"ok": False, "error": "GitHub 配置不能包含换行"}, status_code=400)
 
         if not token and not repo:
             # 清空配置
@@ -179,10 +193,13 @@ def register(mcp) -> None:
         if not buckets_dir:
             return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
-            body = {}
-        force = bool(body.get("force"))
+            return JSONResponse({"ok": False, "error": "无效 JSON"}, status_code=400)
+        try:
+            force = parse_bool(body.get("force", False))
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         # 1) 导入前自动备份本地（合并覆盖会改动本地，留个后悔药）
         backup = _pre_import_backup(buckets_dir)
         # 记忆安全闸门：备份没成功就默认不动本地记忆——覆盖不可逆，宁可拦下。

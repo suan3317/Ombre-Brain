@@ -13,24 +13,40 @@ from ombrebrain.policy.vm import PolicyInstruction, PolicyOpcode, PolicyProgram,
 class PolicyEngine:
     registry: LegacyModuleRegistry
     vm: PolicyVM
+    enforcement_mode: str = "audit"
 
     @classmethod
-    def default(cls, registry: LegacyModuleRegistry | None = None) -> "PolicyEngine":
-        return cls(registry or build_default_legacy_profiles(), PolicyVM.default())
+    def default(
+        cls,
+        registry: LegacyModuleRegistry | None = None,
+        *,
+        enforcement_mode: str = "audit",
+    ) -> "PolicyEngine":
+        return cls(
+            registry or build_default_legacy_profiles(),
+            PolicyVM.default(),
+            _normalize_enforcement_mode(enforcement_mode),
+        )
 
     def evaluate(self, envelope: ExecutionEnvelope, command_plan: CommandPlan) -> dict[str, object]:
         profile = self._profile_for(envelope.module)
         contract = self._contract(envelope, command_plan, profile)
         program = self._program(contract)
         verdict = self.vm.evaluate(program, contract)
+        enforcement_mode = _normalize_enforcement_mode(self.enforcement_mode)
+        audit_only = enforcement_mode == "audit"
+        effective_allowed = True if audit_only else bool(verdict.allowed)
         return {
             **verdict.to_dict(),
+            "effective_allowed": effective_allowed,
             "contract": contract.to_dict(),
             "metadata": {
                 **dict(verdict.metadata),
                 "program": program.to_dict(),
                 "profile_module": profile.module,
-                "audit_only": True,
+                "audit_only": audit_only,
+                "enforcement_mode": enforcement_mode,
+                "effective_allowed": effective_allowed,
             },
         }
 
@@ -118,3 +134,10 @@ def _surface_is_protected(surface: str, protected_surfaces: tuple[str, ...]) -> 
     if lowered in {"embeddings", "vector", "vector-database"} and "vector-database" in protected:
         return True
     return False
+
+
+def _normalize_enforcement_mode(value: object) -> str:
+    normalized = str(value or "audit").strip().lower()
+    if normalized in {"enforce", "enforced", "blocking"}:
+        return "enforce"
+    return "audit"

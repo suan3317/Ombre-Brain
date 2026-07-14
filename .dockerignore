@@ -36,12 +36,26 @@ buckets/
 config.yaml
 
 # 文档 / 测试 / 部署清单
-docs/
+# docs/ 默认整体排除（内部设计稿 docs/superpowers、docs/secrets 等不该进镜像），
+# 但放行面向用户的几份说明——之前 Docker 用户装完容器后本地无源码、镜像里也没
+# 这几份文档，导致「给 Claude 的使用指南」（README）指向的 CLAUDE_PROMPT.md 拿不到。
+docs/*
+docs/**/*
+!docs/CLAUDE_PROMPT.md
+!docs/INTERNALS.md
+!docs/MULTI_OWNER.md
+!docs/OPERATIONS.md
 tests/
 deploy/
 # 例外：构建期需要它下载 cloudflared（见 Dockerfile 的 COPY），必须进构建上下文
 !deploy/fetch_cloudflared.py
 *.md
+!docs/CLAUDE_PROMPT.md
+!docs/INTERNALS.md
+!docs/MULTI_OWNER.md
+!docs/OPERATIONS.md
+!README.md
+!CHANGELOG.md
 
 # 日志与临时文件
 *.log

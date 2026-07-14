@@ -3,15 +3,15 @@
 tools/breath/search.py — 有 query 的检索模式
 ========================================
 
-走 breath(query=...) 时进入这里。两路并行：bucket_manager 关键词检索 +
-embedding_engine 向量近邻，结果合并去重，逐条 dehydrate 后塞 token 预算。
+走 breath(query=...) 时进入这里。一次向量查询与 bucket_manager 的
+关键词/BM25 检索融合，命中后逐字返回桶正文并套 token 预算。
 
 关键行为：
 - domain/valence/arousal 作为过滤参数传给 bucket_mgr.search
-- embedding 是强制依赖：未配置/未启用/调用失败直接拒绝整个检索，不再
-  降级回退到纯关键词通道（语义检索缺失 = 检索结果不完整，不能假装正常）
-- 向量通道阈值 sim>0.5；archived 桶不能从向量通道漂回（违反契约）
-- 命中后调 touch()，记忆重构会把展示层 valence 按当前情绪做 ±0.1 微调
+- embedding 未配置/未启用/调用失败时明确提示并继续关键词/BM25 检索
+- 向量通道阈值 sim>=0.65；domain/tags/type 过滤与关键词通道完全一致
+- 命中正文不经过 LLM 摘要、改写或压缩，直接返回当前存储的 content
+- 命中后调 touch()，但不修改本次返回的正文或元数据
 - 检索结果 < 3 时 40% 概率从低权重旧桶里随机漂出 1-3 条「忽然想起来」
 - 命中 0 条时回 webhook 报空，并给出可操作的引导文案
 
@@ -28,12 +28,16 @@ embedding_engine 向量近邻，结果合并去重，逐条 dehydrate 后塞 tok
 import asyncio
 import random
 
+from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from ._verbatim import render_stored_bucket
 
+_SURFACE_POLICY = SurfacePolicyVM.default()
 
-# 性能 P3：并发脱水的并发上限。够小以免瞬间打爆 LLM 速率限制，够大以显著压缩冷启动延迟。
-_DEHY_CONCURRENCY = 5
+_VECTOR_QUERY_TOPK = 50
+
+_SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
+_BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -43,8 +47,30 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     return all(t in bucket_tags for t in tag_filter)
 
 
-def _raw_core_fallback(content: str) -> str:
-    return strip_wikilinks(content)[:300].strip() or "（空记忆）"
+def _can_surface_search(bucket: dict) -> bool:
+    return _SURFACE_POLICY.evaluate_bucket(bucket, mode="search").allowed
+
+
+async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
+    """Run the vector query once and return scores plus an optional notice."""
+    engine = rt.embedding_engine
+    if not engine or not getattr(engine, "enabled", False):
+        rt.logger.warning("breath semantic search unavailable; using keyword/BM25 only")
+        return {}, _SEMANTIC_DISABLED_NOTE
+
+    try:
+        strict_search = getattr(engine, "search_similar_strict", None)
+        if callable(strict_search):
+            pairs = await strict_search(query, top_k=top_k)
+        else:
+            pairs = await engine.search_similar(query, top_k=top_k)
+        return {bucket_id: float(score) for bucket_id, score in pairs}, ""
+    except Exception as exc:
+        rt.logger.warning(
+            f"breath semantic search failed; using keyword/BM25 only: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return {}, _SEMANTIC_DISABLED_NOTE
 
 
 async def surface_search(
@@ -60,11 +86,48 @@ async def surface_search(
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
 
-    if not rt.embedding_engine or not getattr(rt.embedding_engine, "enabled", False):
-        raise RuntimeError(
-            "embedding 未配置或未启用，拒绝检索：语义检索是 breath(query=...) 的强制依赖。"
-            "请在设置中配置 OMBRE_EMBED_API_KEY，或用「本地向量模型」面板装好 Ollama + bge-m3。"
+    # A full bucket id is an address, not a semantic query.  Resolve it before
+    # embedding/BM25 work so callers can reliably read the on-disk source text
+    # immediately before trace(content=...) without an LLM or derived index in
+    # the path.  Archived/deleted and dedicated bucket types keep the same
+    # visibility boundary as ordinary search.
+    exact_id = query.strip()
+    try:
+        exact_bucket = await rt.bucket_mgr.get(exact_id)
+    except Exception as exc:
+        rt.logger.warning(
+            f"breath exact bucket lookup failed; continuing with search: "
+            f"{type(exc).__name__}: {exc}"
         )
+        exact_bucket = None
+    if exact_bucket:
+        meta = exact_bucket.get("metadata", {}) or {}
+        is_archived = meta.get("type") == "archived" or bool(meta.get("deleted_at"))
+        if (
+            not is_archived
+            and meta.get("type") not in ("feel", "plan", "letter")
+            and _can_surface_search(exact_bucket)
+            and _bucket_has_tags(meta, tag_filter)
+        ):
+            rendered, entry_tokens = render_stored_bucket(
+                exact_bucket,
+                f"[exact_bucket_id:true] [bucket_id:{exact_bucket['id']}]",
+            )
+            if entry_tokens > max_tokens:
+                return _BUDGET_NOTICE
+            asyncio.create_task(
+                rt.bucket_mgr.touch_many([exact_bucket["id"]], ripple=False)
+            )
+            if rt.fire_webhook:
+                await rt.fire_webhook(
+                    "breath",
+                    {"mode": "exact_id", "matches": 1, "chars": len(rendered)},
+                )
+            return rendered
+
+    vector_scores, semantic_notice = await _semantic_scores(
+        query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
+    )
 
     try:
         matches = await rt.bucket_mgr.search(
@@ -73,83 +136,41 @@ async def surface_search(
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
+            vector_scores=vector_scores,
         )
     except Exception as e:
         rt.logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
-    matches = [b for b in matches if b["metadata"].get("type") not in ("feel", "plan", "letter")]
+    matches = [
+        b for b in matches
+        if _can_surface_search(b)
+        and b["metadata"].get("type") not in ("feel", "plan", "letter")
+    ]
     matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
-
-    # --- 向量通道（强制依赖，失败不降级，异常向上抛由调用方报错） ---
-    matched_ids = {b["id"] for b in matches}
-    vector_results = await rt.embedding_engine.search_similar(query, top_k=max(max_results, 20))
-    for bucket_id, sim_score in vector_results:
-        if bucket_id not in matched_ids and sim_score > 0.65:
-            bucket = await rt.bucket_mgr.get(bucket_id)
-            if (
-                bucket
-                and bucket["metadata"].get("type") not in ("feel", "plan", "letter", "archived")
-                and _bucket_has_tags(bucket["metadata"], tag_filter)
-            ):
-                bucket["score"] = round(sim_score * 100, 2)
-                bucket["vector_match"] = True
-                matches.append(bucket)
-                matched_ids.add(bucket_id)
-
-    # 性能 P3：候选桶并发脱水（有界信号量），再按原顺序套 token 预算。
-    # 冷缓存时 N 次 LLM 往返从串行变并发；matches 已被上游截到 ~20，量可控。
-    _sem = asyncio.Semaphore(_DEHY_CONCURRENCY)
-
-    async def _dehydrate_one(bucket):
-        """返回 (is_core, is_vector, bucket_id, summary) 或 None（普通桶脱水失败即跳过）。"""
-        meta_b = bucket["metadata"]
-        is_core = meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent"
-        clean_meta = {k: v for k, v in meta_b.items() if k != "tags"}
-        # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-        if q_valence is not None and "valence" in clean_meta:
-            original_v = float(clean_meta.get("valence") or 0.5)
-            shift = (q_valence - 0.5) * 0.2
-            clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-        async with _sem:
-            try:
-                summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
-            except Exception as dehy_err:
-                if not is_core:
-                    rt.logger.error(
-                        f"Failed to dehydrate search result / 检索结果脱水失败: "
-                        f"{type(dehy_err).__name__}: {dehy_err}"
-                    )
-                    return None
-                rt.logger.warning(f"core search result dehydrate failed, using raw fallback: {dehy_err}")
-                summary = _raw_core_fallback(bucket["content"])
-        if is_core and not str(summary or "").strip():
-            summary = _raw_core_fallback(bucket["content"])
-        return (is_core, bool(bucket.get("vector_match")), bucket["id"], summary)
-
-    dehydrated = await asyncio.gather(*[_dehydrate_one(b) for b in matches])
+    matches = matches[:max_results]
 
     results = []
     token_used = 0
+    budget_blocked = False
     touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
-    for item in dehydrated:
-        if item is None:
-            continue
-        if token_used >= max_tokens:
-            break
-        is_core, is_vector, bucket_id, summary = item
-        summary_tokens = count_tokens_approx(summary)
-        if token_used + summary_tokens > max_tokens:
-            break
-        touched_ids.append(bucket_id)
+    for bucket in matches:
+        meta = bucket["metadata"]
+        bucket_id = bucket["id"]
+        is_core = meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent"
         if is_core:
-            summary = f"📌 [核心准则] [bucket_id:{bucket_id}] {summary}"
-        elif is_vector:
-            summary = f"[语义关联] [bucket_id:{bucket_id}] {summary}"
+            header = f"📌 [核心准则] [bucket_id:{bucket_id}]"
+        elif bucket.get("vector_match"):
+            header = f"[语义关联] [bucket_id:{bucket_id}]"
         else:
-            summary = f"[bucket_id:{bucket_id}] {summary}"
-        results.append(summary)
-        token_used += summary_tokens
+            header = f"[bucket_id:{bucket_id}]"
+        rendered, entry_tokens = render_stored_bucket(bucket, header)
+        if token_used + entry_tokens > max_tokens:
+            budget_blocked = True
+            break
+        results.append(rendered)
+        token_used += entry_tokens
+        touched_ids.append(bucket_id)
 
     # 性能 P2：把 touch 移出响应路径 —— 浮现完的桶在后台一次性更新激活，
     # ripple=False 跳过读全库的时间涟漪。响应不再等这些写盘/涟漪。
@@ -157,7 +178,7 @@ async def surface_search(
         asyncio.create_task(rt.bucket_mgr.touch_many(touched_ids, ripple=False))
 
     # --- 检索结果 < 3 时 40% 概率随机浮现 ---
-    if len(matches) < 3 and random.random() < 0.4:
+    if not budget_blocked and len(matches) < min(3, max_results) and random.random() < 0.4:
         try:
             all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
             matched_ids = {b["id"] for b in matches}
@@ -168,25 +189,46 @@ async def surface_search(
                 and rt.decay_engine.calculate_score(b["metadata"]) < 2.0
             ]
             if low_weight:
-                drifted = random.sample(low_weight, min(random.randint(1, 3), len(low_weight)))
+                remaining_slots = max(0, max_results - len(matches))
+                drifted = random.sample(
+                    low_weight,
+                    min(random.randint(1, 3), len(low_weight), remaining_slots),
+                )
                 drift_results = []
                 for b in drifted:
-                    clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                    summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                    drift_results.append(f"[surface_type: random]\n{summary}")
-                results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
+                    rendered, entry_tokens = render_stored_bucket(
+                        b,
+                        f"[surface_type: random] [bucket_id:{b['id']}]",
+                    )
+                    if token_used + entry_tokens > max_tokens:
+                        budget_blocked = True
+                        break
+                    drift_results.append(rendered)
+                    token_used += entry_tokens
+                if drift_results:
+                    results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
         except Exception as e:
             rt.logger.warning(f"Random surfacing failed / 随机浮现失败: {e}")
 
     if not results:
+        if budget_blocked:
+            return f"{semantic_notice}\n{_BUDGET_NOTICE}" if semantic_notice else _BUDGET_NOTICE
         if rt.fire_webhook:
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
-        return (
+        empty_text = (
             f"没有匹配到「{query}」相关的记忆。\n"
-            "可以换个关键词试试，或不带 query 看当下权重池；feel 用 breath(domain=\"feel\")，信件用 letter_read。"
+            "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。"
         )
+        return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
 
     final_text = "\n---\n".join(results)
+    notices = []
+    if semantic_notice:
+        notices.append(semantic_notice)
+    if budget_blocked:
+        notices.append(_BUDGET_NOTICE)
+    if notices:
+        final_text = "\n".join(notices + [final_text])
     if rt.fire_webhook:
         await rt.fire_webhook("breath", {"mode": "ok", "matches": len(matches), "chars": len(final_text)})
     return final_text

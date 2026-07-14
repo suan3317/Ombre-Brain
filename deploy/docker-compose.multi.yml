@@ -20,6 +20,9 @@ x-common-env: &common-env
   OMBRE_EMBED_API_KEY: ${OMBRE_EMBED_API_KEY:-}
   OMBRE_EMBED_BASE_URL: ${OMBRE_EMBED_BASE_URL:-}
   OMBRE_EMBED_MODEL: ${OMBRE_EMBED_MODEL:-}
+  # 跳过 SRV edge discovery，兼容 VPN DNS；双 region 保留 Tunnel 冗余。
+  TUNNEL_EDGE: ${TUNNEL_EDGE-region1.v2.argotunnel.com:7844,region2.v2.argotunnel.com:7844}
+  TUNNEL_TRANSPORT_PROTOCOL: ${TUNNEL_TRANSPORT_PROTOCOL:-http2}
 
 services:
   ming:
@@ -34,8 +37,11 @@ services:
       <<: *common-env
       OMBRE_OWNER_NAME: 小明
       OMBRE_DASHBOARD_PASSWORD: ${OMBRE_MING_PASSWORD:-}
+      OMBRE_HOST_VAULT_DIR: ${OMBRE_MING_VAULT_DIR:-}
     volumes:
-      - ./buckets-ming:/app/buckets
+      - type: bind
+        source: ${OMBRE_MING_VAULT_DIR:-./buckets-ming}
+        target: /app/buckets
 
   hong:
     build:
@@ -49,5 +55,8 @@ services:
       <<: *common-env
       OMBRE_OWNER_NAME: 小红
       OMBRE_DASHBOARD_PASSWORD: ${OMBRE_HONG_PASSWORD:-}
+      OMBRE_HOST_VAULT_DIR: ${OMBRE_HONG_VAULT_DIR:-}
     volumes:
-      - ./buckets-hong:/app/buckets
+      - type: bind
+        source: ${OMBRE_HONG_VAULT_DIR:-./buckets-hong}
+        target: /app/buckets

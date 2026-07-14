@@ -12,7 +12,11 @@
 """
 import asyncio
 import os
+from pathlib import Path
+import sqlite3
 import sys
+
+import frontmatter
 
 # 让脚本在容器(/app)与裸机(repo 根)两种布局下都能 import src/
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,17 +31,68 @@ def _check_code_has_vector_prefilter_fix() -> bool:
     用源码里的修复注释作为版本探针。"""
     try:
         import bucket_manager
-        src = open(bucket_manager.__file__, encoding="utf-8").read()
+        with open(bucket_manager.__file__, encoding="utf-8") as handle:
+            src = handle.read()
         return "不再窄化候选集" in src or "保留 vector_scores" in src
     except Exception:
         return False
 
 
-async def main() -> None:
-    import server as s  # 触发 runtime 初始化（config / bucket_mgr / embedding_engine）
-    bm = s.bucket_mgr
+def _load_active_buckets(base_dir: str) -> list[dict]:
+    buckets = []
+    base = Path(base_dir)
+    if not base.is_dir():
+        return buckets
+    for path in base.rglob("*.md"):
+        try:
+            relative_parts = path.relative_to(base).parts
+            if relative_parts and relative_parts[0].lower() == "archive":
+                continue
+            post = frontmatter.load(path)
+            buckets.append({
+                "id": str(post.get("id") or path.stem),
+                "metadata": dict(post.metadata),
+            })
+        except Exception as exc:
+            print(f"[!] 跳过无法解析的桶 {path}: {exc}")
+    return buckets
 
-    allb = await bm.list_all(include_archive=False)
+
+def _read_embedding_ids(config: dict) -> set[str] | None:
+    embed_cfg = config.get("embedding", {}) or {}
+    db_path = str(
+        embed_cfg.get("db_path")
+        or os.path.join(config["buckets_dir"], "embeddings.db")
+    )
+    if not os.path.isfile(db_path):
+        return None
+    connection = sqlite3.connect(
+        f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True
+    )
+    try:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(embeddings)").fetchall()
+        }
+        if "bucket_id" in columns:
+            id_query = "SELECT bucket_id FROM embeddings"
+        elif "id" in columns:
+            id_query = "SELECT id FROM embeddings"
+        else:
+            return set()
+        return {
+            str(row[0])
+            for row in connection.execute(id_query).fetchall()
+        }
+    finally:
+        connection.close()
+
+
+async def main() -> None:
+    from utils import load_config
+
+    config = load_config()
+    allb = _load_active_buckets(config["buckets_dir"])
     perm = [b for b in allb if b["metadata"].get("type") == "permanent"]
     perm_pinned = [b for b in perm if b["metadata"].get("pinned") or b["metadata"].get("protected")]
     perm_unpinned = [b for b in perm if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
@@ -61,10 +116,13 @@ async def main() -> None:
         print("\n[✓ 原因1] 没有未 pinned 的显式 permanent。")
 
     # --- 原因 2：permanent 桶缺向量 + 旧代码向量预筛 ---
-    ee = getattr(bm, "embedding_engine", None)
-    if ee and getattr(ee, "enabled", False):
+    try:
+        idx = _read_embedding_ids(config)
+    except Exception as e:
+        idx = set()
+        print(f"\n[!] 无法只读打开 embedding 索引: {e}")
+    if idx is not None:
         try:
-            idx = set(ee.list_all_ids())
             miss = [b["id"] for b in perm if b["id"] not in idx]
         except Exception as e:
             miss = []

@@ -9,6 +9,7 @@ import io
 import json
 import zipfile
 
+import httpx
 import pytest
 
 import web.meta as meta
@@ -125,3 +126,73 @@ def test_broken_manifest_json_aborts():
     plan = meta._plan_update_files(zf, _TOP)
     assert plan["abort"] is not None
     assert plan["files"] == {}
+
+
+def test_duplicate_candidate_path_aborts():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(_TOP + "src/server.py", b"first")
+        zf.writestr(_TOP + "src/server.py", b"second")
+    buf.seek(0)
+
+    with zipfile.ZipFile(buf) as zf:
+        plan = meta._plan_update_files(zf, _TOP)
+
+    assert "重复路径" in plan["abort"]
+    assert plan["files"] == {}
+
+
+def test_oversized_update_member_aborts(monkeypatch):
+    monkeypatch.setattr(meta, "_MAX_UPDATE_MEMBER_BYTES", 4)
+    zf = _zip({_TOP + "src/server.py": b"12345"})
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert "超过" in plan["abort"]
+    assert plan["files"] == {}
+
+
+def test_manifest_rejects_non_object_items():
+    zf = _zip({
+        _TOP + "src/server.py": b"ok",
+        _TOP + "update_manifest.json": json.dumps({"files": ["src/server.py"]}).encode(),
+    })
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert "无效文件项" in plan["abort"]
+    assert plan["files"] == {}
+
+
+def test_bounded_zip_member_rejects_duplicate_root_file():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(_TOP + "VERSION", b"1")
+        zf.writestr(_TOP + "VERSION", b"2")
+    buf.seek(0)
+
+    with zipfile.ZipFile(buf) as zf, pytest.raises(ValueError, match="重复路径"):
+        meta._read_bounded_zip_member(zf, _TOP + "VERSION", 128)
+
+
+@pytest.mark.asyncio
+async def test_update_download_stream_enforces_actual_byte_limit(monkeypatch):
+    monkeypatch.setattr(meta, "_MAX_UPDATE_ARCHIVE_BYTES", 10)
+
+    def handler(_request):
+        return httpx.Response(200, content=b"12345678901")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="64 MiB"):
+            await meta._download_update_archive(client, "https://updates.example/archive.zip")
+
+
+def test_atomic_update_write_replaces_complete_file(tmp_path):
+    target = tmp_path / "src" / "module.py"
+    target.parent.mkdir()
+    target.write_bytes(b"old")
+
+    meta._atomic_write_bytes(str(target), b"new-complete")
+
+    assert target.read_bytes() == b"new-complete"
+    assert not list(target.parent.glob(".ob-update-*"))

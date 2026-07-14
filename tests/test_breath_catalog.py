@@ -105,7 +105,7 @@ async def test_catalog_marks_pinned(bucket_mgr):
 
     out = await surface_catalog()
     # pinned 桶创建时名字会带时间戳前缀，所以分开断言：📌 标记在行内、名字在行内
-    line = next(l for l in out.split("\n") if "核心准则" in l)
+    line = next(row for row in out.split("\n") if "核心准则" in row)
     assert line.startswith("📌")
 
 

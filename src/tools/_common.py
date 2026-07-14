@@ -10,7 +10,7 @@ tools/_common.py — 跨工具共享的辅助逻辑
 关键行为：
 - check_content_size / check_pinned_quota：读取 config.limits，超限返回中文提示串
 - merge_or_create：先用语义检索找近似桶；超过阈值则合并（hold 用原文拼接，
-  grow 用 LLM 压缩），否则新建；写完同步刷新 embedding 与脱水缓存
+  grow 用 LLM 压缩），否则新建；写完投递 embedding 队列并刷新脱水缓存
 - iter 2.0：merge_or_create 接受 ``source_tool`` / ``grow_batch_id``，
   新建时写入 frontmatter；合并时不动原桶 source_tool，只追加 ``last_merged_by``
 - check_duplicate_for：fire-and-forget 标记疑似重复对（不自动合并）
@@ -29,7 +29,15 @@ tools/_common.py — 跨工具共享的辅助逻辑
 
 from typing import Tuple
 import asyncio
+from concurrent.futures import Future
+from contextlib import asynccontextmanager
 import hashlib
+import math
+import os
+from pathlib import Path
+import threading
+import time
+import uuid
 
 from . import _runtime as rt
 
@@ -48,6 +56,10 @@ _EMBED_WARN = (
 # --- 桶与配额默认值 ---
 _DEFAULT_MAX_BUCKET_BYTES = 50 * 1024  # 50 KB 单桶上限（超过建议走 grow 拆存）
 _DEFAULT_MAX_PINNED = 20               # pinned 桶上限（哲学边界：重要必须稀缺）；与 config.example.yaml limits.max_pinned 同步
+_DEFAULT_MAX_GROW_INPUT_BYTES = 2 * 1024 * 1024
+_DEFAULT_MAX_QUERY_BYTES = 16 * 1024
+_DEFAULT_MAX_METADATA_BYTES = 16 * 1024
+_DEFAULT_MAX_GROW_ITEMS = 100
 
 # --- importance≥9 配额（rule.md §1.0 哲学） ---
 _HIGH_IMP_THRESHOLD = 9                # importance 达到该值算“高重要度”
@@ -72,19 +84,107 @@ _LOG_REASON_PREVIEW = 60               # 日志里预览的理由长度
 
 # --- content lock 哈希 key 长度 ---
 _CONTENT_LOCK_KEY_HEX = 16             # 64 bit 空间，碰撞概率徽不足道
+_CONTENT_LOCK_POLL_SECONDS = 0.01
+_CONTENT_LOCK_STALE_MIN_SECONDS = 180.0
+_CONTENT_LOCK_STALE_GRACE_SECONDS = 60.0
+_CONTENT_LOCK_WAIT_GRACE_SECONDS = 30.0
 
-# F-01 / F-08 fix: per-content-hash asyncio.Lock，防止并发同内容双新建。
-# asyncio 单线程模型下 dict 访问本身是原子的，无需额外互斥。
-# Lock 对象懒创建后不回收（单进程内独立 content hash 总量有限，不构成泄漏）。
-_merge_content_locks: dict[str, asyncio.Lock] = {}
+# Per-content turns use concurrent futures rather than asyncio.Lock. FastMCP may
+# dispatch independent HTTP sessions from different event loops/threads;
+# asyncio.Lock is not a cross-loop primitive and allowed two first writes to race.
+_merge_content_tails: dict[str, Future[None]] = {}
+_merge_content_tails_guard = threading.Lock()
 
 
-def _get_content_lock(content: str) -> asyncio.Lock:
-    """Return (lazily created) per-content-hash asyncio.Lock."""
+def _complete_content_turn(key: str, turn: Future[None]) -> None:
+    with _merge_content_tails_guard:
+        if not turn.done():
+            turn.set_result(None)
+        if _merge_content_tails.get(key) is turn:
+            _merge_content_tails.pop(key, None)
+
+
+@asynccontextmanager
+async def _filesystem_content_turn(key: str):
+    """Use atomic lock-file creation as a cross-loop/process final guard."""
+    base_dir = str(getattr(rt.bucket_mgr, "base_dir", "") or "").strip()
+    if not base_dir:
+        yield
+        return
+
+    lock_dir = Path(base_dir) / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"content-{key}.lock"
+    token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+    try:
+        llm_timeout = float(
+            (rt.config.get("dehydration") or {}).get("timeout_seconds", 120)
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        llm_timeout = 120.0
+    if not math.isfinite(llm_timeout) or llm_timeout <= 0:
+        llm_timeout = 120.0
+    stale_seconds = max(
+        _CONTENT_LOCK_STALE_MIN_SECONDS,
+        llm_timeout + _CONTENT_LOCK_STALE_GRACE_SECONDS,
+    )
+    deadline = time.monotonic() + stale_seconds + _CONTENT_LOCK_WAIT_GRACE_SECONDS
+    acquired = False
+
+    while not acquired:
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > stale_seconds:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for identical-content write lock")
+            await asyncio.sleep(_CONTENT_LOCK_POLL_SECONDS)
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(token)
+            acquired = True
+
+    try:
+        yield
+    finally:
+        try:
+            if lock_path.read_text(encoding="utf-8") == token:
+                lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@asynccontextmanager
+async def _content_turn(content: str):
+    """Serialize identical writes across tasks, loops, and request threads."""
     key = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:_CONTENT_LOCK_KEY_HEX]
-    if key not in _merge_content_locks:
-        _merge_content_locks[key] = asyncio.Lock()
-    return _merge_content_locks[key]
+    turn: Future[None] = Future()
+    with _merge_content_tails_guard:
+        previous = _merge_content_tails.get(key)
+        _merge_content_tails[key] = turn
+
+    acquired = previous is None
+    try:
+        if previous is not None:
+            await asyncio.wrap_future(previous)
+            acquired = True
+        async with _filesystem_content_turn(key):
+            yield
+    finally:
+        if acquired:
+            _complete_content_turn(key, turn)
+        else:
+            # Cancellation while queued must preserve ordering for later turns.
+            previous.add_done_callback(lambda _completed: _complete_content_turn(key, turn))
 
 
 def _push_warning_safe(code: str, msg: str) -> None:
@@ -117,15 +217,41 @@ def _push_warning_safe(code: str, msg: str) -> None:
 
 def limits_cfg() -> dict:
     """读 config.limits 段；缺省值与 1.6 spec §5 一致：50KB 单桶 / 20 pinned。"""
-    return rt.config.get("limits", {}) or {}
+    config = rt.config if isinstance(rt.config, dict) else {}
+    return config.get("limits", {}) or {}
+
+
+def _configured_limit(name: str, default: int) -> int:
+    raw = limits_cfg().get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if value >= 0 else default
 
 
 def max_bucket_bytes() -> int:
-    return int(limits_cfg().get("max_bucket_bytes") or _DEFAULT_MAX_BUCKET_BYTES)
+    return _configured_limit("max_bucket_bytes", _DEFAULT_MAX_BUCKET_BYTES)
 
 
 def max_pinned() -> int:
-    return int(limits_cfg().get("max_pinned") or _DEFAULT_MAX_PINNED)
+    return _configured_limit("max_pinned", _DEFAULT_MAX_PINNED)
+
+
+def max_grow_input_bytes() -> int:
+    return _configured_limit("max_grow_input_bytes", _DEFAULT_MAX_GROW_INPUT_BYTES)
+
+
+def max_query_bytes() -> int:
+    return _configured_limit("max_query_bytes", _DEFAULT_MAX_QUERY_BYTES)
+
+
+def max_metadata_bytes() -> int:
+    return _configured_limit("max_metadata_bytes", _DEFAULT_MAX_METADATA_BYTES)
+
+
+def max_grow_items() -> int:
+    return _configured_limit("max_grow_items", _DEFAULT_MAX_GROW_ITEMS)
 
 
 def check_content_size(content: str) -> str | None:
@@ -136,9 +262,77 @@ def check_content_size(content: str) -> str | None:
     size = len(content.encode("utf-8"))
     if size > cap:
         return (
-            f"内容过大（{size/1024:.1f} KB > 上限 {cap/1024:.0f} KB）。"
+            f"内容过大（{size / 1024:.1f} KB > 上限 {cap / 1024:.0f} KB）。"
             "请改用 grow 拆分存入，或在 config.limits.max_bucket_bytes 调高上限。"
         )
+    return None
+
+
+def check_grow_input_size(content: str) -> str | None:
+    cap = max_grow_input_bytes()
+    if cap <= 0:
+        return None
+    size = len(str(content or "").encode("utf-8"))
+    if size > cap:
+        return (
+            f"grow 输入过大（{size / 1024:.1f} KB > 上限 {cap / 1024:.0f} KB）。"
+            "请分批调用，或调整 config.limits.max_grow_input_bytes。"
+        )
+    return None
+
+
+def check_query_size(query: str) -> str | None:
+    cap = max_query_bytes()
+    if cap <= 0:
+        return None
+    size = len(str(query or "").encode("utf-8"))
+    if size > cap:
+        return (
+            f"查询过大（{size / 1024:.1f} KB > 上限 {cap / 1024:.0f} KB）。"
+            "请缩短查询，或调整 config.limits.max_query_bytes。"
+        )
+    return None
+
+
+def check_metadata_size(**fields: object) -> str | None:
+    cap = max_metadata_bytes()
+    if cap <= 0:
+        return None
+    try:
+        size = sum(len(str(value or "").encode("utf-8")) for value in fields.values())
+    except Exception:
+        return "元数据参数无法安全序列化。"
+    if size > cap:
+        labels = ", ".join(fields)
+        return (
+            f"元数据过大（{size / 1024:.1f} KB > 上限 {cap / 1024:.0f} KB；字段: {labels}）。"
+            "请缩短标签、名称或筛选条件。"
+        )
+    return None
+
+
+def check_grow_items_payload(items: list) -> str | None:
+    item_cap = max_grow_items()
+    if item_cap > 0 and len(items) > item_cap:
+        return f"grow items 过多（{len(items)} > 上限 {item_cap}）。请分批调用，或调整 config.limits.max_grow_items。"
+
+    byte_cap = max_grow_input_bytes()
+    if byte_cap <= 0:
+        return None
+    total = 0
+    for item in items:
+        if isinstance(item, str):
+            value = item
+        elif isinstance(item, dict):
+            value = item.get("content", "")
+        else:
+            continue
+        try:
+            total += len(str(value or "").encode("utf-8"))
+        except Exception:
+            return "grow items 包含无法安全序列化的 content。"
+        if total > byte_cap:
+            return f"grow items 正文总量过大（{total / 1024:.1f} KB > 上限 {byte_cap / 1024:.0f} KB）。请分批调用。"
     return None
 
 
@@ -341,6 +535,9 @@ async def merge_or_create(
     why_remembered: str = "",
     source_tool: str = "",
     grow_batch_id: str = "",
+    meaning: str = "",
+    media: list | None = None,
+    test_data: bool = False,
 ) -> Tuple[str, bool, str]:
     """
     检查是否有相似桶可合并，有则合并，无则新建。返回 (桶ID或名称, 是否合并, embed警告信息)。
@@ -354,15 +551,19 @@ async def merge_or_create(
     - grow_batch_id: 仅 grow 路径会传，新建时写入；合并路径不覆盖原桶的 batch_id
       （原桶可能来自上一次 grow 或 hold，硬覆盖会丢失最初批次信息）。
 
+    Miss：meaning/media 是我自己的体验锚定，不是摘要。新建时直接写入；
+    合并到老桶时两条 meaning 都保留（拼接），media 追加而不是覆盖。
+
     F-01 / F-08 fix：整个 search→create 路径在 per-content-hash Lock 下串行执行。
     同内容并发调用时后到的协程会阻塞，等前者写完后直接走合并分支，不产生重复桶。
     """
-    async with _get_content_lock(content):
+    async with _content_turn(content):
         return await _merge_or_create_inner(
             content=content, tags=tags, importance=importance, domain=domain,
             valence=valence, arousal=arousal, name=name, raw_merge=raw_merge,
             why_remembered=why_remembered, source_tool=source_tool,
-            grow_batch_id=grow_batch_id,
+            grow_batch_id=grow_batch_id, meaning=meaning, media=media,
+            test_data=test_data,
         )
 
 
@@ -378,20 +579,40 @@ async def _merge_or_create_inner(
     why_remembered: str = "",
     source_tool: str = "",
     grow_batch_id: str = "",
+    meaning: str = "",
+    media: list | None = None,
+    test_data: bool = False,
 ) -> Tuple[str, bool, str]:
     """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
+    exact_storage_match = False
     try:
         existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
     except Exception as e:
         rt.logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
         existing = []
 
-    if existing and existing[0].get("score", 0) > (rt.config.get("merge_threshold") or 75):
+    # Cache invalidation and a concurrent list_all() refresh can cross: an old
+    # parsed snapshot may briefly hide a bucket that is already durable on disk.
+    # Before any create, let Markdown truth override search/cache results.
+    exact_finder = getattr(rt.bucket_mgr, "find_exact_content", None)
+    if callable(exact_finder):
+        try:
+            exact = exact_finder(content, domain_filter=domain or None)
+        except Exception as exc:
+            rt.logger.warning(f"Exact-content storage check failed: {exc}")
+        else:
+            if exact:
+                exact = dict(exact)
+                exact["score"] = float("inf")
+                existing = [exact]
+                exact_storage_match = True
+
+    if not test_data and existing and existing[0].get("score", 0) > (rt.config.get("merge_threshold") or 75):
         bucket = existing[0]
         # --- 不合并到钉选/保护桶 ---
         if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
             try:
-                if raw_merge:
+                if raw_merge or exact_storage_match:
                     # --- 原文拼接合并（hold 路径）---
                     old_text = bucket["content"].rstrip()
                     new_text = content.strip()
@@ -418,15 +639,23 @@ async def _merge_or_create_inner(
                 # 这样 dashboard 既能看到桶最初由谁创建，也能看到最近一次合并的来源。
                 if source_tool:
                     update_kwargs["last_merged_by"] = source_tool
-                await rt.bucket_mgr.update(bucket["id"], **update_kwargs)
+                # Miss: 合并到老桶时，meaning 追加一条（不覆盖已有列表），media 追加引用。
+                if meaning:
+                    update_kwargs["meaning_append"] = meaning
+                if media:
+                    update_kwargs["media_append"] = media
+                await rt.bucket_mgr.update(
+                    bucket["id"],
+                    allow_embedding_fallback=(raw_merge and source_tool == "hold"),
+                    # 合并 = 写入了一件新的当下事件 → 视作一次真实激活，
+                    # 刷新 last_active 并累加 activation_count（否则合并后的记忆
+                    # 时间会停在旧桶创建时刻，反而更失真）。
+                    bump_active=True,
+                    **update_kwargs,
+                )
                 # --- 旧 content 的脱水缓存失效，让 breath 拿到合并后的新文本 ---
                 try:
                     rt.dehydrator.invalidate_cache(bucket["content"])
-                except Exception:
-                    pass
-                # --- 合并后刷新 embedding（best-effort，合并路径不返回 embed 警告）---
-                try:
-                    await rt.embedding_engine.generate_and_store(bucket["id"], merged)
                 except Exception:
                     pass
                 rt.logger.info(
@@ -449,30 +678,43 @@ async def _merge_or_create_inner(
         why_remembered=why_remembered,
         source_tool=source_tool,
         grow_batch_id=grow_batch_id,
+        meaning=meaning,
+        media=media,
+        test_data=test_data,
+        # hold 的铁律：正文优先落盘。打标/embedding 可降级，但绝不压缩或撤销记忆。
+        allow_embedding_fallback=(raw_merge and source_tool == "hold"),
     )
-    # iter 2.1+ 起 create() 内部已调用 _sync_embedding，此处无需重复生成。
-    # 只需从 embedding_engine 探测上次是否成功（检查 db 中是否有该 id）。
-    # 失败时返回警告（降级，不报错）——embedding 失败桶仍有效，仅丧失语义检索能力。
+    # create() 已在原文落盘后投递 embedding outbox，此处无需重复生成。
+    # Managed runtime 下 queued 是正常成功态，不应在网络请求真正完成前误报
+    # “向量失败”；没有 outbox 的兼容运行时才检查同步尝试的结果。
     embed_warn = ""
-    try:
-        if rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
+    embedding_state = "disabled"
+    outbox = getattr(rt.bucket_mgr, "embedding_outbox", None)
+    if outbox is not None and outbox.is_pending(bucket_id):
+        embedding_state = "queued"
+    elif rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
+        try:
             existing = await rt.embedding_engine.get_embedding(bucket_id)
             if existing is None:
+                embedding_state = "missing"
                 embed_warn = _EMBED_WARN
                 rt.logger.info(
                     f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
                     f"reason=no_embedding_after_create"
                 )
-    except Exception as _embed_exc:
-        embed_warn = _EMBED_WARN
-        rt.logger.info(
-            f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
-            f"reason={type(_embed_exc).__name__}"
-        )
+            else:
+                embedding_state = "indexed"
+        except Exception as _embed_exc:
+            embedding_state = "missing"
+            embed_warn = _EMBED_WARN
+            rt.logger.info(
+                f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
+                f"reason={type(_embed_exc).__name__}"
+            )
     rt.logger.info(
         f"op=merge_or_create phase=branch branch=create bucket_id={bucket_id} "
         f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
-        f"embed_ok={int(not embed_warn)}"
+        f"embedding_state={embedding_state}"
     )
     return bucket_id, False, embed_warn
 
@@ -572,7 +814,6 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
 # 反向不做：bucket trace(resolved=1) 不联动 plan（plan 是独立承诺，
 # 单条事件结束不等于承诺达成）。
 # ============================================================
-
 async def cascade_plan_resolved_to_buckets(plan_meta: dict, plan_id: str) -> list[str]:
     """把 plan_meta 里 related_bucket / resolved_by 指向的普通桶标 resolved。
 

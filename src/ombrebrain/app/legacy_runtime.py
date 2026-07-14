@@ -5,12 +5,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ombrebrain.app.command_boundary_health import build_runtime_command_boundary_health
 from ombrebrain.app.command_bridge import LegacyCommandBridge
 from ombrebrain.app.execution import ExecutionEnvelope, ExecutionOutcome, LegacyExecutionPipeline
+from ombrebrain.app.neural_router import NeuralToolRouter, ToolScope
 from ombrebrain.app.profiles import LegacyModuleRegistry, build_default_legacy_profiles
+from ombrebrain.app.tool_output_contract import ToolOutputContract, ToolOutputStatus
 from ombrebrain.capabilities.catalog import register_foundation_capabilities
 from ombrebrain.decision.debug import DecisionDebugService
 from ombrebrain.decision.ledger import DecisionLedger
+from ombrebrain.domain import AdvancedCommandBoundaryContract, BoundaryStage, CommandBoundaryReceipt
 from ombrebrain.eventsourcing.kernel import EventSourcedMemoryKernel
 from ombrebrain.fabric.storage.engine import MemoryFabric
 from ombrebrain.kernel.context import OmbreContext
@@ -19,11 +23,12 @@ from ombrebrain.microkernel import CapabilityMicrokernel, CapabilityRequest
 from ombrebrain.policy.static_surfaces import StaticSurfacePolicy
 from ombrebrain.policy.update_policy import evaluate_update_manifest
 from ombrebrain.policy.engine import PolicyEngine
+from ombrebrain.policy.formal_invariants import FormalInvariantChecker
 from ombrebrain.projection.auditor import ConsistencyAuditor
 from ombrebrain.projection.audit_runtime import ProjectionAuditRuntime
 from ombrebrain.projection.runtime import ProjectionRuntime
 from ombrebrain.protocol.schemas import ActorKind, MemoryEvent, MemoryType, Visibility
-from ombrebrain.retrieval import QueryPlanner, RetrievalEngine
+from ombrebrain.retrieval import PolicyGatedRetrievalScorer, QueryPlanner, RetrievalEngine, SurfaceContextCompiler
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,10 @@ class LegacyRuntime:
     event_sourced_kernel: EventSourcedMemoryKernel
     query_planner: QueryPlanner
     retrieval_engine: RetrievalEngine
+    retrieval_scorer: PolicyGatedRetrievalScorer
     capability_microkernel: CapabilityMicrokernel
+    neural_tool_router: NeuralToolRouter
+    tool_output_contract: ToolOutputContract
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "LegacyRuntime":
@@ -63,12 +71,18 @@ class LegacyRuntime:
             projection_runtime=ProjectionRuntime.default(),
             consistency_auditor=ConsistencyAuditor.default(),
             projection_audit_runtime=ProjectionAuditRuntime.default(config_snapshot=_json_safe(config)),
-            policy_engine=PolicyEngine.default(build_default_legacy_profiles()),
+            policy_engine=PolicyEngine.default(
+                build_default_legacy_profiles(),
+                enforcement_mode=_policy_enforcement_mode(config),
+            ),
             decision_ledger=DecisionLedger.default(),
             event_sourced_kernel=EventSourcedMemoryKernel.default(),
             query_planner=QueryPlanner.default(),
             retrieval_engine=RetrievalEngine.default(),
+            retrieval_scorer=PolicyGatedRetrievalScorer.default(),
             capability_microkernel=CapabilityMicrokernel(runtime_registry),
+            neural_tool_router=NeuralToolRouter.default(),
+            tool_output_contract=ToolOutputContract.default(),
         )
 
     @property
@@ -157,12 +171,20 @@ class LegacyRuntime:
             legacy_payload,
         )
         retrieval_metadata = self._retrieval_metadata(name, legacy_payload)
+        outcome_metadata = {"ok": True, "result_type": "tool_event"}
+        command_boundary_metadata = self._command_boundary_metadata(
+            envelope,
+            command_plan,
+            policy_metadata,
+            outcome_metadata,
+            event_type="LegacyToolRecorded",
+        )
         decision_metadata = self._decision_metadata(
             envelope,
             command_plan,
             policy_metadata,
             projection_metadata,
-            {"ok": True, "result_type": "tool_event"},
+            outcome_metadata,
         )
         event = MemoryEvent.new(
             actor=ActorKind.SYSTEM,
@@ -179,6 +201,7 @@ class LegacyRuntime:
                 **retrieval_metadata,
                 **policy_metadata,
                 **projection_metadata,
+                **command_boundary_metadata,
                 **decision_metadata,
             },
         )
@@ -219,6 +242,13 @@ class LegacyRuntime:
             "error_type": outcome.error_type,
             "error_message": outcome.error_message[:240],
         }
+        command_boundary_metadata = self._command_boundary_metadata(
+            envelope,
+            command_plan,
+            policy_metadata,
+            outcome_metadata,
+            event_type="LegacyExecutionRecorded",
+        )
         decision_metadata = self._decision_metadata(
             envelope,
             command_plan,
@@ -253,6 +283,7 @@ class LegacyRuntime:
                 **retrieval_metadata,
                 **policy_metadata,
                 **projection_metadata,
+                **command_boundary_metadata,
                 **decision_metadata,
             },
         )
@@ -284,6 +315,142 @@ class LegacyRuntime:
 
     def debug_decision_health(self) -> dict[str, object]:
         return DecisionDebugService(self.fabric).health()
+
+    def debug_command_boundary_health(self, *, limit: int = 50) -> dict[str, object]:
+        return build_runtime_command_boundary_health(self.fabric.replay_events(), limit=limit)
+
+    def compile_surface_context(
+        self,
+        decisions,
+        memories,
+        *,
+        max_items: int = 8,
+        excerpt_chars: int = 280,
+    ) -> dict[str, object]:
+        bundle = SurfaceContextCompiler(max_items=max_items, excerpt_chars=excerpt_chars).compile(decisions, memories)
+        bundle_data = bundle.to_dict()
+        invariant_report = FormalInvariantChecker.default().evaluate_context_items(
+            [item.to_dict() for item in bundle.items]
+        ).to_dict()
+        return {
+            "ok": bool(invariant_report.get("ok")),
+            "compiler_version": bundle_data.get("compiler_version", ""),
+            "item_count": bundle_data.get("item_count", 0),
+            "truncated": bundle_data.get("truncated", False),
+            "bundle": bundle_data,
+            "formal_invariants": invariant_report,
+        }
+
+    def neural_route(
+        self,
+        tool: str,
+        *,
+        actor_name: str = "legacy-runtime",
+        source: str = "mcp",
+        permissions: tuple[str, ...] = (),
+    ):
+        return self.neural_tool_router.route(
+            tool,
+            scope=ToolScope(actor_name=actor_name, source=source, permissions=permissions),
+        )
+
+    def route_neural_tool(
+        self,
+        tool: str,
+        *,
+        actor_name: str = "legacy-runtime",
+        source: str = "mcp",
+        permissions: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        return self.neural_route(
+            tool,
+            actor_name=actor_name,
+            source=source,
+            permissions=permissions,
+        ).to_dict()
+
+    def tool_output_receipt(
+        self,
+        tool: str,
+        *,
+        summary: str = "",
+        status: ToolOutputStatus | str = ToolOutputStatus.OK,
+        actor_name: str = "legacy-runtime",
+        source: str = "mcp",
+        permissions: tuple[str, ...] = (),
+        warnings: tuple[str, ...] = (),
+    ):
+        return self.tool_output_contract.from_route(
+            self.neural_route(
+                tool,
+                actor_name=actor_name,
+                source=source,
+                permissions=permissions,
+            ),
+            status=status,
+            summary=summary,
+            warnings=warnings,
+        )
+
+    def evaluate_tool_output(
+        self,
+        tool: str,
+        *,
+        summary: str = "",
+        status: ToolOutputStatus | str = ToolOutputStatus.OK,
+        actor_name: str = "legacy-runtime",
+        source: str = "mcp",
+        permissions: tuple[str, ...] = (),
+        warnings: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        receipt = self.tool_output_receipt(
+            tool,
+            summary=summary,
+            status=status,
+            actor_name=actor_name,
+            source=source,
+            permissions=permissions,
+            warnings=warnings,
+        )
+        report = self.tool_output_contract.evaluate_receipt(receipt)
+        return {
+            "ok": report.ok,
+            "receipt": receipt.to_dict(),
+            "report": report.to_dict(),
+        }
+
+    def score_retrieval_bucket(
+        self,
+        bucket,
+        features=None,
+        *,
+        gates=None,
+        mode: str = "search",
+        source: str = "",
+    ) -> dict[str, object]:
+        return self.retrieval_scorer.score_bucket(
+            bucket,
+            features,
+            gates=gates,
+            mode=mode,
+            source=source,
+        ).to_dict()
+
+    def rank_retrieval_candidates(
+        self,
+        candidates,
+        *,
+        mode: str = "search",
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        return [
+            score.to_dict()
+            for score in self.retrieval_scorer.rank(
+                candidates,
+                mode=mode,
+                limit=limit,
+            )
+        ]
 
     def _projection_metadata(self, command_plan, legacy_metadata: dict[str, object]) -> dict[str, object]:
         try:
@@ -373,6 +540,54 @@ class LegacyRuntime:
                 }
             }
 
+    def _command_boundary_metadata(
+        self,
+        envelope: ExecutionEnvelope,
+        command_plan,
+        policy_metadata: dict[str, object],
+        outcome: dict[str, object],
+        *,
+        event_type: str,
+    ) -> dict[str, object]:
+        try:
+            policy_allowed = _effective_policy_allowed(policy_metadata)
+            outcome_ok = bool(outcome.get("ok", True))
+            writes_memory = bool(command_plan.writes_memory)
+            ledger_appended = writes_memory and policy_allowed and outcome_ok
+            stages = _boundary_stages(writes_memory=writes_memory, ledger_appended=ledger_appended)
+            events = _boundary_events(
+                command_plan,
+                envelope,
+                event_type=event_type,
+                include_event=ledger_appended,
+            )
+            receipt = CommandBoundaryReceipt(
+                command_id=command_plan.command_id,
+                command_kind=command_plan.command_kind.value,
+                stages=stages,
+                events=events,
+                ledger_appended=ledger_appended,
+                policy_preflight_allowed=policy_allowed,
+                event_validation_allowed=True,
+                metadata={
+                    "module": envelope.module,
+                    "operation": envelope.operation,
+                    "source": envelope.source,
+                    "outcome_ok": outcome_ok,
+                    "writes_memory": writes_memory,
+                    "runtime_event_type": event_type,
+                },
+            )
+            report = AdvancedCommandBoundaryContract.default().evaluate_receipt(receipt)
+            return {"command_boundary": {"receipt": receipt.to_dict(), "report": report.to_dict()}}
+        except Exception as exc:  # pragma: no cover - defensive side channel
+            return {
+                "command_boundary_error": {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:240],
+                }
+            }
+
 
 def _memory_type(value: object) -> MemoryType:
     try:
@@ -383,3 +598,58 @@ def _memory_type(value: object) -> MemoryType:
 
 def _json_safe(value: object) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str))
+
+
+def _effective_policy_allowed(policy_metadata: dict[str, object]) -> bool:
+    verdict = policy_metadata.get("policy_verdict")
+    if isinstance(verdict, dict):
+        if "effective_allowed" in verdict:
+            return bool(verdict["effective_allowed"])
+        if "allowed" in verdict:
+            return bool(verdict["allowed"])
+    return "policy_error" not in policy_metadata
+
+
+def _boundary_stages(*, writes_memory: bool, ledger_appended: bool) -> tuple[BoundaryStage, ...]:
+    if writes_memory and ledger_appended:
+        return (
+            BoundaryStage.COMMAND,
+            BoundaryStage.POLICY_PREFLIGHT,
+            BoundaryStage.EVENT_DERIVATION,
+            BoundaryStage.EVENT_POLICY_VALIDATION,
+            BoundaryStage.LEDGER_APPEND,
+            BoundaryStage.RECEIPT,
+        )
+    return (
+        BoundaryStage.COMMAND,
+        BoundaryStage.POLICY_PREFLIGHT,
+        BoundaryStage.RECEIPT,
+    )
+
+
+def _boundary_events(
+    command_plan,
+    envelope: ExecutionEnvelope,
+    *,
+    event_type: str,
+    include_event: bool,
+) -> tuple[dict[str, object], ...]:
+    if not include_event:
+        return ()
+    return (
+        {
+            "event_type": event_type,
+            "command_id": command_plan.command_id,
+            "module": envelope.module,
+            "operation": envelope.operation,
+        },
+    )
+
+
+def _policy_enforcement_mode(config: dict[str, Any]) -> object:
+    policy_config = config.get("policy")
+    if isinstance(policy_config, dict):
+        nested_mode = policy_config.get("enforcement_mode")
+        if nested_mode:
+            return nested_mode
+    return config.get("policy_enforcement_mode", "audit")

@@ -76,6 +76,7 @@ class TestLLMQuality:
         # Domain is non-empty list of strings
         assert isinstance(result["domain"], list)
         assert len(result["domain"]) >= 1
+        assert set(expected_domains).intersection(result["domain"])
         assert all(isinstance(d, str) for d in result["domain"])
 
         # Valence and arousal in range

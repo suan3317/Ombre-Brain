@@ -30,7 +30,33 @@ def test_policy_engine_denies_missing_required_permission() -> None:
     verdict = PolicyEngine.default(build_default_legacy_profiles()).evaluate(envelope, plan)
 
     assert verdict["allowed"] is False
+    assert verdict["effective_allowed"] is True
+    assert verdict["metadata"]["audit_only"] is True
+    assert verdict["metadata"]["enforcement_mode"] == "audit"
+    assert verdict["metadata"]["effective_allowed"] is True
     assert "memory:write" in verdict["missing_permissions"]
+
+
+def test_policy_engine_enforce_mode_makes_policy_deny_effective() -> None:
+    command = MemoryCommand.new(kind=CommandKind.TRACE, payload={"bucket_id": "b1"})
+    plan = MemoryCommandRouter.default().plan(command)
+    envelope = ExecutionEnvelope(
+        module="tools.trace",
+        operation="trace",
+        permissions=("mcp:call",),
+        required_permissions=("memory:write",),
+    )
+
+    verdict = PolicyEngine.default(
+        build_default_legacy_profiles(),
+        enforcement_mode="enforce",
+    ).evaluate(envelope, plan)
+
+    assert verdict["allowed"] is False
+    assert verdict["effective_allowed"] is False
+    assert verdict["metadata"]["audit_only"] is False
+    assert verdict["metadata"]["enforcement_mode"] == "enforce"
+    assert verdict["metadata"]["effective_allowed"] is False
 
 
 def test_policy_engine_marks_protected_projection_write_as_audit_deny() -> None:

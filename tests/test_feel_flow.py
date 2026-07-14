@@ -13,15 +13,13 @@
 
 import os
 import pytest
-import asyncio
 import pytest_asyncio
 
 # Feel flow tests use direct BucketManager calls, no LLM needed.
 
 
 class _FakeEmbeddingEngine:
-    """embedding 现在是 create()/update(content=...) 的强制依赖；这里的
-    测试不验证 embedding 本身，给一个永远成功的假引擎。"""
+    """这里不验证 embedding 本身，给一个永远成功的假引擎。"""
 
     enabled = True
 
@@ -48,7 +46,6 @@ async def isolated_tools(test_config, tmp_path, monkeypatch):
     monkeypatch.setenv("OMBRE_BUCKETS_DIR", str(tmp_path / "buckets"))
 
     # Create directory structure
-    import os
     bd = str(tmp_path / "buckets")
     for d in ["permanent", "dynamic", "archive", "dynamic/feel"]:
         os.makedirs(os.path.join(bd, d), exist_ok=True)
@@ -108,7 +105,6 @@ class TestFeelLifecycle:
     async def test_feel_in_feel_directory(self, isolated_tools):
         """Feel bucket stored under feel/沉淀物/."""
         bm, dh, de, bd = isolated_tools
-        import os
 
         bid = await bm.create(
             content="这是一条 feel 测试",
@@ -125,7 +121,6 @@ class TestFeelLifecycle:
     async def test_feel_retrieval_by_time(self, isolated_tools):
         """Feel buckets retrieved in reverse chronological order."""
         bm, dh, de, bd = isolated_tools
-        import os, time
         import frontmatter as fm
         from datetime import datetime, timedelta
 

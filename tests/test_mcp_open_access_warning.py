@@ -4,7 +4,6 @@ mcp_require_auth=false → /mcp 全裸奔，任何能连端口的人都能读写
 该分支的启动日志必须是 WARNING 级并讲清风险，避免用户无意识地把大脑暴露到公网。
 源码级护栏（与 test_dashboard_update_source.py 同风格），不需真启动服务。
 """
-import re
 from pathlib import Path
 
 _SERVER = Path(__file__).resolve().parents[1] / "src" / "server.py"

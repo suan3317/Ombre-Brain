@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Optional
 
 from rapidfuzz import fuzz
+from utils import parse_iso_datetime
 
 # --- topic 文本维度权重 ---
 TOPIC_NAME_W = 3.0
@@ -120,7 +121,7 @@ def calc_time_score(meta: dict) -> float:
     """
     last_active_str = meta.get("last_active", meta.get("created", ""))
     try:
-        last_active = datetime.fromisoformat(str(last_active_str))
+        last_active = parse_iso_datetime(last_active_str)
         days = max(0.0, (datetime.now() - last_active).total_seconds() / 86400)
     except (ValueError, TypeError):
         days = TIME_FALLBACK_DAYS

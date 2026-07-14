@@ -1,10 +1,11 @@
 """
 ========================================
-web/hooks.py — breath / dream 浮现挂载点（HTTP hook）
+web/hooks.py — breath 浮现挂载点（HTTP hook）
 ========================================
 
 - /breath-hook：对话开头由外部 hook 拉取，返回应浮现的记忆（pinned + 未解决采样）
-- /dream-hook：dream 专用，返回最近窗口内可做梦的候选
+
+不提供 /dream-hook：dream 按哲学不是义务、不该每次开场自动触发（详见下方端点处注释）。
 
 给外部 SessionStart hook / 自动化用；默认需要 Dashboard 登录态或 hook token。
 通过 sh.fire_webhook 推送事件。
@@ -17,8 +18,6 @@ import hmac
 import os
 import random
 
-from starlette.requests import Request
-from starlette.responses import Response
 
 from . import _shared as sh
 
@@ -196,44 +195,7 @@ def register(mcp) -> None:
             logger.warning(f"Breath hook failed: {e}")
             return PlainTextResponse("")
 
-
-    # =============================================================
-    # /dream-hook endpoint: Dedicated hook for Dreaming
-    # Dreaming 专用挂载点
-    # =============================================================
-    @mcp.custom_route("/dream-hook", methods=["GET"])
-    async def dream_hook(request):
-        from starlette.responses import PlainTextResponse
-        if not _is_hook_request_authorized(request):
-            return PlainTextResponse("", status_code=401)
-        try:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
-            candidates = [
-                b for b in all_buckets
-                if b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
-                and not b["metadata"].get("pinned", False)
-                and not b["metadata"].get("protected", False)
-                and not b["metadata"].get("dont_surface", False)
-            ]
-            candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-            recent = candidates[:10]
-
-            if not recent:
-                return PlainTextResponse("")
-
-            parts = []
-            for b in recent:
-                meta = b["metadata"]
-                resolved_tag = "[已解决]" if meta.get("resolved", False) else "[未解决]"
-                parts.append(
-                    f"{meta.get('name', b['id'])} {resolved_tag} "
-                    f"V{float(meta.get('valence') or 0.5):.1f}/A{float(meta.get('arousal') or 0.3):.1f}\n"
-                    f"{strip_wikilinks(b['content'][:200])}"
-                )
-
-            body_text = "[Ombre Brain - Dreaming]\n" + "\n---\n".join(parts)
-            await sh.fire_webhook("dream_hook", {"surfaced": len(parts), "chars": len(body_text)})
-            return PlainTextResponse(body_text)
-        except Exception as e:
-            logger.warning(f"Dream hook failed: {e}")
-            return PlainTextResponse("")
+    # 注意：这里**故意不再提供 /dream-hook**。
+    # 按 OB 的设计哲学，dream（做梦消化）不是义务、不该在每次会话开始被自动触发——
+    # 它只应在「需要消化时」由模型主动调用 MCP 的 dream 工具。把它做成 SessionStart hook
+    # 会把「主动消化」异化成「每次开场的强制动作」，与哲学冲突，故移除该端点。

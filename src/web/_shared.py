@@ -13,9 +13,9 @@ web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 关键行为：
 - init(config)：启动时由 server.py 注入 config（之后函数按需读 config["buckets_dir"]）。
 - 会话：基于 cookie 的简单会话，落盘到 <buckets_dir>/.dashboard_sessions.json，
-  100 年滚动有效（实际永久）；_load_sessions 原地改 _sessions（不重绑），
+  默认 30 天有效且可配置；_load_sessions 原地改 _sessions（不重绑），
   这样 server.py / 其它模块 `from ._shared import _sessions` 始终指向同一对象。
-- 密码：salt:sha256 存 <buckets_dir>/.dashboard_auth.json；支持环境变量
+- 密码：PBKDF2-HMAC-SHA256 存 <buckets_dir>/.dashboard_auth.json；支持环境变量
   OMBRE_DASHBOARD_PASSWORD 覆盖；安全问题用于忘密码急救。
 
 不做什么：
@@ -31,6 +31,7 @@ import time
 import json as _json_lib
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import logging
 
@@ -115,6 +116,7 @@ bucket_mgr = None
 dehydrator = None
 decay_engine = None
 embedding_engine = None
+embedding_outbox = None
 import_engine = None
 migrate_engine = None
 github_sync_instance = None
@@ -134,6 +136,59 @@ def init_runtime(**kwargs) -> None:
     只更新传入的键，未传的保持不变。
     """
     globals().update(kwargs)
+
+
+async def _read_json_object(request: Request) -> dict:
+    """Parse a JSON request body and reject non-object top-level values.
+
+    Mutation routes use named fields. Accepting arrays, strings, or scalars makes
+    later ``body.get(...)`` calls fail as HTTP 500s and can turn malformed input
+    into an unintended default action. Callers keep control of their response
+    shape by catching ``ValueError`` alongside JSON parse errors.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise ValueError("JSON body must be an object")
+    return body
+
+
+def replace_embedding_engine(engine) -> None:
+    """Atomically publish a hot-reloaded embedding engine to all holders."""
+    global embedding_engine
+    embedding_engine = engine
+
+    for holder_name, attribute in (
+        ("bucket_mgr", "embedding_engine"),
+        ("import_engine", "embedding_engine"),
+        ("migrate_engine", "_embedding_engine"),
+    ):
+        holder = globals().get(holder_name)
+        if holder is not None:
+            try:
+                setattr(holder, attribute, engine)
+            except Exception:
+                logger.warning(
+                    "Failed to refresh %s.%s", holder_name, attribute,
+                    exc_info=True,
+                )
+
+    # MCP tools keep a separate runtime container. Without updating it, reads
+    # keep using the old model while Dashboard writes use the new one.
+    try:
+        from tools import _runtime as tools_runtime  # type: ignore
+    except ImportError:  # pragma: no cover
+        try:
+            from ..tools import _runtime as tools_runtime  # type: ignore
+        except ImportError:
+            tools_runtime = None
+    if tools_runtime is not None:
+        tools_runtime.embedding_engine = engine
+    outbox = globals().get("embedding_outbox")
+    if outbox is not None:
+        try:
+            outbox.set_embedding_engine(engine)
+        except Exception:
+            logger.warning("Failed to refresh embedding outbox engine", exc_info=True)
 
 
 def evaluate_v3_update_manifest(manifest, content_by_path):
@@ -271,8 +326,26 @@ def _write_env_var(name: str, value: str) -> None:
 # --- Dashboard 鉴权常量（原 server.py 调参面板）---
 _PASSWORD_SALT_BYTES = 16            # secrets.token_hex(该值) → 32 char hex salt
 _SESSION_TOKEN_BYTES = 32            # secrets.token_urlsafe(该值) → ~43 char token
-_SESSION_TTL_SECONDS = 86400 * 36500  # 100 年 rolling（实际永久）
-_SESSION_TTL = _SESSION_TTL_SECONDS
+_DEFAULT_SESSION_TTL_DAYS = 30
+_MAX_SESSION_TTL_DAYS = 365
+_MAX_ACTIVE_SESSIONS = 256
+_SESSION_TTL_SECONDS = 86400 * _DEFAULT_SESSION_TTL_DAYS
+_SESSION_TTL = _SESSION_TTL_SECONDS  # compatibility constant for older callers
+
+
+def _session_ttl_seconds() -> int:
+    """Return a bounded dashboard session lifetime.
+
+    A century-long persisted bearer cookie made a copied session effectively
+    permanent. Operators can still choose a longer window, but the default and
+    hard cap now keep that exposure finite.
+    """
+    raw = os.environ.get("OMBRE_DASHBOARD_SESSION_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else _DEFAULT_SESSION_TTL_DAYS
+    except (TypeError, ValueError, OverflowError):
+        days = _DEFAULT_SESSION_TTL_DAYS
+    return max(1, min(days, _MAX_SESSION_TTL_DAYS)) * 86400
 
 _sessions: dict[str, float] = {}  # {token: expiry_timestamp}
 
@@ -291,16 +364,66 @@ _login_locked_until: dict[str, float] = {}        # {client_key: 解锁时间戳
 
 
 def _client_key(request: Request) -> str:
-    """限流分桶标识：优先反代透传的真实 IP，回退直连 IP。"""
-    try:
-        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    except Exception:
-        xff = ""
-    if xff:
-        return xff
+    """Return a spoof-resistant login rate-limit key.
+
+    Forwarding headers are accepted only from an explicitly trusted proxy.
+    Direct clients cannot evade lockout by rotating a forged X-Forwarded-For.
+    The built-in Cloudflare child connects over loopback, which is trusted by
+    default. Additional proxy CIDRs can be listed in
+    ``OMBRE_TRUSTED_PROXY_CIDRS``.
+    """
     client = getattr(request, "client", None)
     host = getattr(client, "host", "") if client else ""
-    return host or "unknown"
+    peer = str(host or "").strip()
+    if _is_trusted_proxy(peer):
+        try:
+            forwarded = (
+                request.headers.get("x-forwarded-for") or ""
+            ).split(",", 1)[0].strip()
+            if forwarded:
+                return str(ipaddress.ip_address(forwarded))
+        except (AttributeError, ValueError):
+            pass
+    try:
+        return str(ipaddress.ip_address(peer))
+    except ValueError:
+        return peer or "unknown"
+
+
+def _trusted_proxy_networks() -> tuple[ipaddress._BaseNetwork, ...]:
+    raw = os.environ.get(
+        "OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128"
+    )
+    networks = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("[auth] ignoring invalid trusted proxy CIDR: %s", item)
+    return tuple(networks)
+
+
+def _is_trusted_proxy(peer: str) -> bool:
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(address in network for network in _trusted_proxy_networks())
+
+
+def _trusted_forwarded_value(request: Request, header: str) -> str:
+    """Read one forwarded header only when the immediate peer is trusted."""
+    client = getattr(request, "client", None)
+    peer = str(getattr(client, "host", "") or "") if client else ""
+    if not _is_trusted_proxy(peer):
+        return ""
+    try:
+        return (request.headers.get(header) or "").split(",", 1)[0].strip()
+    except Exception:
+        return ""
 
 
 def _login_retry_after(request: Request) -> int:
@@ -344,6 +467,33 @@ def _get_sessions_file() -> str:
     return os.path.join(config["buckets_dir"], ".dashboard_sessions.json")
 
 
+def _atomic_write_private_json(path: str, data: object) -> None:
+    """Atomically persist authentication material with owner-only permissions."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.{secrets.token_hex(6)}.tmp"
+    fd = -1
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            _json_lib.dump(data, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
 def _load_sessions() -> None:
     """Load persisted sessions from disk on startup. Drop expired ones.
 
@@ -357,8 +507,22 @@ def _load_sessions() -> None:
         with open(path, "r", encoding="utf-8") as f:
             raw = _json_lib.load(f)
         now = time.time()
-        # 文件格式：{token: expiry_ts}；过期的丢掉
-        valid = {tok: exp for tok, exp in raw.items() if isinstance(exp, (int, float)) and exp > now}
+        max_expiry = now + _session_ttl_seconds()
+        # 文件格式：{token: expiry_ts}；过期、畸形和超出当前安全窗口的值不照单全收。
+        valid = {
+            tok: min(float(exp), max_expiry)
+            for tok, exp in raw.items()
+            if isinstance(tok, str)
+            and 20 <= len(tok) <= 256
+            and isinstance(exp, (int, float))
+            and exp > now
+        }
+        if len(valid) > _MAX_ACTIVE_SESSIONS:
+            valid = dict(
+                sorted(valid.items(), key=lambda item: item[1], reverse=True)[
+                    :_MAX_ACTIVE_SESSIONS
+                ]
+            )
         _sessions.clear()
         _sessions.update(valid)
     except Exception as e:
@@ -369,14 +533,15 @@ def _save_sessions() -> None:
     """Atomically persist active sessions to disk."""
     try:
         path = _get_sessions_file()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        # 只写未过期的；用 .tmp + os.replace 做原子写，避免 iCloud 同步看到半截 JSON
         now = time.time()
-        active = {tok: exp for tok, exp in _sessions.items() if exp > now}
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json_lib.dump(active, f)
-        os.replace(tmp, path)
+        active = {
+            tok: exp
+            for tok, exp in sorted(
+                _sessions.items(), key=lambda item: item[1], reverse=True
+            )[:_MAX_ACTIVE_SESSIONS]
+            if exp > now
+        }
+        _atomic_write_private_json(path, active)
     except Exception as e:
         logger.warning(f"[auth] failed to save sessions: {e}")
 
@@ -450,8 +615,7 @@ def _save_password_hash(password: str, *, keep_qa: bool = True) -> None:
             data["security_question"] = existing["security_question"]
         if existing.get("security_answer_hash"):
             data["security_answer_hash"] = existing["security_answer_hash"]
-    with open(auth_file, "w", encoding="utf-8") as f:
-        _json_lib.dump(data, f, ensure_ascii=False)
+    _atomic_write_private_json(auth_file, data)
 
 
 def _save_security_qa(question: str, answer: str) -> None:
@@ -460,17 +624,12 @@ def _save_security_qa(question: str, answer: str) -> None:
     data = _load_auth_data()
     data["security_question"] = question.strip()
     data["security_answer_hash"] = _hash_secret(answer.strip().lower())
-    with open(auth_file, "w", encoding="utf-8") as f:
-        _json_lib.dump(data, f, ensure_ascii=False)
+    _atomic_write_private_json(auth_file, data)
 
 
 def _verify_security_answer(answer: str) -> bool:
     stored = _load_auth_data().get("security_answer_hash", "")
     return _verify_secret(answer.strip().lower(), stored)
-
-
-def _verify_password_hash(password: str, stored: str) -> bool:
-    return _verify_secret(password, stored)
 
 
 def _is_setup_needed() -> bool:
@@ -500,8 +659,15 @@ def _verify_any_password(password: str) -> bool:
 
 
 def _create_session() -> str:
+    now = time.time()
+    expired = [tok for tok, exp in _sessions.items() if exp <= now]
+    for tok in expired:
+        _sessions.pop(tok, None)
+    while len(_sessions) >= _MAX_ACTIVE_SESSIONS:
+        oldest = min(_sessions, key=_sessions.get)
+        _sessions.pop(oldest, None)
     token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
-    _sessions[token] = time.time() + _SESSION_TTL
+    _sessions[token] = now + _session_ttl_seconds()
     _save_sessions()
     return token
 
@@ -521,7 +687,7 @@ def _is_authenticated(request: Request) -> bool:
 
 def _is_https_request(request: Request) -> bool:
     """Detect HTTPS through Cloudflare/reverse-proxy via X-Forwarded-Proto header."""
-    proto = (request.headers.get("x-forwarded-proto") or "").lower()
+    proto = _trusted_forwarded_value(request, "x-forwarded-proto").lower()
     if proto == "https":
         return True
     try:
@@ -541,7 +707,7 @@ def _set_session_cookie(resp: Response, token: str, request: Request) -> None:
         httponly=True,
         samesite="lax",
         secure=_is_https_request(request),
-        max_age=_SESSION_TTL,
+        max_age=_session_ttl_seconds(),
         path="/",
     )
 

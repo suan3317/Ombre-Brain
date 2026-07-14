@@ -1,3 +1,4 @@
+import asyncio
 import os
 from unittest.mock import MagicMock
 
@@ -28,6 +29,51 @@ class EmptyEmbedding:
         return []
 
 
+class SearchEmbedding:
+    enabled = True
+
+    async def search_similar(self, query, top_k=20):
+        return []
+
+
+class SearchPolicyBucketManager:
+    def __init__(self):
+        self.touched = []
+        self.buckets = [
+            self._bucket("visible", "Visible query memory.", {"name": "Visible"}),
+            self._bucket("hidden", "Hidden query memory.", {"name": "Hidden", "dont_surface": True}),
+            self._bucket("deleted", "Deleted query memory.", {"name": "Deleted", "deleted_at": "2026-07-03T00:00:00+00:00"}),
+            self._bucket("tombstone", "Tombstone query memory.", {"name": "Tombstone", "tombstone": True}),
+            self._bucket("archived", "Archived query memory.", {"name": "Archived", "type": "archived"}),
+        ]
+
+    def _bucket(self, bucket_id, content, metadata):
+        base = {"type": "dynamic", "importance": 5, "domain": []}
+        base.update(metadata)
+        return {"id": bucket_id, "content": content, "metadata": base}
+
+    async def search(
+        self,
+        query,
+        limit=20,
+        domain_filter=None,
+        query_valence=None,
+        query_arousal=None,
+        vector_scores=None,
+    ):
+        assert query == "query"
+        return list(self.buckets)
+
+    async def touch(self, bucket_id):
+        self.touched.append(bucket_id)
+
+    async def touch_many(self, bucket_ids, ripple=False):
+        self.touched.extend(bucket_ids)
+
+    async def list_all(self, include_archive=False):
+        return []
+
+
 def install_runtime(bucket_mgr, decay_eng, dehydrator):
     rt.config = {"surfacing": {}}
     rt.bucket_mgr = bucket_mgr
@@ -37,6 +83,11 @@ def install_runtime(bucket_mgr, decay_eng, dehydrator):
     rt.logger = MagicMock()
     rt.fire_webhook = None
     rt.mark_op = None
+
+
+def install_search_runtime(bucket_mgr, decay_eng, dehydrator):
+    install_runtime(bucket_mgr, decay_eng, dehydrator)
+    rt.embedding_engine = SearchEmbedding()
 
 
 @pytest.mark.asyncio
@@ -56,16 +107,30 @@ async def test_default_breath_surfaces_type_permanent_bucket_without_pinned_flag
 
 
 @pytest.mark.asyncio
-async def test_search_breath_rejects_when_embedding_unavailable_even_if_dehydrate_fails(
+async def test_default_breath_respects_dont_surface_even_for_core_bucket(bucket_mgr, decay_eng):
+    bucket_id = await bucket_mgr.create(
+        content="Core rule beta should stay hidden from spontaneous breath.",
+        bucket_type="permanent",
+        importance=10,
+        domain=["rules"],
+    )
+    await bucket_mgr.update(bucket_id, dont_surface=True)
+    install_runtime(bucket_mgr, decay_eng, EchoDehydrator())
+
+    result = await surface_default(max_results=10, max_tokens=10000, tag_filter=[])
+
+    assert bucket_id not in result
+    assert "Core rule beta" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_breath_returns_raw_content_without_dehydration(
     bucket_mgr,
     decay_eng,
     monkeypatch,
 ):
-    """embedding 是 breath(query=...) 的强制依赖：未启用时直接拒绝整个检索，
-    不再像旧版那样靠 dehydrate 失败回退原文继续返回结果（rule.md §1.5 的
-    「不静默」现在延伸为「不降级」，见 bucket_manager._require_embedding_available）。
-    """
-    await bucket_mgr.create(
+    """主动检索的两个派生服务都离线时，Markdown 原文仍然可读。"""
+    bucket_id = await bucket_mgr.create(
         content="Candlelit protocol belongs to the permanent rules.",
         bucket_type="permanent",
         importance=10,
@@ -77,16 +142,48 @@ async def test_search_breath_rejects_when_embedding_unavailable_even_if_dehydrat
 
     monkeypatch.setattr(search_mod.random, "random", lambda: 1.0)
 
-    with pytest.raises(RuntimeError, match="embedding"):
-        await surface_search(
-            query="Candlelit protocol",
-            max_results=10,
-            max_tokens=10000,
-            domain="",
-            valence=-1,
-            arousal=-1,
-            tag_filter=[],
-        )
+    result = await surface_search(
+        query="Candlelit protocol",
+        max_results=10,
+        max_tokens=10000,
+        domain="",
+        valence=-1,
+        arousal=-1,
+        tag_filter=[],
+    )
+
+    assert bucket_id in result
+    assert "Candlelit protocol" in result
+    assert "语义索引暂不可用" in result
+    assert "摘要服务暂不可用" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_breath_filters_terminal_states_but_keeps_dont_surface(decay_eng, monkeypatch):
+    bucket_mgr = SearchPolicyBucketManager()
+    install_search_runtime(bucket_mgr, decay_eng, EchoDehydrator())
+
+    import tools.breath.search as search_mod
+
+    monkeypatch.setattr(search_mod.random, "random", lambda: 1.0)
+
+    result = await surface_search(
+        query="query",
+        max_results=10,
+        max_tokens=10000,
+        domain="",
+        valence=-1,
+        arousal=-1,
+        tag_filter=[],
+    )
+    await asyncio.sleep(0)
+
+    assert "Visible query memory" in result
+    assert "Hidden query memory" in result
+    assert "Deleted query memory" not in result
+    assert "Tombstone query memory" not in result
+    assert "Archived query memory" not in result
+    assert bucket_mgr.touched == ["visible", "hidden"]
 
 
 @pytest.mark.asyncio

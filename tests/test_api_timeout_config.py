@@ -73,7 +73,7 @@ def test_embedding_engine_uses_configured_timeout(tmp_path):
 
 def test_dashboard_env_config_exposes_api_timeout_fields():
     root = Path(__file__).resolve().parents[1]
-    for rel_path in ("dashboard.html", "frontend/dashboard.html"):
+    for rel_path in ("frontend/dashboard.html",):
         html = (root / rel_path).read_text(encoding="utf-8")
 
         assert 'id="env-compress-timeout"' in html

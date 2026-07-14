@@ -4,7 +4,7 @@ tools/breath/catalog.py — catalog 目录模式（省 token 的记忆总览）
 ========================================
 
 用途：开新对话时先花极少的 token 看一眼「我都记得哪些事」，再用
-breath(query=...) 精准拉取需要的记忆——代替把全部记忆一股脑塞进上下文。
+breath_search(query=...) 精准拉取需要的记忆——代替把全部记忆一股脑塞进上下文。
 
 关键行为：
 - 只读元数据（bucket_mgr.list_all），0 次 LLM/embedding 调用
@@ -63,7 +63,7 @@ async def surface_catalog(domain_filter: list[str] | None = None) -> str:
 
     parts = [
         f"=== 记忆目录（{total} 桶）===",
-        "先看目录定位，再 breath(query=...) 精准拉取正文。",
+        "先看目录定位，再 breath_search(query=...) 精准拉取正文。",
     ]
     for key, label in _SECTIONS:
         rows = grouped[key]

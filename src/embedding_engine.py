@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -43,12 +44,13 @@ from collections import OrderedDict
 from typing import Any
 
 import httpx
+import numpy as np
 from openai import AsyncOpenAI
 
 try:
-    from utils import positive_float
+    from utils import parse_bool, positive_float
 except ImportError:  # pragma: no cover
-    from .utils import positive_float  # type: ignore
+    from .utils import parse_bool, positive_float  # type: ignore
 
 try:
     from provider_detect import (
@@ -88,32 +90,11 @@ def _norm_model(name: str) -> str:
     Gemini OpenAI-compat 端点要求 "models/" 前缀，OpenAI 兼容代理（aihubmix /
     硅基流动等）用裸名——同一模型仅前缀不同。剥掉前缀 + 去空白 + 小写，
     让 model_name 的对账只看真实身份，不被书写约定误伤（修 OB-W005 假阳性）。
+    Ollama 的 ":latest" 是默认 tag：bge-m3 与 bge-m3:latest 是同一模型，
+    比较前剥掉结尾 ":latest"。仅剥这一个 tag——:q4_0 之类量化 tag 代表
+    不同的量化版本，是真实身份差异，不能剥。
     """
-    return strip_native_resource_prefix(name).lower()
-
-
-def _humanize_api_error(e: Exception) -> str:
-    """把 OpenAI 兼容后端的常见异常翻成可读中文提示，附在 OB-E001 detail 末尾。
-
-    目的：让错误面板直接看懂 401/400/404/超时该怎么办，尤其跨境 provider 选错的
-    场景（美国 VPS 连国内域名超时、国际站无某模型、key 不匹配 provider）。
-    返回空串表示无额外可补充的提示。
-    """
-    name = type(e).__name__
-    code = getattr(e, "status_code", None)
-    s = str(e).lower()
-    if code == 401 or "authentication" in name.lower() or "401" in s:
-        return "→ 401：API key 无效或无权限，确认 key 正确且属于当前 base_url 的 provider。"
-    if code == 404 or "notfound" in name.lower() or "404" in s:
-        return "→ 404/model 不存在：确认模型名与 base_url 属同一 provider（如 SiliconFlow 国际站可能没有 BAAI/bge-m3）。"
-    if code == 400 or "badrequest" in name.lower():
-        return "→ 400：请求被拒，多为模型名不存在或参数不被支持，核对 model 名。"
-    if "timeout" in name.lower() or "connect" in name.lower() or "timeout" in s:
-        return (
-            "→ 超时/连接失败：检查网络与 base_url 可达性。美国 VPS 直连国内域名"
-            "（api.siliconflow.cn）极易超时，建议改用就近 provider 或本地 ollama。"
-        )
-    return ""
+    return strip_native_resource_prefix(name).lower().removesuffix(":latest")
 
 
 def _humanize_api_error(e: Exception) -> str:
@@ -361,7 +342,7 @@ class EmbeddingEngine:
         self.backend = "api"
 
         # 2) 解析 enabled。OB-F001：enabled=true 但 api_key 空，且后端是 api → 拒启
-        enabled_cfg = embed_cfg.get("enabled", True)
+        enabled_cfg = parse_bool(embed_cfg.get("enabled", True), default=True)
 
         # 3) 解析 SQLite 路径（允许测试 fixture 通过 db_path 覆盖）
         custom_db = (embed_cfg.get("db_path") or "").strip()
@@ -479,9 +460,25 @@ class EmbeddingEngine:
                 CREATE TABLE IF NOT EXISTS embeddings (
                     bucket_id TEXT PRIMARY KEY,
                     embedding TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    content_hash TEXT NOT NULL DEFAULT ''
                 )
             """)
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(embeddings)").fetchall()
+            }
+            if "content_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE embeddings ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "meaning_embedding" not in columns:
+                # Miss: meaning 的向量独立存一列，不与 content 的 embedding 混合生成，
+                # 否则长 content 会稀释掉一句话 meaning 的语义信号。NULL = 该桶未写
+                # meaning，或 meaning 向量化尚未成功（无需专门迁移历史桶）。
+                conn.execute(
+                    "ALTER TABLE embeddings ADD COLUMN meaning_embedding TEXT"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS embeddings_meta (
                     key TEXT PRIMARY KEY,
@@ -609,13 +606,16 @@ class EmbeddingEngine:
             embedding = await self._generate_async(content)
             if not embedding:
                 return False
-            self._store_embedding(bucket_id, embedding)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            self._store_embedding(bucket_id, embedding, digest)
             return True
         except Exception as e:
             logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
             return False
 
-    def _store_embedding(self, bucket_id: str, embedding: list[float]) -> None:
+    def _store_embedding(
+        self, bucket_id: str, embedding: list[float], content_hash: str = ""
+    ) -> None:
         try:
             from utils import now_iso  # type: ignore
         except ImportError:
@@ -623,8 +623,49 @@ class EmbeddingEngine:
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO embeddings (bucket_id, embedding, updated_at) VALUES (?, ?, ?)",
-                (bucket_id, json.dumps(embedding), now_iso()),
+                """INSERT INTO embeddings (bucket_id, embedding, updated_at, content_hash)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(bucket_id) DO UPDATE SET
+                     embedding=excluded.embedding,
+                     updated_at=excluded.updated_at,
+                     content_hash=excluded.content_hash""",
+                (bucket_id, json.dumps(embedding), now_iso(), content_hash),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def generate_and_store_meaning(self, bucket_id: str, meaning_text: str) -> bool:
+        """Miss: 为 meaning（最近一条）单独生成并存储一份 embedding。
+
+        与 content 的向量分列存储，互不覆盖；桶可能还没有 content 向量行
+        （outbox 还在排队），所以用 upsert 而不是要求行已存在。
+        """
+        if not self.enabled or not meaning_text or not meaning_text.strip():
+            return False
+        try:
+            embedding = await self._generate_async(meaning_text)
+            if not embedding:
+                return False
+            self._store_meaning_embedding(bucket_id, embedding)
+            return True
+        except Exception as e:
+            logger.warning(f"Meaning embedding generation failed for {bucket_id}: {e}")
+            return False
+
+    def _store_meaning_embedding(self, bucket_id: str, embedding: list[float]) -> None:
+        try:
+            from utils import now_iso  # type: ignore
+        except ImportError:
+            from .utils import now_iso  # type: ignore
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """INSERT INTO embeddings (bucket_id, embedding, updated_at, content_hash, meaning_embedding)
+                   VALUES (?, '', ?, '', ?)
+                   ON CONFLICT(bucket_id) DO UPDATE SET
+                     meaning_embedding=excluded.meaning_embedding""",
+                (bucket_id, now_iso(), json.dumps(embedding)),
             )
             conn.commit()
         finally:
@@ -647,6 +688,27 @@ class EmbeddingEngine:
         finally:
             conn.close()
 
+    def list_content_hashes(self) -> dict[str, str]:
+        """Return hashes recorded by new writes; legacy rows contain ``""``."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT bucket_id, content_hash FROM embeddings"
+            ).fetchall()
+            return {str(bucket_id): str(digest or "") for bucket_id, digest in rows}
+        finally:
+            conn.close()
+
+    def get_content_hash(self, bucket_id: str) -> str:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT content_hash FROM embeddings WHERE bucket_id = ?", (bucket_id,)
+            ).fetchone()
+            return str(row[0] or "") if row else ""
+        finally:
+            conn.close()
+
     async def get_embedding(self, bucket_id: str) -> list[float] | None:
         conn = sqlite3.connect(self.db_path)
         try:
@@ -664,40 +726,98 @@ class EmbeddingEngine:
 
     # -------------------- 搜索 --------------------
 
-    async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
-        """返回 [(bucket_id, similarity)] 按相似度倒序。"""
+    async def search_similar_strict(
+        self, query: str, top_k: int = 10
+    ) -> list[tuple[str, float]]:
+        """Return ranked neighbors, surfacing provider failures to the caller."""
         if not self.enabled:
-            return []
-        try:
-            query_embedding = await self._generate_async(query)
-            if not query_embedding:
-                return []
-        except Exception as e:
-            logger.warning(f"Query embedding failed: {e}")
-            return []
-
+            raise RuntimeError("embedding is disabled")
         conn = sqlite3.connect(self.db_path)
         try:
-            rows = conn.execute("SELECT bucket_id, embedding FROM embeddings").fetchall()
+            rows = conn.execute(
+                "SELECT bucket_id, embedding, meaning_embedding FROM embeddings"
+            ).fetchall()
         finally:
             conn.close()
         if not rows:
             return []
 
-        results: list[tuple[str, float]] = []
-        for bucket_id, emb_json in rows:
-            try:
-                stored_embedding = json.loads(emb_json)
-                sim = self._cosine_similarity(query_embedding, stored_embedding)
-                results.append((bucket_id, sim))
-            except (json.JSONDecodeError, ValueError, TypeError) as _emb_exc:
-                logger.warning(
-                    f"[embedding] Skipping malformed embedding for {bucket_id!r}: "
-                    f"{type(_emb_exc).__name__}: {_emb_exc}"
-                )
-                continue
-        results.sort(key=lambda x: x[1], reverse=True)
+        query_embedding = await self._generate_async(query)
+        if not query_embedding:
+            raise RuntimeError("embedding provider returned an empty query vector")
+
+        bucket_ids: list[str] = []
+        best_scores: list[float | None] = []
+        candidate_vectors: list[list[float]] = []
+        candidate_owners: list[int] = []
+        query_dim = len(query_embedding)
+        for bucket_id, emb_json, meaning_emb_json in rows:
+            # Miss: 一个桶可能同时有 content 向量和 meaning 向量，取相似度较高的
+            # 那一个作为该桶的匹配分——这样一句 meaning 也能单独被检索命中，
+            # 不会被更长的 content 向量稀释掉。
+            owner = len(bucket_ids)
+            bucket_ids.append(bucket_id)
+            best_scores.append(None)
+            for label, raw_embedding in (
+                ("embedding", emb_json),
+                ("meaning embedding", meaning_emb_json),
+            ):
+                if not raw_embedding:
+                    continue
+                try:
+                    stored_embedding = json.loads(raw_embedding)
+                    if not isinstance(stored_embedding, list):
+                        raise TypeError(
+                            f"embedding is {type(stored_embedding).__name__}, not list"
+                        )
+                    if not stored_embedding:
+                        continue
+                    stored_embedding = [float(value) for value in stored_embedding]
+                except (json.JSONDecodeError, ValueError, TypeError) as _emb_exc:
+                    logger.warning(
+                        f"[embedding] Skipping malformed {label} for {bucket_id!r}: "
+                        f"{type(_emb_exc).__name__}: {_emb_exc}"
+                    )
+                    continue
+                if len(stored_embedding) != query_dim:
+                    # Preserve the pairwise helper's existing contract: a
+                    # dimension mismatch contributes a 0.0 score.
+                    logger.warning(
+                        f"[embedding] {label} dimension mismatch for {bucket_id!r}: "
+                        f"stored={len(stored_embedding)}, query={query_dim}"
+                    )
+                    current = best_scores[owner]
+                    best_scores[owner] = 0.0 if current is None else max(current, 0.0)
+                    continue
+                candidate_vectors.append(stored_embedding)
+                candidate_owners.append(owner)
+
+        if candidate_vectors:
+            similarities = self._cosine_similarity_batch(
+                query_embedding, candidate_vectors
+            )
+            for owner, similarity in zip(candidate_owners, similarities):
+                score = float(similarity)
+                current = best_scores[owner]
+                best_scores[owner] = score if current is None else max(current, score)
+
+        results = [
+            (bucket_id, score)
+            for bucket_id, score in zip(bucket_ids, best_scores)
+            if score is not None
+        ]
+        # Python's sort is stable, preserving SQLite row order for equal scores.
+        # This avoids argpartition's nondeterministic tie-boundary behavior.
+        results.sort(key=lambda item: item[1], reverse=True)
         return results[:top_k]
+
+    async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
+        """返回 [(bucket_id, similarity)]；失败时兼容旧调用方并返回空列表。"""
+        try:
+            return await self.search_similar_strict(query, top_k=top_k)
+        except Exception as e:
+            logger.warning(f"Query embedding failed: {e}")
+            return []
 
     async def search(self, query: str, top_k: int = 10) -> list[str]:
         """规范新接口：只返回 bucket_id 列表。"""
@@ -714,6 +834,22 @@ class EmbeddingEngine:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return dot / (norm_a * norm_b)
+
+    @staticmethod
+    def _cosine_similarity_batch(
+        query: list[float], vectors: list[list[float]]
+    ) -> "np.ndarray":
+        """Return cosine similarity for equally-sized vectors in one matrix pass."""
+        query_array = np.asarray(query, dtype=np.float64)
+        matrix = np.asarray(vectors, dtype=np.float64)
+        dots = matrix @ query_array
+        denominator = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query_array)
+        return np.divide(
+            dots,
+            denominator,
+            out=np.zeros_like(dots),
+            where=denominator != 0,
+        )
 
     # -------------------- 前端可读的状态 --------------------
 

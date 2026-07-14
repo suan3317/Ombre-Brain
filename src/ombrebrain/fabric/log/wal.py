@@ -1,12 +1,55 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import threading
 from typing import Iterator
 
 from ombrebrain.kernel.errors import LogIntegrityError
+
+
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    key = str(path.expanduser().resolve(strict=False))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Serialize writers across processes using a sidecar lock file."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -20,32 +63,45 @@ class WalEntry:
 class WalStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._process_lock = _path_lock(self.path)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        with self._process_lock:
+            with _exclusive_file_lock(self.path):
+                yield
 
     def append(self, payload: dict[str, object]) -> WalEntry:
-        last_entry = self._last_entry()
-        index = 1 if last_entry is None else last_entry.index + 1
-        previous_checksum = "" if last_entry is None else last_entry.checksum
-        checksum = _entry_checksum(index, previous_checksum, payload)
-        entry = WalEntry(
-            index=index,
-            previous_checksum=previous_checksum,
-            checksum=checksum,
-            payload=dict(payload),
-        )
-        record = {
-            "index": entry.index,
-            "previous_checksum": entry.previous_checksum,
-            "checksum": entry.checksum,
-            "payload": entry.payload,
-        }
+        with self._locked():
+            last_entry = self._last_entry_unlocked()
+            index = 1 if last_entry is None else last_entry.index + 1
+            previous_checksum = "" if last_entry is None else last_entry.checksum
+            checksum = _entry_checksum(index, previous_checksum, payload)
+            entry = WalEntry(
+                index=index,
+                previous_checksum=previous_checksum,
+                checksum=checksum,
+                payload=dict(payload),
+            )
+            record = {
+                "index": entry.index,
+                "previous_checksum": entry.previous_checksum,
+                "checksum": entry.checksum,
+                "payload": entry.payload,
+            }
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
-            handle.write("\n")
-        return entry
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
+                handle.write("\n")
+                handle.flush()
+            return entry
 
     def replay(self) -> Iterator[WalEntry]:
+        with self._locked():
+            yield from self._replay_unlocked()
+
+    def _replay_unlocked(self) -> Iterator[WalEntry]:
         if not self.path.exists():
             return
 
@@ -73,12 +129,13 @@ class WalStore:
                 previous_checksum = entry.checksum
 
     def next_index(self) -> int:
-        last_entry = self._last_entry()
-        return 1 if last_entry is None else last_entry.index + 1
+        with self._locked():
+            last_entry = self._last_entry_unlocked()
+            return 1 if last_entry is None else last_entry.index + 1
 
-    def _last_entry(self) -> WalEntry | None:
+    def _last_entry_unlocked(self) -> WalEntry | None:
         last_entry = None
-        for entry in self.replay():
+        for entry in self._replay_unlocked():
             last_entry = entry
         return last_entry
 

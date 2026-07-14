@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Any, TypeVar
 
+from ombrebrain.kernel.errors import PolicyViolation
+
 logger = logging.getLogger("ombrebrain.app.execution")
 
 T = TypeVar("T")
@@ -75,6 +77,7 @@ class LegacyExecutionPipeline:
 
     def run(self, envelope: ExecutionEnvelope, handler: Callable[[], T]) -> T:
         history = self._preflight(envelope)
+        self._authorize_policy(envelope, history)
         try:
             history.append(ExecutionPhase.EXECUTING.value)
             result = handler()
@@ -108,6 +111,7 @@ class LegacyExecutionPipeline:
         handler: Callable[[], Awaitable[T]],
     ) -> T:
         history = self._preflight(envelope)
+        self._authorize_policy(envelope, history)
         try:
             history.append(ExecutionPhase.EXECUTING.value)
             result = await handler()
@@ -147,6 +151,39 @@ class LegacyExecutionPipeline:
         if missing:
             raise PermissionError(f"missing permissions: {sorted(missing)}")
         return history
+
+    def _authorize_policy(self, envelope: ExecutionEnvelope, history: list[str]) -> None:
+        verdict = self._policy_verdict(envelope)
+        if not verdict or bool(verdict.get("effective_allowed", True)):
+            return
+
+        message = _policy_violation_message(envelope, verdict)
+        history.append(ExecutionPhase.FAILED.value)
+        self._record(
+            envelope,
+            ExecutionOutcome(
+                ok=False,
+                phase_history=tuple(history),
+                error_type=PolicyViolation.__name__,
+                error_message=message,
+            ),
+        )
+        raise PolicyViolation(message)
+
+    def _policy_verdict(self, envelope: ExecutionEnvelope) -> dict[str, Any] | None:
+        planner = getattr(self.runtime, "plan_legacy_command", None)
+        policy_engine = getattr(self.runtime, "policy_engine", None)
+        evaluator = getattr(policy_engine, "evaluate", None)
+        if not callable(planner) or not callable(evaluator):
+            return None
+        try:
+            verdict = evaluator(envelope, planner(envelope))
+        except Exception as exc:  # pragma: no cover - defensive side channel
+            logger.warning("v2.4.0 policy evaluation failed for %s.%s: %s", envelope.module, envelope.operation, exc)
+            return None
+        if isinstance(verdict, Mapping):
+            return dict(verdict)
+        return None
 
     def _record(self, envelope: ExecutionEnvelope, outcome: ExecutionOutcome) -> None:
         recorder = getattr(self.runtime, "record_execution_event", None)
@@ -193,3 +230,15 @@ def _is_sensitive_key(key: str) -> bool:
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str))
+
+
+def _policy_violation_message(envelope: ExecutionEnvelope, verdict: Mapping[str, Any]) -> str:
+    missing = ", ".join(str(item) for item in verdict.get("missing_permissions", ()))
+    protected = ", ".join(str(item) for item in verdict.get("protected_surfaces", ()))
+    details: list[str] = []
+    if missing:
+        details.append(f"missing permissions: {missing}")
+    if protected:
+        details.append(f"protected surfaces: {protected}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return f"policy denied {envelope.module}.{envelope.operation}{suffix}"

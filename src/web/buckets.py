@@ -3,8 +3,9 @@
 web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 ========================================
 
-仪表板「记忆」页的后端：列表/详情、pin/resolve/archive/forget、批量遗忘、彻底清除
-（写删除通知队列）、采样与 human 名设置（持久化 config.yaml）、锚点、/api/self。
+仪表板「记忆」页的后端：列表/详情、pin/resolve/archive/forget、批量遗忘、
+采样与 human 名设置（持久化 config.yaml）、锚点、/api/self。
+应用层只允许归档/淡忘，不提供物理删除记忆桶的能力。
 
 对外暴露：register(mcp)。
 ========================================
@@ -23,9 +24,9 @@ from . import _shared as sh
 logger = sh.logger
 
 try:
-    from utils import strip_wikilinks  # type: ignore
+    from utils import strip_wikilinks, parse_bool  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks  # type: ignore
+    from ..utils import strip_wikilinks, parse_bool  # type: ignore
 
 try:
     from tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
@@ -132,7 +133,7 @@ def register(mcp) -> None:
                     "digested": meta.get("digested", False),
                     "created": meta.get("created", ""),
                     "last_active": meta.get("last_active", ""),
-                    "activation_count": meta.get("activation_count", 1),
+                    "activation_count": meta.get("activation_count", 0),
                     "score": sh.decay_engine.calculate_score(meta),
                     "content_preview": strip_wikilinks(b.get("content", ""))[:200],
                     # iter 1.8 新增字段（后台老桶读出默认值）
@@ -141,6 +142,11 @@ def register(mcp) -> None:
                     "first_of_kind": bool(meta.get("first_of_kind", False)),
                     "weight": meta.get("weight"),  # plan 专有，非 plan 为 None
                     "triggered_by": meta.get("triggered_by", ""),
+                    "erasable_test_data": bool(
+                        isinstance(meta.get("provenance"), dict)
+                        and meta["provenance"].get("kind") == "test"
+                        and meta["provenance"].get("erasable") is True
+                    ),
                 })
             result.sort(key=lambda x: x["score"], reverse=True)
             return JSONResponse(result)
@@ -283,15 +289,22 @@ def register(mcp) -> None:
         if err:
             return err
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         ids = body.get("ids") or []
         if not isinstance(ids, list) or not ids:
             return JSONResponse({"error": "ids must be a non-empty list"}, status_code=400)
+        if len(ids) > 500:
+            return JSONResponse({"error": "ids exceeds the 500-item batch limit"}, status_code=400)
+        if any(not isinstance(bid, str) or not bid or len(bid) > 128 for bid in ids):
+            return JSONResponse({"error": "each id must be a non-empty string up to 128 characters"}, status_code=400)
         if "dont_surface" not in body:
             return JSONResponse({"error": "dont_surface (bool) required"}, status_code=400)
-        target = bool(body["dont_surface"])
+        try:
+            target = parse_bool(body["dont_surface"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         ok_ids, missing_ids, errors = [], [], []
         for bid in ids:
             try:
@@ -312,6 +325,81 @@ def register(mcp) -> None:
             "errors": errors,
         })
 
+    @mcp.custom_route("/api/buckets/batch", methods=["POST"])
+    async def api_buckets_batch(request: Request) -> Response:
+        """Batch ordinary memory actions; never physically deletes files."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        ids = body.get("ids") or []
+        action = str(body.get("action") or "")
+        if not isinstance(ids, list) or not ids or len(ids) > 500:
+            return JSONResponse({"error": "ids must contain 1-500 items"}, status_code=400)
+        if any(not isinstance(item, str) or not item or len(item) > 128 for item in ids):
+            return JSONResponse({"error": "invalid bucket id"}, status_code=400)
+        if action not in {"forget", "resolve", "archive"}:
+            return JSONResponse({"error": "unsupported batch action"}, status_code=400)
+        updated, missing, errors = [], [], []
+        for bucket_id in dict.fromkeys(ids):
+            try:
+                bucket = await sh.bucket_mgr.get(bucket_id)
+                if not bucket:
+                    missing.append(bucket_id)
+                    continue
+                if action == "forget":
+                    ok = await sh.bucket_mgr.update(bucket_id, dont_surface=True)
+                elif action == "resolve":
+                    ok = await sh.bucket_mgr.update(bucket_id, resolved=True)
+                else:
+                    ok = await sh.bucket_mgr.archive(bucket_id)
+                if ok:
+                    updated.append(bucket_id)
+                else:
+                    errors.append({"id": bucket_id, "error": f"{action} failed"})
+            except Exception as exc:
+                errors.append({"id": bucket_id, "error": str(exc)})
+        return JSONResponse({"ok": not errors, "action": action,
+                             "updated": updated, "missing": missing, "errors": errors})
+
+    @mcp.custom_route("/api/developer/buckets/hard-delete", methods=["POST"])
+    async def api_developer_hard_delete(request: Request) -> Response:
+        """Erase explicitly erasable test buckets after a developer confirmation phrase."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        ids = body.get("ids") or []
+        if body.get("confirm") != "DELETE TEST DATA":
+            return JSONResponse({"error": "confirmation phrase required"}, status_code=400)
+        if not isinstance(ids, list) or not ids or len(ids) > 100:
+            return JSONResponse({"error": "ids must contain 1-100 items"}, status_code=400)
+        deleted, refused, errors = [], [], []
+        for bucket_id in dict.fromkeys(ids):
+            if not isinstance(bucket_id, str) or not bucket_id or len(bucket_id) > 128:
+                errors.append({"id": str(bucket_id), "error": "invalid bucket id"})
+                continue
+            result = await sh.bucket_mgr.hard_delete_test_bucket(
+                bucket_id, reason=str(body.get("reason") or "developer cleanup")
+            )
+            if result.get("ok"):
+                deleted.append(bucket_id)
+            elif result.get("error") == "not_erasable_test_data":
+                refused.append(bucket_id)
+            else:
+                errors.append({"id": bucket_id, "error": result.get("error")})
+        status = 200 if deleted and not errors else (403 if refused and not deleted else 400)
+        return JSONResponse({"ok": bool(deleted) and not errors, "deleted": deleted,
+                             "refused": refused, "errors": errors}, status_code=status)
+
 
     # ---- iter 1.9 B: dashboard 调 sampling 配置 / sampling control ----
     # GET 返回当前 surfacing.sampling；POST 接收新值并热更新内存里的 config。
@@ -327,19 +415,19 @@ def register(mcp) -> None:
         sampling = surfacing.setdefault("sampling", {})
         if request.method == "GET":
             return JSONResponse({
-                "enabled": bool(sampling.get("enabled", False)),
+                "enabled": parse_bool(sampling.get("enabled", False), default=False),
                 "top_k": int(sampling.get("top_k") or 5),
                 "sample_k": int(sampling.get("sample_k") or 2),
                 "temperature": float(sampling.get("temperature") or 0.7),
             })
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         # Validate ranges; reject silently-corrupt inputs at the boundary
         try:
             if "enabled" in body:
-                sampling["enabled"] = bool(body["enabled"])
+                sampling["enabled"] = parse_bool(body["enabled"])
             if "top_k" in body:
                 tk = int(body["top_k"])
                 if not (1 <= tk <= 50):
@@ -400,10 +488,13 @@ def register(mcp) -> None:
         if request.method == "GET":
             return JSONResponse({"human": sh.config.get("human", "人类")})
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        human = body.get("human", "").strip()
+        human_raw = body.get("human", "")
+        if not isinstance(human_raw, str):
+            return JSONResponse({"error": "human name must be a string"}, status_code=400)
+        human = human_raw.strip()
         if not human:
             human = "人类"
         if len(human) > 20:
@@ -445,10 +536,15 @@ def register(mcp) -> None:
         if err:
             return err
         try:
-            body = await request.json()
+            body = await sh._read_json_object(request)
         except Exception:
-            body = {}
-        from_term = (body.get("from") or "用户").strip()
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        from_raw = body.get("from") or "用户"
+        if not isinstance(from_raw, str):
+            return JSONResponse({"error": "from must be a string"}, status_code=400)
+        from_term = from_raw.strip()
+        if len(from_term) > 100:
+            return JSONResponse({"error": "from must be at most 100 characters"}, status_code=400)
         cur = (sh.config.get("human") or "人类").strip() or "人类"
         if not from_term:
             return JSONResponse({"error": "缺少要替换的旧称呼"}, status_code=400)
@@ -514,8 +610,12 @@ def register(mcp) -> None:
         target = None
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
             if "value" in body:
-                target = bool(body["value"])
+                target = parse_bool(body["value"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception:
             pass  # no body → toggle
         if target is None:
@@ -549,64 +649,19 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/buckets/purge", methods=["POST"])
     async def api_buckets_purge(request: Request) -> Response:
-        """Dashboard-only hard purge: physically removes files and generates an AI notification.
-
-        Only callable from the dashboard (requires X-Purge-Confirm header).
-        Not exposed as an MCP tool — the AI cannot trigger this.
-        After purge, _pending_deletions.json is written; the next tool call
-        sends a one-time notice to the AI about what was deleted.
-        """
+        """Retired hard-purge endpoint: memory may be archived, never physically erased."""
         from starlette.responses import JSONResponse
-        import frontmatter as _fm
         err = sh._require_auth(request)
         if err:
             return err
-        # Extra safeguard header — prevents automated/tool-based calls
-        if request.headers.get("X-Purge-Confirm") != "dashboard-purge-v1":
-            return JSONResponse({"error": "missing or invalid X-Purge-Confirm header"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        ids = body.get("ids", [])
-        if not ids or not isinstance(ids, list):
-            return JSONResponse({"error": "ids must be a non-empty list"}, status_code=400)
-        if len(ids) > 200:
-            return JSONResponse({"error": "too many ids (max 200 per request)"}, status_code=400)
-
-        deleted_names: list = []
-        failed: list = []
-        for bid in ids:
-            if not isinstance(bid, str) or not bid.strip():
-                continue
-            bid = bid.strip()
-            file_path = sh.bucket_mgr._find_bucket_file(bid)
-            if not file_path:
-                failed.append(bid)
-                continue
-            # Read display name before deletion
-            try:
-                post = _fm.load(file_path)
-                name = str(post.get("name") or bid)
-            except Exception:
-                name = bid
-            try:
-                os.remove(file_path)
-                if sh.embedding_engine:
-                    try:
-                        sh.embedding_engine.delete_embedding(bid)
-                    except Exception:
-                        pass
-                deleted_names.append(name)
-                logger.info(f"[PURGE] hard-deleted bucket: {bid} ({name})")
-            except OSError as e:
-                logger.error(f"[PURGE] failed to delete {bid}: {e}")
-                failed.append(bid)
-
-        if deleted_names:
-            sh.write_deletion_notice(deleted_names)
-
-        return JSONResponse({"ok": True, "deleted": len(deleted_names), "failed": failed})
+        return JSONResponse({
+            "error": "physical_deletion_forbidden",
+            "message": (
+                "Ombre Brain 不提供物理删除记忆桶的能力。请使用归档或主动遗忘；"
+                "Markdown 文件会继续保留。"
+            ),
+            "philosophy": "记忆会被遗忘，但绝不能被抹去。",
+        }, status_code=410)
 
 
     # ---- letter REST endpoints (iter 1.4) ------------------------

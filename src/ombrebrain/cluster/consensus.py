@@ -35,7 +35,7 @@ class SingleNodeConsensus:
         index = self.fabric.append_event(event)
         return CommitResult(
             committed=True,
-            index=event.cluster_index,
+            index=index,
             term=self.node.term,
             leader_id=self.node.node_id,
         )

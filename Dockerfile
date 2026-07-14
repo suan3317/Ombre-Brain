@@ -33,8 +33,16 @@ RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
 
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 可选 pip 镜像源：受限网络（宿主代理掐断 PyPI）时传
+#   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+# 默认留空 → 官方 PyPI，行为不变。
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+COPY requirements.txt requirements.lock.txt ./
+RUN pip install --no-cache-dir --retries 10 --timeout 120 \
+        ${PIP_INDEX_URL:+-i "$PIP_INDEX_URL"} \
+        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} \
+        --require-hashes -r requirements.lock.txt
 
 # Copy project files / 复制项目文件
 COPY src/ ./src/
@@ -43,6 +51,14 @@ COPY VERSION ./VERSION
 COPY config.example.yaml ./config.default.yaml
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
+
+# 面向用户的说明文档：Docker 用户本地无源码、镜像此前也不含这些文件，
+# 导致「给 Claude 的使用指南」（README）指向的 docs/CLAUDE_PROMPT.md 拿不到，
+# 出现「服务装完了但模型没拿到使用约定」的 onboarding 断点。内部设计稿
+# （docs/superpowers、docs/secrets 等）不在此列，仍被 .dockerignore 挡在外面。
+COPY docs/CLAUDE_PROMPT.md docs/INTERNALS.md docs/MULTI_OWNER.md docs/OPERATIONS.md ./docs/
+COPY README.md ./README.md
+COPY CHANGELOG.md ./CHANGELOG.md
 
 # Persistent mount point: bucket data
 # 持久化挂载点：记忆数据

@@ -380,7 +380,7 @@ def _install_run(osk: str, arch: str, mirror: str) -> None:
                 )
             binp = os.path.join(root, "bin", "ollama")
             if os.path.isfile(binp):
-                os.chmod(binp, 0o755)
+                os.chmod(binp, 0o755)  # nosec B103
 
         elif osk == "macos":
             zp = os.path.join(tmpdir, "Ollama-darwin.zip")
@@ -393,7 +393,7 @@ def _install_run(osk: str, arch: str, mirror: str) -> None:
                 _safe_extract_zip(z, root)
             binp = os.path.join(root, "Ollama.app", "Contents", "Resources", "ollama")
             if os.path.isfile(binp):
-                os.chmod(binp, 0o755)
+                os.chmod(binp, 0o755)  # nosec B103
         else:
             raise RuntimeError(f"不支持的系统：{osk}")
 
@@ -552,6 +552,12 @@ def register(mcp) -> None:
             body = await request.json()
         except Exception:
             body = {}
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "JSON body must be an object"}, status_code=400)
+        if "mirror" in body and not isinstance(body["mirror"], str):
+            return JSONResponse({"ok": False, "error": "mirror must be a string"}, status_code=400)
+        if len(str(body.get("mirror") or "")) > 2048:
+            return JSONResponse({"ok": False, "error": "mirror is too large"}, status_code=400)
         mirror = (str(body.get("mirror") or "official")).strip()
         osk, arch = _os_key(), _arch()
         _install_state = {"running": True, "phase": "starting", "percent": 0.0,

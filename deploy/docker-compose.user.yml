@@ -19,6 +19,8 @@
 #      OMBRE_COMPRESS_API_KEY  — 压缩/脱水用的 LLM key（必填）
 #      OMBRE_DASHBOARD_PASSWORD — Dashboard 登录密码（必填）
 #      向量化的 key/base_url/model 可留空，之后在 Dashboard 里随时填、即时生效。
+#   3. 想固定数据目录：在本文件旁的 .env 设置 OMBRE_HOST_VAULT_DIR=/绝对/路径。
+#      该目录同时保存 buckets、config.yaml 和 Tunnel token，--force-recreate 不会清空。
 
 services:
   ombre-brain:
@@ -40,8 +42,14 @@ services:
       - OMBRE_EMBED_BASE_URL=${OMBRE_EMBED_BASE_URL:-}
       - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
       - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD}
+      - OMBRE_HOST_VAULT_DIR=${OMBRE_HOST_VAULT_DIR:-}
+      # 默认跳过 SRV edge discovery，兼容 VPN 提供的不完整 DNS resolver。
+      - TUNNEL_EDGE=${TUNNEL_EDGE-region1.v2.argotunnel.com:7844,region2.v2.argotunnel.com:7844}
+      - TUNNEL_TRANSPORT_PROTOCOL=${TUNNEL_TRANSPORT_PROTOCOL:-http2}
     volumes:
-      - ./buckets:/app/buckets
+      - type: bind
+        source: ${OMBRE_HOST_VAULT_DIR:-./buckets}
+        target: /app/buckets
       # 注意：不要加 `- ./config.yaml:/app/config.yaml`，那会在 Windows 上被建成目录导致崩溃。
 
   # ── 可选：本地向量化（Ollama + bge-m3）。默认不启动 ──

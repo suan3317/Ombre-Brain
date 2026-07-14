@@ -4,6 +4,10 @@
 改用 PBKDF2-HMAC-SHA256；旧格式仍能校验，并在校验成功时升级到新格式。
 """
 import hashlib
+import json
+import os
+import stat
+import time
 
 import pytest
 
@@ -45,7 +49,7 @@ def test_legacy_hash_still_verifies():
 def test_needs_rehash_detects_legacy_and_weak():
     assert sh._needs_rehash(_legacy_hash("x")) is True
     assert sh._needs_rehash("") is True
-    assert sh._needs_rehash(f"pbkdf2_sha256$1000$aa$bb") is True  # 迭代数过低
+    assert sh._needs_rehash("pbkdf2_sha256$1000$aa$bb") is True  # 迭代数过低
     assert sh._needs_rehash(sh._hash_secret("x")) is False
 
 
@@ -59,7 +63,6 @@ def test_password_save_and_verify_uses_pbkdf2(auth_dir):
 
 def test_login_upgrades_legacy_hash(auth_dir):
     # 手写一个旧格式 auth 文件
-    import json
     legacy = _legacy_hash("legacypw")
     (auth_dir / ".dashboard_auth.json").write_text(
         json.dumps({"password_hash": legacy}), encoding="utf-8"
@@ -80,3 +83,57 @@ def test_security_answer_pbkdf2_and_legacy(auth_dir):
     assert not sh._verify_security_answer("beijing")
     stored = sh._load_auth_data().get("security_answer_hash", "")
     assert stored.startswith("pbkdf2_sha256$")
+
+
+def test_auth_material_is_written_with_private_permissions(auth_dir):
+    sh._save_password_hash("private-secret")
+    path = auth_dir / ".dashboard_auth.json"
+
+    assert path.exists()
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_persisted_century_session_is_capped_to_current_ttl(
+    auth_dir, monkeypatch
+):
+    monkeypatch.setenv("OMBRE_DASHBOARD_SESSION_DAYS", "30")
+    now = time.time()
+    token = "t" * 43
+    (auth_dir / ".dashboard_sessions.json").write_text(
+        json.dumps({token: now + 100 * 365 * 86400}), encoding="utf-8"
+    )
+    sh._sessions.clear()
+
+    sh._load_sessions()
+
+    assert now < sh._sessions[token] <= now + 30 * 86400 + 2
+    sh._sessions.clear()
+
+
+@pytest.mark.parametrize(
+    ("raw", "days"),
+    [("", 30), ("0", 1), ("9999", 365), ("invalid", 30)],
+)
+def test_dashboard_session_ttl_is_bounded(monkeypatch, raw, days):
+    if raw:
+        monkeypatch.setenv("OMBRE_DASHBOARD_SESSION_DAYS", raw)
+    else:
+        monkeypatch.delenv("OMBRE_DASHBOARD_SESSION_DAYS", raising=False)
+
+    assert sh._session_ttl_seconds() == days * 86400
+
+
+def test_session_registry_evicts_oldest_entry(auth_dir, monkeypatch):
+    monkeypatch.setattr(sh, "_MAX_ACTIVE_SESSIONS", 2)
+    monkeypatch.setenv("OMBRE_DASHBOARD_SESSION_DAYS", "30")
+    now = time.time()
+    sh._sessions.clear()
+    sh._sessions.update({"a" * 43: now + 100, "b" * 43: now + 200})
+
+    new_token = sh._create_session()
+
+    assert len(sh._sessions) == 2
+    assert "a" * 43 not in sh._sessions
+    assert new_token in sh._sessions
+    sh._sessions.clear()

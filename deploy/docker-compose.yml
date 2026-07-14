@@ -14,6 +14,9 @@
 #     Docker 会把它建成目录导致容器崩溃，见 entrypoint.sh 说明）。
 #   - 想把数据放别处：在 deploy/.env 设 OMBRE_HOST_VAULT_DIR=/绝对/路径。
 #
+# Cloudflare Tunnel：默认绕过 SRV edge discovery，兼容不支持 SRV 查询的 VPN DNS。
+#   如需恢复 cloudflared 原生发现，可在 deploy/.env 自行覆盖 TUNNEL_EDGE / TUNNEL_TRANSPORT_PROTOCOL。
+#
 # 端口：对外默认 18001（host）→ 容器内 8000（Dockerfile 固定，保持 Cloudflare ingress 指向 :8000）。
 #   想换对外端口：在 deploy/.env 设 OMBRE_HOST_PORT=xxxxx。
 
@@ -25,9 +28,10 @@ services:
     container_name: ombre-brain
     restart: unless-stopped
     ports:
-      - "${OMBRE_HOST_PORT:-18001}:8000"
+      - "${OMBRE_BIND_ADDRESS:-127.0.0.1}:${OMBRE_HOST_PORT:-18001}:8000"
     environment:
       - OMBRE_TRANSPORT=streamable-http
+      - OMBRE_CONFIG_PATH=/app/buckets/config.yaml
       - OMBRE_EMBED_BACKEND=${OMBRE_EMBED_BACKEND:-api}
       - OMBRE_COMPRESS_API_KEY=${OMBRE_COMPRESS_API_KEY}
       - OMBRE_COMPRESS_BASE_URL=${OMBRE_COMPRESS_BASE_URL:-}
@@ -36,5 +40,13 @@ services:
       - OMBRE_EMBED_BASE_URL=${OMBRE_EMBED_BASE_URL:-}
       - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
       - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD}
+      # 传入容器用于持久化诊断；真正的宿主机挂载由下面 volumes 决定。
+      - OMBRE_HOST_VAULT_DIR=${OMBRE_HOST_VAULT_DIR:-}
+      # VPN DNS 可能不支持 _v2-origintunneld._tcp.argotunnel.com 的 SRV 查询。
+      - TUNNEL_EDGE=${TUNNEL_EDGE-region1.v2.argotunnel.com:7844,region2.v2.argotunnel.com:7844}
+      - TUNNEL_TRANSPORT_PROTOCOL=${TUNNEL_TRANSPORT_PROTOCOL:-http2}
     volumes:
-      - ${OMBRE_HOST_VAULT_DIR:-../buckets}:/app/buckets
+      # 长语法避免 Windows 的 D:/... 盘符被误判为 volume 分隔符。
+      - type: bind
+        source: ${OMBRE_HOST_VAULT_DIR:-../buckets}
+        target: /app/buckets

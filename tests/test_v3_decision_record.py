@@ -58,6 +58,7 @@ def test_decision_ledger_builds_records_from_runtime_metadata() -> None:
         policy_metadata={
             "policy_verdict": {
                 "allowed": False,
+                "effective_allowed": True,
                 "missing_permissions": ["memory:write"],
                 "contract": {"command_id": "cmd_hold"},
             }
@@ -72,5 +73,6 @@ def test_decision_ledger_builds_records_from_runtime_metadata() -> None:
 
     assert record.policy_verdict["allowed"] is False
     assert record.summary["policy_allowed"] is False
+    assert record.summary["policy_effective_allowed"] is True
     assert record.summary["consistency_ok"] is True
     assert record.summary["projection_count"] == 0

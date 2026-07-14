@@ -4,10 +4,10 @@
 导致 dashboard 显示「未分类」，分组与新 feel 桶不一致。
 
 用法：
-    python migrate_feel_domain.py            # 默认读 config.yaml 里的 buckets_dir
-    python migrate_feel_domain.py --dry      # 仅扫描不写
+    python tools/migrate_feel_domain.py          # 仅扫描，不写盘
+    python tools/migrate_feel_domain.py --apply  # 明确执行迁移
 
-跑完后该脚本可以删除（rule.md §10 迁移脚本规范）。
+这是旧 vault 兼容工具；保留只读默认值，避免误运行改变记忆元数据。
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from utils import load_config  # noqa: E402
 from bucket_manager import BucketManager  # noqa: E402
 
 
-async def main(dry: bool) -> None:
+async def main(apply: bool = False) -> None:
     config = load_config()
     mgr = BucketManager(config)
     all_buckets = await mgr.list_all(include_archive=True)
@@ -38,15 +38,17 @@ async def main(dry: bool) -> None:
             continue
         bid = b["id"]
         print(f"  [fix] {bid}: domain={domain!r} -> ['feel']")
-        if not dry:
+        if apply:
             await mgr.update(bid, domain=["feel"])
         fixed += 1
     print(f"\n完成：修复 {fixed} 个 feel 桶，跳过 {skipped} 个已正确的。")
-    if dry:
-        print("（dry-run，未写盘）")
+    if not apply:
+        print("（只读预演，未写盘；确认后用 --apply）")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry", action="store_true", help="仅扫描不写")
-    asyncio.run(main(ap.parse_args().dry))
+    ap.add_argument("--apply", action="store_true", help="明确执行迁移；默认仅扫描")
+    ap.add_argument("--dry", action="store_true", help="兼容旧命令；默认本来就是只读")
+    args = ap.parse_args()
+    asyncio.run(main(apply=args.apply and not args.dry))

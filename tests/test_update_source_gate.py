@@ -51,3 +51,22 @@ def test_pip_install_enabled_via_env(monkeypatch):
     monkeypatch.setattr(sh, "config", {})
     monkeypatch.setenv("OMBRE_UPDATE_ALLOW_PIP", "1")
     assert meta._pip_install_allowed() is True
+
+
+@pytest.mark.parametrize(
+    ("current", "target", "expected"),
+    [
+        ("2.6.1", "v2.4.6", True),
+        ("2.6.1", "2.6.1", False),
+        ("2.6.1", "2.7.0", False),
+        ("2.6", "2.6.0", False),
+        ("dev", "2.4.6", False),
+    ],
+)
+def test_hot_update_downgrade_guard(current, target, expected):
+    assert meta._is_version_downgrade(current, target) is expected
+
+
+def test_hot_update_defaults_to_same_main_branch_as_version_check():
+    source = open(meta.__file__, encoding="utf-8").read()
+    assert '_ucfg.get("channel") or "branch"' in source

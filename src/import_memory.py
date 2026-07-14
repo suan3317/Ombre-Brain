@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from utils import clean_llm_json, count_tokens_approx, now_iso
+from utils import clean_llm_json, count_tokens_approx, now_iso, parse_bool
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -720,7 +720,7 @@ class ImportEngine:
 
                 if should_preserve:
                     # Raw mode: store original content without summarization
-                    bucket_id = await self.bucket_mgr.create(
+                    await self.bucket_mgr.create(
                         content=item["content"],
                         tags=item.get("tags", []),
                         importance=item.get("importance", _DEFAULT_IMPORTANCE),
@@ -729,7 +729,6 @@ class ImportEngine:
                         arousal=item.get("arousal", _DEFAULT_AROUSAL),
                         name=item.get("name"),
                     )
-                    await self._safe_embed(bucket_id, item["content"])
                     self.state.data["memories_raw"] += 1
                     self.state.data["memories_created"] += 1
                 else:
@@ -797,26 +796,15 @@ class ImportEngine:
                 "arousal": arousal,
                 "tags": [str(t) for t in item.get("tags", [])][:_TAGS_MAX],
                 "importance": importance,
-                "preserve_raw": bool(item.get("preserve_raw", False)),
-                "is_pattern": bool(item.get("is_pattern", False)),
+                "preserve_raw": parse_bool(
+                    item.get("preserve_raw", False), default=False
+                ),
+                "is_pattern": parse_bool(
+                    item.get("is_pattern", False), default=False
+                ),
             })
 
         return validated
-
-    async def _safe_embed(self, bucket_id: str, content: str) -> None:
-        """Fire-and-forget embedding：失败静默，不中断导入主流程。
-
-        4 处需要生成 embedding 的地方都走这个 helper，避免重复的
-        try/except Exception: pass 样板。
-        """
-        if not self.embedding_engine:
-            return
-        try:
-            await self.embedding_engine.generate_and_store(bucket_id, content)
-        except Exception as e:
-            # 降级允许：embedding 失败不影响桶落盘；后续可通过 backfill_embeddings.py 补全。
-            # 参见 rule.md §2.4 / §6 OB-E001。
-            logger.warning(f"_safe_embed: bucket={bucket_id} embedding 生成失败（允许降级）: {e}")
 
     async def _merge_or_create_item(self, item: dict) -> bool:
         """Try to merge with existing bucket, or create new. Returns is_merged."""
@@ -856,14 +844,13 @@ class ImportEngine:
                         valence=round((old_v + valence) / 2, 2),
                         arousal=round((old_a + arousal) / 2, 2),
                     )
-                    await self._safe_embed(bucket["id"], merged)
                     return True
                 except Exception as e:
                     logger.warning(f"Merge failed during import: {e}")
                     self.state.data["api_calls"] += 1
 
         # Create new
-        bucket_id = await self.bucket_mgr.create(
+        await self.bucket_mgr.create(
             content=content,
             tags=tags,
             importance=importance,
@@ -872,7 +859,6 @@ class ImportEngine:
             arousal=arousal,
             name=name or None,
         )
-        await self._safe_embed(bucket_id, content)
         return False
 
     async def detect_patterns(self) -> list[dict]:

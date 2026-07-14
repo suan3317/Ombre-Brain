@@ -7,11 +7,9 @@
 import math
 import os
 import sys
-import asyncio
 import pytest
 from pathlib import Path
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------
 # 路径与环境变量（与 conftest.py 保持一致）
@@ -111,7 +109,7 @@ class TestCountTokensApprox:
         cn = "我爱Python编程"   # 7 Chinese chars
         en = "i love python"   # 3 English words
         # Chinese chars * 1.5 should dominate
-        assert count_tokens_approx(cn) > 5
+        assert count_tokens_approx(cn) > count_tokens_approx(en)
 
     def test_english_words_counted(self):
         from utils import count_tokens_approx
@@ -223,8 +221,7 @@ def bm_config(tmp_path):
 
 
 class _FakeEmbeddingEngine:
-    """最小化可用替身：embedding 现在是 create()/update(content=...) 的
-    强制依赖，这里的测试不验证 embedding 本身，给一个永远成功的假引擎。
+    """最小化可用替身：这里不验证 embedding 本身，给一个永远成功的假引擎。
     （与 conftest.FakeEmbeddingEngine 同构但不跨文件 import——pytest 在
     tests/ 是 package 的布局下，`from conftest import ...` 容易因为
     sys.path 解析顺序在某些调用方式下找不到模块，保留各文件本地定义更稳妥。）
@@ -442,13 +439,29 @@ class TestBucketManagerUpdate:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_update_refreshes_last_active(self, bucket_mgr):
+    async def test_metadata_update_does_not_refresh_last_active(self, bucket_mgr):
+        """纯元数据编辑（trace 等）不算「激活」：不刷 last_active、不动 activation_count。"""
         bid = await bucket_mgr.create(content="x")
-        before = datetime.now().replace(microsecond=0)
+        before = (await bucket_mgr.get(bid))["metadata"]
+        before_active = before["last_active"]
+        before_count = float(before.get("activation_count") or 0)
         await bucket_mgr.update(bid, importance=6)
-        result = await bucket_mgr.get(bid)
-        last_active = datetime.fromisoformat(result["metadata"]["last_active"])
-        assert last_active >= before
+        after = (await bucket_mgr.get(bid))["metadata"]
+        assert after["last_active"] == before_active
+        assert float(after.get("activation_count") or 0) == before_count
+
+    @pytest.mark.asyncio
+    async def test_bump_active_update_refreshes_activation(self, bucket_mgr):
+        """真实激活写入（如合并近邻桶）：bump_active=True 刷 last_active 且 activation_count +1。"""
+        import time
+        bid = await bucket_mgr.create(content="x")
+        before = (await bucket_mgr.get(bid))["metadata"]
+        before_count = float(before.get("activation_count") or 0)
+        time.sleep(1)  # 保证秒级时间戳能前移
+        await bucket_mgr.update(bid, importance=6, bump_active=True)
+        after = (await bucket_mgr.get(bid))["metadata"]
+        assert float(after.get("activation_count") or 0) == before_count + 1
+        assert after["last_active"] >= before["last_active"]
 
     @pytest.mark.asyncio
     async def test_update_valence_clamped(self, bucket_mgr):
@@ -626,6 +639,7 @@ class TestBucketManagerAnchor:
         # 25th should be rejected
         result = await bucket_mgr.set_anchor(ids[24], True)
         count_after = await bucket_mgr.count_anchors()
+        assert result["ok"] is False
         assert count_after == 24
 
 
@@ -804,7 +818,6 @@ class TestDecayEngineRunCycle:
     @pytest.mark.asyncio
     async def test_run_cycle_returns_stats_dict(self, decay_engine, bucket_mgr):
         # Give decay_engine a bucket_mgr that has some buckets
-        from bucket_manager import BucketManager
         decay_engine.bucket_mgr = bucket_mgr
         await bucket_mgr.create(content="cycle test", domain=["测试"])
         result = await decay_engine.run_decay_cycle()
@@ -815,7 +828,6 @@ class TestDecayEngineRunCycle:
 
     @pytest.mark.asyncio
     async def test_run_cycle_archives_low_score_bucket(self, decay_engine, bucket_mgr):
-        from bucket_manager import BucketManager
         import frontmatter as fm
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Set threshold very high to force archiving
@@ -836,24 +848,22 @@ class TestDecayEngineRunCycle:
 
     @pytest.mark.asyncio
     async def test_run_cycle_skips_pinned(self, decay_engine, bucket_mgr):
-        import frontmatter as fm
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Force archive anything low
 
         bid = await bucket_mgr.create(content="pinned bucket", pinned=True)
-        result = await decay_engine.run_decay_cycle()
+        await decay_engine.run_decay_cycle()
         # Pinned bucket should never be archived
         still_alive = await bucket_mgr.get(bid)
         assert still_alive is not None
 
     @pytest.mark.asyncio
     async def test_run_cycle_skips_feel_buckets(self, decay_engine, bucket_mgr):
-        import frontmatter as fm
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Force archive anything
 
         bid = await bucket_mgr.create(content="feel bucket", bucket_type="feel")
-        result = await decay_engine.run_decay_cycle()
+        await decay_engine.run_decay_cycle()
         # Feel buckets should never be archived
         fpath = bucket_mgr._find_bucket_file(bid)
         if fpath is None:
@@ -922,7 +932,7 @@ class TestRecordError:
         assert isinstance(errors, list)
 
     def test_clear_errors_log(self, tmp_path):
-        from errors import configure_errors_path, record_error, clear_errors_log, recent_errors
+        from errors import clear_errors_log, configure_errors_path, record_error
         configure_errors_path(str(tmp_path))
         record_error("OB-E001", "to be cleared", log=False)
         cleared = clear_errors_log()
@@ -1149,3 +1159,15 @@ class TestEmbeddingModelNorm:
     def test_different_models_stay_distinct(self):
         from embedding_engine import _norm_model
         assert _norm_model("bge-m3") != _norm_model("gemini-embedding-001")
+
+    def test_latest_tag_equivalent_to_bare(self):
+        from embedding_engine import _norm_model
+        # Ollama 的 :latest 默认 tag vs 裸名 → 同一模型（假 OB-W005 场景）
+        assert _norm_model("bge-m3:latest") == _norm_model("bge-m3")
+        assert _norm_model("BGE-M3:latest") == _norm_model("bge-m3")
+
+    def test_quantization_tags_stay_distinct(self):
+        from embedding_engine import _norm_model
+        # 非 :latest 的 tag 是不同量化版本，必须保持可区分
+        assert _norm_model("bge-m3:q4_0") != _norm_model("bge-m3")
+        assert _norm_model("bge-m3:q4_0") != _norm_model("bge-m3:latest")

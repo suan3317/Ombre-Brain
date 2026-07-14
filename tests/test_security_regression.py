@@ -1,14 +1,14 @@
 import io
-import os
 import tarfile
 import zipfile
-from types import SimpleNamespace
 
 import pytest
 
 import web.hooks as hooks_mod
 import web.oauth as oauth_mod
 import web.ollama_local as ollama_mod
+from web import _shared as shared_web
+from web.request_limits import ManagementRequestBodyLimitMiddleware
 
 
 class DummyRequest:
@@ -16,6 +16,24 @@ class DummyRequest:
         self.headers = headers or {}
         self.query_params = query_params or {}
         self.cookies = cookies or {}
+
+
+class JsonBodyRequest:
+    def __init__(self, body):
+        self.body = body
+
+    async def json(self):
+        return self.body
+
+
+@pytest.mark.asyncio
+async def test_shared_json_object_boundary_rejects_top_level_array():
+    with pytest.raises(ValueError, match="JSON body must be an object"):
+        await shared_web._read_json_object(JsonBodyRequest([]))
+
+    assert await shared_web._read_json_object(JsonBodyRequest({"ok": True})) == {
+        "ok": True
+    }
 
 
 def test_hook_requests_are_not_public_by_default(monkeypatch):
@@ -187,3 +205,138 @@ def test_artifact_verify_accepts_valid(tmp_path):
         p = tmp_path / f"art_{osk}"
         p.write_bytes(data)
         ollama_mod._verify_downloaded_artifact(str(p), osk)  # 不抛即通过
+
+
+@pytest.mark.asyncio
+async def test_management_body_limit_rejects_public_auth_oversize():
+    calls = []
+    sent = []
+
+    async def app(_scope, _receive, send):
+        calls.append("called")
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = ManagementRequestBodyLimitMiddleware(app, max_bytes=10)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/auth/login",
+            "headers": [(b"content-length", b"11")],
+        },
+        receive,
+        send,
+    )
+
+    assert calls == []
+    assert sent[0]["status"] == 413
+
+
+@pytest.mark.asyncio
+async def test_chunked_limit_cannot_be_swallowed_by_route_json_handler():
+    calls = []
+    sent = []
+
+    async def app(_scope, receive, send):
+        calls.append("called")
+        try:
+            while (await receive()).get("more_body", False):
+                pass
+        except Exception:
+            await send({"type": "http.response.start", "status": 400, "headers": []})
+            await send({"type": "http.response.body", "body": b"invalid JSON"})
+
+    messages = iter([
+        {"type": "http.request", "body": b"123456", "more_body": True},
+        {"type": "http.request", "body": b"789012", "more_body": False},
+    ])
+
+    async def receive():
+        return next(messages)
+
+    async def send(message):
+        sent.append(message)
+
+    middleware = ManagementRequestBodyLimitMiddleware(app, max_bytes=10)
+    await middleware(
+        {"type": "http", "method": "POST", "path": "/auth/login", "headers": []},
+        receive,
+        send,
+    )
+
+    assert calls == []
+    assert sent[0]["status"] == 413
+
+
+@pytest.mark.asyncio
+async def test_bounded_body_replay_delegates_to_real_disconnect_after_body():
+    observed = []
+    messages = iter([
+        {"type": "http.request", "body": b"{}", "more_body": False},
+        {"type": "http.disconnect"},
+    ])
+
+    async def receive():
+        return next(messages)
+
+    async def send(_message):
+        return None
+
+    async def app(_scope, receive, _send):
+        observed.append(await receive())
+        observed.append(await receive())
+
+    middleware = ManagementRequestBodyLimitMiddleware(app, max_bytes=10)
+    await middleware(
+        {"type": "http", "method": "POST", "path": "/auth/login", "headers": []},
+        receive,
+        send,
+    )
+
+    assert observed[0]["body"] == b"{}"
+    assert observed[1]["type"] == "http.disconnect"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/api/import/preflight", "/api/import/upload", "/api/migrate/upload"],
+)
+async def test_management_body_limit_preserves_large_upload_routes(path):
+    calls = []
+    sent = []
+
+    async def app(scope, _receive, send):
+        calls.append(scope["path"])
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = ManagementRequestBodyLimitMiddleware(app, max_bytes=10)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [(b"content-length", b"1000")],
+        },
+        receive,
+        send,
+    )
+
+    assert calls == [path]
+    assert sent[0]["status"] == 204

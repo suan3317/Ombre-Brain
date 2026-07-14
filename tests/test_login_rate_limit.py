@@ -72,9 +72,29 @@ def test_different_clients_isolated():
     assert sh._login_retry_after(b) == 0
 
 
-def test_client_key_prefers_forwarded_for():
+def test_client_key_prefers_forwarded_for_from_trusted_proxy(monkeypatch):
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
     req = DummyRequest(headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, client_host="10.0.0.1")
     assert sh._client_key(req) == "203.0.113.9"
+
+
+def test_client_key_ignores_spoofed_forwarded_for_from_direct_client(monkeypatch):
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+    req = DummyRequest(
+        headers={"x-forwarded-for": "203.0.113.9"},
+        client_host="198.51.100.24",
+    )
+
+    assert sh._client_key(req) == "198.51.100.24"
+
+
+def test_client_key_ignores_invalid_forwarded_ip(monkeypatch):
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    req = DummyRequest(
+        headers={"x-forwarded-for": "not-an-ip"}, client_host="10.0.0.1"
+    )
+
+    assert sh._client_key(req) == "10.0.0.1"
 
 
 def test_lock_expires(monkeypatch):
