@@ -1482,6 +1482,34 @@ async def portrait_update(
     )
 
 # =============================================================
+# Pinboard 家庭公告栏 —— 可选代理工具,转发到 chatnest 的 /broadcast-mcp。
+# 仅当 PINBOARD_URL 与 PINBOARD_TOKEN 两条 env 均非空时才注册这两个工具;
+# 缺省时下面这段 @mcp.tool() 装饰器整体不执行,broadcast_read/broadcast_post
+# 完全不出现在工具清单里。实现见 tools/pinboard.py(纯 HTTP 转发,不接触
+# bucket/记忆系统)。
+# =============================================================
+from tools import pinboard as _t_pinboard
+
+if os.environ.get("PINBOARD_URL", "").strip() and os.environ.get("PINBOARD_TOKEN", "").strip():
+    @mcp.tool()
+    async def broadcast_read(limit: Optional[int] = 20) -> str:
+        """[家庭公告栏Pinboard]读取/发布全家广播。读取最近的公告帖,时间倒序。limit=返回条数上限,默认 20。"""
+        return await _with_notice(
+            _t_pinboard.broadcast_read_impl(int(limit) if limit is not None else 20),
+            op="broadcast_read",
+            args={"limit": limit},
+        )
+
+    @mcp.tool()
+    async def broadcast_post(content: str) -> str:
+        """[家庭公告栏Pinboard]读取/发布全家广播。发一条公告帖;署名由服务端按调用方 token 决定,不接受 author 参数。content=帖子正文,不能为空。"""
+        return await _with_notice(
+            _t_pinboard.broadcast_post_impl(content),
+            op="broadcast_post",
+            args={"content_len": len(content or "")},
+        )
+
+# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
