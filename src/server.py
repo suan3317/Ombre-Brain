@@ -974,8 +974,8 @@ _XHS_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
 
 async def _xhs_read_impl(url: str, include_images: bool) -> str:
     u = (url or "").strip().strip("\"\'")
-    if not _xhs_re.match(r"^https?://(www\.)?(xiaohongshu\.com|xhslink\.com)/", u):
-        return "OB-XHS01 仅支持 xiaohongshu.com 或 xhslink.com 链接。"
+    if not _xhs_re.match(r"^https?://(www\.)?(xiaohongshu\.com|xhslink\.com|xhslink\.cn)/", u):
+        return "OB-XHS01 仅支持 xiaohongshu.com、xhslink.com 或 xhslink.cn 链接。"
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True,
                                      headers={"User-Agent": _XHS_UA}) as client:
@@ -1068,7 +1068,7 @@ async def xhs_read(
     url: str,
     include_images: Optional[bool] = True,
 ) -> str:
-    """xhs_read:读取小红书笔记(read xiaohongshu note)。输入小红书链接(短链 xhslink.com 或完整 xiaohongshu.com),返回标题、正文、作者、互动数据、首屏评论(至多20条)与图片直链(至多9张)。视频帖只返回文字与封面。include_images=false 只返回文字省 token。免登录。"""
+    """xhs_read:读取小红书笔记(read xiaohongshu note)。输入小红书链接(短链 xhslink.com/xhslink.cn 或完整 xiaohongshu.com),返回标题、正文、作者、互动数据、首屏评论(至多20条)与图片直链(至多9张)。视频帖只返回文字与封面。include_images=false 只返回文字省 token。免登录。"""
     return await _with_notice(
         _xhs_read_impl(url, bool(include_images)),
         op="xhs_read",
