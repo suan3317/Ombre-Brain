@@ -124,11 +124,12 @@ dream:
   memory_levels: [0.10, 0.40, 0.35, 0.15]  # 完全记得/记得一半/只剩画面/只剩情绪
   emotion_negative_bias: 0.70     # "只剩情绪"档反向加权到焦虑/噩梦的概率
   tone_weights:
-    daily: 0.35                   # 日常残渣
-    absurd: 0.25                  # 荒诞
-    anxious: 0.18                 # 焦虑
-    sweet: 0.12                   # 甜
-    nightmare: 0.10                # 噩梦——低频但必须真实存在，不做保护性过滤
+    daily: 0.315                  # 日常残渣
+    absurd: 0.225                 # 荒诞
+    anxious: 0.162                # 焦虑
+    sweet: 0.108                  # 甜
+    nightmare: 0.09                # 噩梦——低频但必须真实存在，不做保护性过滤
+    lust: 0.10                    # 春梦——同样不做特殊豁免
   noise_tiers: [0.70, 0.25, 0.05] # 掺1-2条 / 噪音过半 / 纯噪音梦
   darkroom_prob: 0.10             # 暗房底片低概率加抽（各家开关自定，可设 0 关闭）
   resolved0_prob: 0.10            # resolved=0 桶低概率加抽

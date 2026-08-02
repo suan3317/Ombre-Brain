@@ -66,7 +66,8 @@ _DEFAULT_DREAM_PROB = 0.30              # 有梦概率
 _DEFAULT_MEMORY_LEVELS = [0.10, 0.40, 0.35, 0.15]   # 完全/一半/画面/情绪
 _DEFAULT_EMOTION_NEGATIVE_BIAS = 0.70   # "只剩情绪"档反向加权到焦虑/噩梦的概率
 _DEFAULT_TONE_WEIGHTS = {
-    "daily": 0.35, "absurd": 0.25, "anxious": 0.18, "sweet": 0.12, "nightmare": 0.10,
+    "daily": 0.315, "absurd": 0.225, "anxious": 0.162, "sweet": 0.108,
+    "nightmare": 0.09, "lust": 0.10,
 }
 _DEFAULT_NOISE_TIERS = [0.70, 0.25, 0.05]  # 掺1-2条 / 过半 / 纯噪音
 _DEFAULT_DARKROOM_PROB = 0.10
@@ -252,8 +253,31 @@ def _has_first_person_pov(text: str) -> bool:
 
 _TONE_LABELS = {
     "daily": "日常残渣", "absurd": "荒诞", "anxious": "焦虑",
-    "sweet": "甜", "nightmare": "噩梦",
+    "sweet": "甜", "nightmare": "噩梦", "lust": "欲",
 }
+
+# --- lust（春梦）档基调说明（增量单 v4 改动二，原文照抄，只润色不删减）---
+_LUST_TONE_DIRECTIVE = (
+    "基调：欲。这是一场情欲的梦——身体的、贴近的、温度和触感优先。写感官不写全程："
+    "皮肤、呼吸、重量、气味、半明半暗里的轮廓。梦的规则不变：禁因果、禁解释、允许断裂，"
+    "场景可以在最要紧处硬切走。露骨程度随意，但不许写成完整流畅的情节——情欲的梦从来"
+    "记不全，越要紧的地方越模糊。"
+)
+
+
+def _tone_directive(tone: str) -> str:
+    """基调注入文案（增量单 v4 改动二）：lust 档换成专属说明；nightmare 档
+    保留"让它真的可怕"提醒；其余基调只报基调名。两套 §1.6 prompt 共用，
+    其余管线（拆意象/噪音/防泄漏闸/词表闸/第一人称校验/裁剪/外科截断）
+    对 lust 一视同仁，不加特殊豁免。"""
+    if tone == "lust":
+        return _LUST_TONE_DIRECTIVE
+    tone_label = _TONE_LABELS.get(tone, tone)
+    if tone == "nightmare":
+        return f"基调：{tone_label}。噩梦就让它真的可怕，不要缓和。"
+    return f"基调：{tone_label}。"
+
+
 _LEVEL_LABELS = ["完全记得", "记得一半", "只剩画面", "只剩情绪"]
 _LEVEL_KEYS = ["full", "half", "glimpse", "emotion"]
 
@@ -327,6 +351,11 @@ _EMOTION_RESIDUE_POOL = {
         "喉咙发紧，梦里发生了什么，想不起来，但那种感觉还在。",
         "醒来盯着天花板看了一会儿，才确定自己是安全的。",
         "梦散了，只剩一种被追着的余悸。",
+    ],
+    "lust": [
+        "醒来一身燥，什么都不记得。",
+        "梦里有人贴得很近，是谁，抓不住了。",
+        "指尖还记得一点温度，别的都散了。",
     ],
 }
 
@@ -681,9 +710,8 @@ class DreamEngine:
     async def generate_dream(
         self, material_words: list[str], named_phrases: list[str], tone: str, level: str,
     ) -> str:
-        tone_label = _TONE_LABELS.get(tone, tone)
         if level in _HIGH_TIER_LEVELS:
-            system = self._high_tier_prompt(tone_label)
+            system = self._high_tier_prompt(tone)
             anchor_section = "、".join(named_phrases) if named_phrases else (
                 "（本次没有明确的具名素材，清晰段自己挑一个具体细节当锚）"
             )
@@ -693,7 +721,7 @@ class DreamEngine:
             )
             max_tokens = _HIGH_TIER_MAX_TOKENS
         else:
-            system = self._low_tier_prompt(tone_label)
+            system = self._low_tier_prompt(tone)
             user = "、".join(material_words)
             max_tokens = _DEFAULT_MAX_TOKENS
 
@@ -705,10 +733,11 @@ class DreamEngine:
         )
 
     @staticmethod
-    def _low_tier_prompt(tone_label: str) -> str:
+    def _low_tier_prompt(tone: str) -> str:
         """只剩画面/只剩情绪档：维持返修单 v1 的碎片化 prompt 不变（除第一行
-        新增的视角硬化，返修单 v3 改动四）——反正会被裁到只剩几句或整段丢弃，
-        不值得上交替结构的复杂度。"""
+        新增的视角硬化，返修单 v3 改动四；基调注入换成 _tone_directive，
+        增量单 v4 改动二）——反正会被裁到只剩几句或整段丢弃，不值得上交替
+        结构的复杂度。"""
         return (
             "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
             "但看的人是「我」。正例：「我看见她站在院子里。」\n"
@@ -724,12 +753,12 @@ class DreamEngine:
             "给你的意象词互不相关，让它们在句子里并置、相撞，不许编成合理的故事；"
             "允许场景毫无过渡地硬切——一句话写着写着换了场景、一个人说着话变成另一个人、"
             "一句话写到一半停住——但切换前后仍然是完整句子，不是词语拼贴；"
-            f"情绪要连贯，情节不需要。基调：{tone_label}。噩梦就让它真的可怕，不要缓和。"
+            f"情绪要连贯，情节不需要。{_tone_directive(tone)}"
             "长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
         )
 
     @staticmethod
-    def _high_tier_prompt(tone_label: str) -> str:
+    def _high_tier_prompt(tone: str) -> str:
         """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三），
         第一行是返修单 v3 改动四新增的视角硬化。依据 Silvia 描述的真实做梦
         节奏：一段很清晰的情节，混一段乱七八糟记不清的，再来一段清晰的
@@ -749,7 +778,7 @@ class DreamEngine:
             "续接前一个清晰段的情节，也可以只是沾一点边然后飘走。\n"
             "全局：禁止收尾、禁止点题、禁止把所有意象统一成一个通顺的故事。"
             "局部清楚，整体乱跳。\n"
-            f"基调：{tone_label}。噩梦就让它真的可怕，不要缓和。总长 300-600 字。"
+            f"{_tone_directive(tone)}总长 300-600 字。"
         )
 
     # ---------------------------------------------------------

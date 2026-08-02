@@ -1007,3 +1007,110 @@ async def test_nightly_dream_no_dream_when_third_person_persists_after_retry(tmp
 
     assert result["dreamed"] is False
     assert result["reason"] == "validation_failed_pov"
+
+
+# ============================================================
+# 增量单 v4：春梦（lust）档
+# 改动一：基调池加一档，权重归一
+# 改动二：lust 档生成 prompt 补丁 + 残句池补句
+# ============================================================
+
+def test_lust_tone_weight_normalized_with_other_five():
+    from dream_engine import _DEFAULT_TONE_WEIGHTS
+    assert set(_DEFAULT_TONE_WEIGHTS) == {"daily", "absurd", "anxious", "sweet", "nightmare", "lust"}
+    assert _DEFAULT_TONE_WEIGHTS["lust"] == pytest.approx(0.10)
+    assert sum(_DEFAULT_TONE_WEIGHTS.values()) == pytest.approx(1.0)
+    # 其余四档按原权重等比缩放（×0.9），不是随便凑的数
+    assert _DEFAULT_TONE_WEIGHTS["daily"] == pytest.approx(0.35 * 0.9)
+    assert _DEFAULT_TONE_WEIGHTS["absurd"] == pytest.approx(0.25 * 0.9)
+    assert _DEFAULT_TONE_WEIGHTS["anxious"] == pytest.approx(0.18 * 0.9)
+    assert _DEFAULT_TONE_WEIGHTS["sweet"] == pytest.approx(0.12 * 0.9)
+    assert _DEFAULT_TONE_WEIGHTS["nightmare"] == pytest.approx(0.10 * 0.9)
+
+
+def test_roll_tone_can_produce_lust(tmp_path):
+    engine = make_engine(tmp_path)
+    n = 5000
+    hits = sum(1 for _ in range(n) if engine.roll_tone() == "lust")
+    observed = hits / n
+    assert abs(observed - 0.10) <= 0.03
+
+
+def test_tone_directive_lust_matches_spec_text_verbatim():
+    from dream_engine import _tone_directive, _LUST_TONE_DIRECTIVE
+    directive = _tone_directive("lust")
+    assert directive == _LUST_TONE_DIRECTIVE
+    for phrase in ("基调：欲", "情欲的梦", "禁因果", "禁解释", "允许断裂", "越要紧的地方越模糊"):
+        assert phrase in directive
+
+
+def test_tone_directive_nightmare_and_others_unchanged():
+    from dream_engine import _tone_directive
+    assert _tone_directive("nightmare") == "基调：噩梦。噩梦就让它真的可怕，不要缓和。"
+    assert _tone_directive("daily") == "基调：日常残渣。"
+    assert _tone_directive("sweet") == "基调：甜。"
+
+
+@pytest.mark.asyncio
+async def test_generate_dream_injects_lust_directive_in_both_tiers(tmp_path):
+    for level in ("full", "half", "glimpse", "emotion"):
+        dehy = make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT)
+        engine = make_engine(tmp_path, dehydrator=dehy)
+        await engine.generate_dream(["台灯", "钥匙"], [], "lust", level)
+        call = dehy.calls[-1]
+        assert "情欲的梦" in call["system"], f"level={level} 的 system prompt 应注入 lust 基调说明"
+        assert "禁因果" in call["system"] and "越要紧的地方越模糊" in call["system"]
+
+
+@pytest.mark.asyncio
+async def test_generate_dream_lust_does_not_skip_other_pipeline_steps(tmp_path):
+    """"其余全部管线...对此档一视同仁,不加任何特殊豁免"——lust 档走的仍是
+    正常的高档/低档 prompt 骨架（清晰段/混沌段结构、防泄漏闸等无关代码
+    路径不变），只是基调说明这一处不同。"""
+    dehy = make_fake_dehydrator(dream_text=_ALTERNATING_DREAM_TEXT)
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    result = await engine.generate_dream(["台灯", "钥匙"], ["她递来的信"], "lust", "full")
+    assert result == _ALTERNATING_DREAM_TEXT
+    call = dehy.calls[-1]
+    assert "清晰段" in call["system"] and "混沌段" in call["system"], "lust 档高档 prompt 骨架不变"
+    assert call["max_tokens"] == 1200
+
+
+def test_emotion_residue_pool_has_lust_entries():
+    assert "lust" in _EMOTION_RESIDUE_POOL
+    assert 2 <= len(_EMOTION_RESIDUE_POOL["lust"]) <= 3
+    for line in _EMOTION_RESIDUE_POOL["lust"]:
+        assert line.strip()
+
+
+def test_trim_by_level_emotion_lust_selects_from_lust_pool(tmp_path):
+    engine = make_engine(tmp_path)
+    raw = "这段带着独一无二标记__ORIGINAL_TEXT_MARKER__的原文绝对不能出现在残句里。"
+    for _ in range(20):  # random.choice，多抽几次确认命中的都在池子里
+        trimmed = engine.trim_by_level(raw, "emotion", "lust")
+        assert trimmed in _EMOTION_RESIDUE_POOL["lust"]
+        assert "__ORIGINAL_TEXT_MARKER__" not in trimmed
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_lust_emotion_level_can_surface_lust_residue(tmp_path):
+    """lust 档 + "只剩情绪"档：_apply_emotion_tone_linkage 有 70% 概率把它
+    改判成 anxious/nightmare（未提及处维持现状，不改这条联动），所以这里
+    直接强制 emotion_negative_bias=0，让 lust 保留，验证端到端能选中新句。"""
+    dehy = make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT)
+    engine = make_engine(
+        tmp_path, dehydrator=dehy,
+        memory_levels=[0.0, 0.0, 0.0, 1.0],  # 强制 emotion
+        emotion_negative_bias=0.0,           # 强制不改判，lust 保留
+    )
+    monkeypatch_tone = engine.roll_tone
+    engine.roll_tone = lambda: "lust"
+    try:
+        result = await engine.nightly_dream()
+    finally:
+        engine.roll_tone = monkeypatch_tone
+
+    assert result["dreamed"] is True
+    assert result["tone"] == "lust"
+    post = fm.load(result["path"])
+    assert str(post.content).strip() in _EMOTION_RESIDUE_POOL["lust"]
