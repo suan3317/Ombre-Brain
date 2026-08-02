@@ -84,6 +84,7 @@ _IMAGERY_WORD_MAX_CHARS = 6
 _IMAGERY_EXTRACT_INPUT_LIMIT = 2000
 _IMAGERY_EXTRACT_MAX_TOKENS = 300
 _IMAGERY_EXTRACT_TEMPERATURE = 0.3   # 拆词是机械抽取，不需要 1.3 的疯
+_NAMED_PHRASE_MAX_CHARS = 10         # 具名短语上限（返修单 v2 改动二）
 
 # --- 混噪音 ---
 _NOISE_LOW_TIER_MIN = 1
@@ -100,10 +101,16 @@ _NOISE_GROWTH_TEMPERATURE = 1.0
 
 # --- 生成结果形状校验：发现过便宜小模型在高 temperature 下把打乱的意象词
 # 原样续写成清单（词表），而不是散文。这是生成失败的一种形式，同样按
-# "生成步失败一律按无梦处理，不落盘"处理，不是靠 prompt 单独兜底。 ---
-_PROSE_MIN_SEGMENTS_FOR_CHECK = 4     # 少于这么多段落/换行，不判定为清单体
-_PROSE_SHORT_SEGMENT_CHARS = 8        # 段落短于这个字数且无句读 → 疑似词表行
-_PROSE_SHORT_SEGMENT_RATIO = 0.6      # 这类可疑段落占比超过此值 → 判定为清单体
+# "生成步失败一律按无梦处理，不落盘"处理，不是靠 prompt 单独兜底。
+# 返修单 v2：判定粒度改为全文密度而非逐段/逐行——交替结构的混沌段允许
+# 短促无标点的行，逐段判会把合法输出误杀，只看全文句读密度更稳。 ---
+_PROSE_MIN_CHARS_FOR_DENSITY_CHECK = 40   # 全文短于这个字数，不够格判密度
+_PROSE_MAX_CHARS_PER_PUNCT = 60           # 全文"平均每几个字一个句读"的上限
+
+# --- 生成 prompt 按记忆度分两套（返修单 v2 改动三）---
+# 完全记得/记得一半 → 清晰/混沌交替结构；只剩画面/只剩情绪 → 维持 v1 prompt 不变
+_HIGH_TIER_LEVELS = ("full", "half")
+_HIGH_TIER_MAX_TOKENS = 1200              # 仅高档；低档维持 _DEFAULT_MAX_TOKENS
 
 # --- 外科截断 ---
 _CUT_HEAD_START_RATIO = 0.10
@@ -125,25 +132,25 @@ _SENTENCE_END_RE = re.compile(r"[。！？.!?]")
 def _is_prose_like(text: str) -> bool:
     """结构校验：这段文本是散文，还是意象词清单原样罗列。
 
-    不做语义判断（不调 API），只看形状：清单体的典型特征是"很多短段落，
-    几乎没有句读"——真实事故里模型把打乱的意象词按输入的换行原样续写了
-    回来。空文本、无任何句读的文本一律判失败；段落多且大半段落短促无
-    标点也判失败。门槛刻意宽松，只挡"看起来完全不是散文"的情况，不裁判
-    文笔好坏。
+    不做语义判断（不调 API），只看形状。判定粒度是全文，不是逐段/逐行——
+    清晰/混沌交替结构里，混沌段允许短促无标点、一句话写到一半停住，逐段判
+    会把合法输出误杀（返修单 v2）。真实事故里模型把打乱的意象词按输入的
+    换行原样续写了回来，特征是"通篇几乎没有句读"；改成看全文句读密度：
+    空文本、全文一个句读都没有的一律判失败；文本够长但句读稀疏（平均隔
+    很多字才有一个标点）也判失败。门槛刻意宽松，只挡"看起来完全不是散文"
+    的情况，不裁判文笔好坏，也不会因为个别混沌段没标点就误杀整篇。
     """
     text = (text or "").strip()
     if not text:
         return False
     if not _SENTENCE_END_RE.search(text):
         return False  # 通篇没有一个句读，不可能是散文
-    segments = [s.strip() for s in text.splitlines() if s.strip()]
-    if len(segments) < _PROSE_MIN_SEGMENTS_FOR_CHECK:
-        return True  # 段落不够多，不够格判定为"清单体"
-    suspicious = sum(
-        1 for s in segments
-        if len(s) <= _PROSE_SHORT_SEGMENT_CHARS and not _SENTENCE_END_RE.search(s)
-    )
-    return (suspicious / len(segments)) < _PROSE_SHORT_SEGMENT_RATIO
+    total_chars = len(text.replace("\n", ""))
+    if total_chars < _PROSE_MIN_CHARS_FOR_DENSITY_CHECK:
+        return True  # 太短，密度统计没意义，只要有句读就放行
+    punct_count = len(_SENTENCE_END_RE.findall(text))
+    avg_chars_per_punct = total_chars / max(1, punct_count)
+    return avg_chars_per_punct <= _PROSE_MAX_CHARS_PER_PUNCT
 
 
 _TONE_LABELS = {
@@ -153,9 +160,17 @@ _TONE_LABELS = {
 _LEVEL_LABELS = ["完全记得", "记得一半", "只剩画面", "只剩情绪"]
 _LEVEL_KEYS = ["full", "half", "glimpse", "emotion"]
 
+# --- DREAM_FORCE_LEVEL 环境变量取值 → 内部档位 key（返修单 v2 改动五）---
+# 返修单用词是 full/half/scene/emotion；内部档位 key 仍叫 glimpse（v1 就这么命名，
+# 未提及处维持原样），这里只做外部词汇到内部 key 的别名映射，不做全局改名。
+_FORCE_LEVEL_ALIASES = {"full": "full", "half": "half", "scene": "glimpse", "emotion": "emotion"}
+
 # --- 与 server.py 的 darkroom 存储格式保持一致 ---
 # 必须与 server.py 里 `_DR_SEP` 逐字相同，否则读不出底片正文。
 _DARKROOM_SEP = "\n----- DARKROOM CONTENT (no tool reads below this line) -----\n"
+
+# --- 拆意象响应里标记具名短语的那一行，容忍全角/半角冒号、大小写 ---
+_NAMED_PHRASE_RE = re.compile(r"(?i)^named[:：]\s*(.*)$")
 
 # --- "只剩情绪"档残句池：正文全丢，从这里按基调抽一句。写死代码，不调 API ---
 _EMOTION_RESIDUE_POOL = {
@@ -341,23 +356,29 @@ class DreamEngine:
             return ""
 
     # ---------------------------------------------------------
-    # §1.3 拆意象（断粮防圆）
+    # §1.3 拆意象（断粮防圆）+ 返修单 v2 改动二：额外抽 1 条具名短语
     # ---------------------------------------------------------
-    async def extract_imagery(self, materials: list[dict]) -> list[str]:
-        """每份素材调一次 flash-lite，只要 5-8 个意象词，合并去重打乱。"""
+    async def extract_imagery(self, materials: list[dict]) -> tuple[list[str], list[str]]:
+        """每份素材调一次 flash-lite：要 5-8 个意象词，外加最多 1 条具名短语
+        （含人名/称呼/专有名词，桶内没有就不硬凑）。返回 (意象词, 具名短语列表)，
+        两个列表分开传给生成步——意象词合并去重打乱，具名短语原样收集（数量本来
+        就少，不去重，同名重复出现也是真实信号）。"""
         words: list[str] = []
+        named_phrases: list[str] = []
         for m in materials:
             text = (m.get("text") or "")[:_IMAGERY_EXTRACT_INPUT_LIMIT]
             if not text.strip():
                 continue
             try:
-                extracted = await self._extract_imagery_one(text)
+                extracted, named = await self._extract_imagery_one(text)
             except Exception as e:
                 logger.warning(f"dream: 拆意象 API 失败，退化为正则抽取: {e}")
-                extracted = self._extract_imagery_fallback(text)
+                extracted, named = self._extract_imagery_fallback(text), ""
             if not extracted:
                 extracted = self._extract_imagery_fallback(text)
             words.extend(extracted)
+            if named:
+                named_phrases.append(named)
 
         seen = set()
         unique = []
@@ -367,12 +388,17 @@ class DreamEngine:
                 seen.add(w)
                 unique.append(w)
         random.shuffle(unique)
-        return unique
+        return unique, named_phrases
 
-    async def _extract_imagery_one(self, text: str) -> list[str]:
+    async def _extract_imagery_one(self, text: str) -> tuple[list[str], str]:
         system = (
-            "从下面文本中只提取 5-8 个意象词：具体名词、动作、感官描述"
-            "（颜色/气味/触感/声音）。不要抽象词，不要完整句子。每行一个，不超过 6 个字。"
+            "从下面文本中提取两类内容：\n"
+            "1. 5-8 个意象词：具体名词、动作、感官描述（颜色/气味/触感/声音）。"
+            "不要抽象词，不要完整句子。每行一个，不超过 6 个字。\n"
+            "2. 最多 1 条具名短语（可选，没有就不写）：含人名/称呼/专有名词/私有名词"
+            "的短语，不超过 10 个字，例如“她递来的施工单”“暗房的底片”。"
+            "文本里没有专名就不要硬凑这一条。\n"
+            "意象词照常每行一个输出；具名短语单独另起一行，前面加“NAMED: ”前缀，最多一行。"
         )
         raw = await self.dehydrator.raw_chat(
             system, text,
@@ -380,9 +406,22 @@ class DreamEngine:
             temperature=_IMAGERY_EXTRACT_TEMPERATURE,
             model=self.model,
         )
-        lines = [ln.strip(" -•·\t") for ln in (raw or "").splitlines()]
-        words = [ln for ln in lines if ln and len(ln) <= _IMAGERY_WORD_MAX_CHARS * 2]
-        return words[:_IMAGERY_WORDS_MAX]
+        named_phrase = ""
+        words: list[str] = []
+        for raw_ln in (raw or "").splitlines():
+            ln = raw_ln.strip(" -•·\t")
+            if not ln:
+                continue
+            m = _NAMED_PHRASE_RE.match(ln)
+            if m:
+                if not named_phrase:
+                    candidate = m.group(1).strip()
+                    if candidate:
+                        named_phrase = candidate[:_NAMED_PHRASE_MAX_CHARS]
+                continue
+            if len(ln) <= _IMAGERY_WORD_MAX_CHARS * 2:
+                words.append(ln)
+        return words[:_IMAGERY_WORDS_MAX], named_phrase
 
     @staticmethod
     def _extract_imagery_fallback(text: str) -> list[str]:
@@ -514,11 +553,48 @@ class DreamEngine:
         return random.choices(tones, weights=weights, k=1)[0]
 
     # ---------------------------------------------------------
-    # §1.6 生成
+    # §1.6 生成（返修单 v2 改动一+三：level 生成前已知，按档分两套 prompt）
     # ---------------------------------------------------------
-    async def generate_dream(self, material_words: list[str], tone: str) -> str:
+    async def generate_dream(
+        self, material_words: list[str], named_phrases: list[str], tone: str, level: str,
+    ) -> str:
         tone_label = _TONE_LABELS.get(tone, tone)
-        system = (
+        if level in _HIGH_TIER_LEVELS:
+            system = self._high_tier_prompt(tone_label)
+            anchor_section = "、".join(named_phrases) if named_phrases else (
+                "（本次没有明确的具名素材，清晰段自己挑一个具体细节当锚）"
+            )
+            user = (
+                f"清晰段的锚：{anchor_section}\n"
+                f"混沌段的素材，也可少量渗入清晰段：{'、'.join(material_words)}"
+            )
+            max_tokens = _HIGH_TIER_MAX_TOKENS
+        else:
+            system = self._low_tier_prompt(tone_label)
+            user = "、".join(material_words)
+            max_tokens = _DEFAULT_MAX_TOKENS
+
+        raw = await self.dehydrator.raw_chat(
+            system, user,
+            max_tokens=max_tokens,
+            temperature=self.temperature,
+            model=self.model,
+        )
+        if not _is_prose_like(raw):
+            # 只记形状统计，不记正文（R4）：段数、字数，够排障，不泄露即焚内容
+            segs = [s for s in (raw or "").splitlines() if s.strip()]
+            logger.warning(
+                f"dream: 生成结果疑似词表/清单体，按无梦处理 "
+                f"(level={level}, segments={len(segs)}, chars={len(raw or '')})"
+            )
+            return ""
+        return raw
+
+    @staticmethod
+    def _low_tier_prompt(tone_label: str) -> str:
+        """只剩画面/只剩情绪档：维持返修单 v1 的碎片化 prompt 不变——反正会被
+        裁到只剩几句或整段丢弃，不值得上交替结构的复杂度。"""
+        return (
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
             "下面用户消息给你的词是抓到的碎片素材，不是要你输出的格式——"
@@ -534,22 +610,27 @@ class DreamEngine:
             f"情绪要连贯，情节不需要。基调：{tone_label}。噩梦就让它真的可怕，不要缓和。"
             "长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
         )
-        user = "、".join(material_words)
-        raw = await self.dehydrator.raw_chat(
-            system, user,
-            max_tokens=_DEFAULT_MAX_TOKENS,
-            temperature=self.temperature,
-            model=self.model,
+
+    @staticmethod
+    def _high_tier_prompt(tone_label: str) -> str:
+        """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三）。
+        依据 Silvia 描述的真实做梦节奏：一段很清晰的情节，混一段乱七八糟记不清
+        的，再来一段清晰的（接着之前或只是相关但飘走），又跟一大段乱七八糟的。"""
+        return (
+            "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
+            "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
+            "这个梦由“清晰段”和“混沌段”交替组成，共 4-6 段：\n"
+            "清晰段（2-3 个，每个 80-150 字）：围绕给你的一条具名短语展开一个具体、"
+            "连续的小场景。段内允许情节连贯、允许“接着/然后”、允许动作有因果。"
+            "画面要完整，像真的发生过。\n"
+            "混沌段（1-3 个）：意象并置、互不相关、禁因果连接词、禁解释，"
+            "允许一句话写到一半停住。\n"
+            "段与段之间：硬切，零过渡，禁止说明段落之间的关系。后一个清晰段可以"
+            "续接前一个清晰段的情节，也可以只是沾一点边然后飘走。\n"
+            "全局：禁止收尾、禁止点题、禁止把所有意象统一成一个通顺的故事。"
+            "局部清楚，整体乱跳。\n"
+            f"基调：{tone_label}。噩梦就让它真的可怕，不要缓和。总长 300-600 字。"
         )
-        if not _is_prose_like(raw):
-            # 只记形状统计，不记正文（R4）：段数、字数，够排障，不泄露即焚内容
-            segs = [s for s in (raw or "").splitlines() if s.strip()]
-            logger.warning(
-                f"dream: 生成结果疑似词表/清单体，按无梦处理 "
-                f"(segments={len(segs)}, chars={len(raw or '')})"
-            )
-            return ""
-        return raw
 
     # ---------------------------------------------------------
     # §1.7 外科截断
@@ -594,10 +675,17 @@ class DreamEngine:
         """返回 (level_key, 可能被联动改判的 tone)。"""
         weights = (self.memory_levels + _DEFAULT_MEMORY_LEVELS)[:4]
         level = random.choices(_LEVEL_KEYS, weights=weights, k=1)[0]
+        tone = self._apply_emotion_tone_linkage(level, tone)
+        return level, tone
+
+    def _apply_emotion_tone_linkage(self, level: str, tone: str) -> str:
+        """"只剩情绪"档 70% 反向加权到焦虑/噩梦。拆成独立方法是因为
+        DREAM_FORCE_LEVEL 强制指定档位时（返修单 v2 改动五）跳过的只是骰子本身，
+        这条联动规则要"照常"生效，两条路径（骰出来的/强制指定的）都要走它。"""
         if level == "emotion" and tone not in ("anxious", "nightmare"):
             if random.random() < self.emotion_negative_bias:
                 tone = random.choice(["anxious", "nightmare"])
-        return level, tone
+        return tone
 
     def trim_by_level(self, raw: str, level: str, tone: str) -> str:
         if level == "full" or not raw:
@@ -612,6 +700,50 @@ class DreamEngine:
 
     @staticmethod
     def _trim_half(raw: str) -> str:
+        """记得一半档：按段落粒度裁（返修单 v2 改动四）。以空行分段，从随机
+        一段起，连续整段收进来，收到约占全文 45%-60% 字数为止；收到会超预算的
+        那一段改成段内随机窗口，天然产生"从某段中间/开头开始记得"的效果。
+        模型没按空行分段（只有 0-1 段）时退化为旧的整篇随机窗口裁法。"""
+        paragraphs = [p for p in re.split(r"\n\s*\n", raw) if p.strip()]
+        if len(paragraphs) < 2:
+            return DreamEngine._trim_half_char_window(raw)
+
+        total_len = sum(len(p) for p in paragraphs)
+        keep_ratio = random.uniform(_TRIM_HALF_MIN_RATIO, _TRIM_HALF_MAX_RATIO)
+        target_len = max(1, int(total_len * keep_ratio))
+
+        # 起点只能从"后面剩下的段加起来也够 target_len"的位置里随机选，否则起点
+        # 太靠后、后面段数不够，凑不满 45%-60%，裁剪结果就不是"约占全文45%-60%"了。
+        suffix_len = 0
+        valid_starts = []
+        for i in range(len(paragraphs) - 1, -1, -1):
+            suffix_len += len(paragraphs[i])
+            if suffix_len >= target_len:
+                valid_starts.append(i)
+        start = random.choice(valid_starts) if valid_starts else 0
+        kept: list[str] = []
+        kept_len = 0
+        i = start
+        while i < len(paragraphs) and kept_len < target_len:
+            p = paragraphs[i]
+            remaining = target_len - kept_len
+            if len(p) <= remaining:
+                kept.append(p)
+                kept_len += len(p)
+            else:
+                # 段内随机窗口：这段会超预算，截一段窗口就停
+                window_len = max(1, min(remaining, len(p)))
+                max_start = max(0, len(p) - window_len)
+                w_start = random.randint(0, max_start)
+                kept.append(p[w_start:w_start + window_len])
+                kept_len += window_len
+                break
+            i += 1
+        return "\n\n".join(kept).strip()
+
+    @staticmethod
+    def _trim_half_char_window(raw: str) -> str:
+        """段落切分退化兜底：模型没用空行分段时，走 v1 的整篇随机字符窗口裁法。"""
         n = len(raw)
         keep_ratio = random.uniform(_TRIM_HALF_MIN_RATIO, _TRIM_HALF_MAX_RATIO)
         keep_len = max(1, int(n * keep_ratio))
@@ -731,6 +863,20 @@ class DreamEngine:
             )
         return ""
 
+    def _read_forced_level(self) -> str | None:
+        """DREAM_FORCE_LEVEL：仅在 DREAM_FORCE=1 时生效，跳过记忆度骰强制指定
+        档位（返修单 v2 改动五）。取值 full/half/scene/emotion，非法值忽略、
+        照常走骰子，不炸管线。仅限环境变量/CLI，不暴露为 MCP 工具（R3）。"""
+        if os.environ.get("DREAM_FORCE") != "1":
+            return None
+        raw = (os.environ.get("DREAM_FORCE_LEVEL") or "").strip().lower()
+        if not raw:
+            return None
+        level = _FORCE_LEVEL_ALIASES.get(raw)
+        if level is None:
+            logger.warning(f"dream: DREAM_FORCE_LEVEL={raw!r} 不是合法档位，忽略，走正常骰子")
+        return level
+
     # ---------------------------------------------------------
     # §1.1 每晚任务入口
     # ---------------------------------------------------------
@@ -763,22 +909,36 @@ class DreamEngine:
             materials = await self.sample_buckets()
             if not materials:
                 return {"dreamed": False, "reason": "no_material"}
-            imagery = await self.extract_imagery(materials)
+            imagery, named_phrases = await self.extract_imagery(materials)
             noise, noise_tier = self.sample_noise(len(imagery))
 
             if noise_tier == "pure":
+                # 纯噪音丢弃全部记忆意象；具名短语同样来自记忆桶，一并丢弃，
+                # 否则"纯噪音梦"却带着一个真实姓名的锚，就不纯了。
                 material_words = list(noise)
+                effective_named_phrases: list[str] = []
             else:
                 material_words = imagery + noise
                 random.shuffle(material_words)
+                effective_named_phrases = named_phrases
 
             tone = self.roll_tone()
-            raw = await self.generate_dream(material_words, tone)
+
+            # 返修单 v2 改动一：记忆度骰前移到生成前，生成步需要知道自己在写
+            # 哪一档。DREAM_FORCE_LEVEL 强制指定时跳过骰子本身，但"只剩情绪"
+            # 档的基调联动改判仍然照常生效（走同一条 _apply_emotion_tone_linkage）。
+            forced_level = self._read_forced_level()
+            if forced_level:
+                level = forced_level
+                tone = self._apply_emotion_tone_linkage(level, tone)
+            else:
+                level, tone = self.roll_memory_level(tone)
+
+            raw = await self.generate_dream(material_words, effective_named_phrases, tone, level)
             if not raw or not raw.strip():
                 return {"dreamed": False, "reason": "empty_generation"}
             raw = self.surgical_cut(raw)
 
-            level, tone = self.roll_memory_level(tone)
             final_text = self.trim_by_level(raw, level, tone)
             raw = None  # 即焚：局部引用清掉，不再有任何路径能拿到完整原文
 
