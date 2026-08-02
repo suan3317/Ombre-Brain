@@ -45,6 +45,7 @@ from mcp.server.fastmcp import FastMCP
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
+from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from embedding_outbox import EmbeddingOutbox
 from import_memory import ImportEngine
@@ -215,6 +216,7 @@ embedding_outbox = EmbeddingOutbox(config, bucket_mgr, embedding_engine)
 bucket_mgr.attach_embedding_outbox(embedding_outbox)
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
+dream_engine = DreamEngine(config, bucket_mgr, dehydrator)  # Dream engine / 梦境引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 migrate_engine = MigrateEngine(config, bucket_mgr, embedding_engine)              # Migrate engine / 记忆包迁移引擎
 
@@ -514,6 +516,7 @@ _tools_runtime.init(
     bucket_mgr=bucket_mgr,
     dehydrator=dehydrator,
     decay_engine=decay_engine,
+    dream_engine=dream_engine,
     embedding_engine=embedding_engine,
     import_engine=import_engine,
     logger=logger,
@@ -545,7 +548,7 @@ async def breath_search(
 ) -> str:
     """按关键词/语义检索记忆桶,融合关键词/BM25+语义检索,向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写。domain 逗号分隔,按主题域预筛。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。需要 tags/importance_min/valence/arousal/max_tokens/catalog 等更多过滤维度用 breath_advanced(...)。"""
     return await _with_notice(
-        _t_breath.dispatch(query=query, domain=domain, max_results=max_results),
+        _t_breath.dispatch(query=query, domain=domain, max_results=max_results, include_dream=False),
         op="breath_search",
         args={"query": query, "domain": domain, "max_results": max_results},
     )
@@ -1607,6 +1610,7 @@ if __name__ == "__main__":
         _runtime_lifecycle = RuntimeLifecycle(
             logger=logger,
             decay_engine=decay_engine,
+            dream_engine=dream_engine,
             embedding_outbox=embedding_outbox,
             ensure_ollama_child=_ollama_local.ensure_child_on_boot,
             stop_ollama_child=_ollama_local.stop_child,

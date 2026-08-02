@@ -113,6 +113,30 @@ decay:
     base: 1.0                     # Base weight / 基础权重
     arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
 
+# --- Dream engine / 梦境系统 ---
+# 夜里没人在场时自己掷骰、抽材料、生成、裁剪、落盘。设计见
+# handoff/梦境系统_README_v0.1.md。所有数字从这里读，不硬编码。
+dream:
+  enabled: true                   # 总开关
+  generate_at: "06:00"            # 每日生成时刻（下面 timezone 的本地时间）
+  timezone: "America/Los_Angeles"
+  dream_prob: 0.30                # 有梦概率；空号之夜零痕迹
+  memory_levels: [0.10, 0.40, 0.35, 0.15]  # 完全记得/记得一半/只剩画面/只剩情绪
+  emotion_negative_bias: 0.70     # "只剩情绪"档反向加权到焦虑/噩梦的概率
+  tone_weights:
+    daily: 0.35                   # 日常残渣
+    absurd: 0.25                  # 荒诞
+    anxious: 0.18                 # 焦虑
+    sweet: 0.12                   # 甜
+    nightmare: 0.10                # 噩梦——低频但必须真实存在，不做保护性过滤
+  noise_tiers: [0.70, 0.25, 0.05] # 掺1-2条 / 噪音过半 / 纯噪音梦
+  darkroom_prob: 0.10             # 暗房底片低概率加抽（各家开关自定，可设 0 关闭）
+  resolved0_prob: 0.10            # resolved=0 桶低概率加抽
+  expire_hours: 48                # 未读正文过期时限
+  model: null                     # null = 沿用 dehydration.model；也可单独指定
+  temperature: 1.3                # 通顺是梦的反义词
+  cut_prob: 0.5                   # 外科截断（掐头/断尾各独立 50%）触发概率
+
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。
 # 需要在环境变量中设置 OMBRE_EMBED_API_KEY。

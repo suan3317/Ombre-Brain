@@ -16,6 +16,8 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 - 入口 dispatch() 做参数 null-safe 兜底、token/result 上限归一化、
   tags/domain 解析，再交给具体分支函数
 - 不在这里做实际取桶/调 LLM 的工作
+- dispatch() 外面再包一层：五个分支各自 return 后，统一在尾部追加梦境系统的
+  未读梦区块（include_dream=True 时）。梦不进桶、不参与检索，只在这一处露头。
 
 不做什么（边界）：
 - 不直接处理 embedding 调用，全部下放到检索分支
@@ -23,7 +25,7 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 - 不做权限校验，MCP 调用方默认是模型自身
 
 对外暴露：dispatch(query, max_tokens, domain, valence, arousal, max_results,
-                   importance_min, tags, catalog) → str
+                   importance_min, tags, catalog, include_dream) → str
 ========================================
 """
 
@@ -39,6 +41,36 @@ from .search import surface_search
 
 
 async def dispatch(
+    query: Optional[str] = "",
+    max_tokens: Optional[int] = 0,
+    domain: Optional[str] = "",
+    valence: Optional[float] = -1,
+    arousal: Optional[float] = -1,
+    max_results: Optional[int] = 0,
+    importance_min: Optional[int] = -1,
+    tags: Optional[str] = "",
+    catalog: Optional[bool] = False,
+    include_dream: Optional[bool] = True,
+) -> str:
+    """breath 对外唯一入口。包一层尾部拼接，五个内部分支不用各自管梦。"""
+    result = await _dispatch_inner(
+        query=query, max_tokens=max_tokens, domain=domain,
+        valence=valence, arousal=arousal, max_results=max_results,
+        importance_min=importance_min, tags=tags, catalog=catalog,
+    )
+    if include_dream and rt.dream_engine is not None:
+        try:
+            tail = rt.dream_engine.latest_unread_tail()
+        except Exception as e:
+            tail = ""
+            if rt.logger:
+                rt.logger.warning(f"breath: 梦境尾部拼接失败(不影响正文): {e}")
+        if tail:
+            result = f"{result}\n\n{tail}"
+    return result
+
+
+async def _dispatch_inner(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
     domain: Optional[str] = "",
@@ -87,6 +119,8 @@ async def dispatch(
         "catalog": catalog,
     })
     await rt.decay_engine.ensure_started()
+    if rt.dream_engine is not None:
+        await rt.dream_engine.ensure_started()
 
     # --- catalog 目录模式：最先短路，0 LLM、只读元数据、每桶一行 ---
     # 开新窗省 token 的推荐姿势：先 breath(catalog=True) 看目录，

@@ -2,6 +2,13 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.13
+
+- 新增梦境系统一期（`dream_engine`）：夜里没人在场时后台任务自主掷骰、抽记忆桶（含低概率 resolved=0 桶与暗房底片）、拆意象、混噪音、生成（flash-lite + temperature 1.3）、外科截断、按记忆度四档裁剪、落盘到 `files/dreams/`，48 小时未读自动过期。完整原文即焚，不落盘、不进日志。不新增任何生成/触发类 MCP 工具，唯一入口是每日 06:00 America/Los_Angeles 的后台调度（可用 `DREAM_FORCE=1` 环境变量强制跑一次，仅供本地/CI 用）。
+- `breath()`/`breath_advanced()` 响应尾部挂载未读梦区块（读到即标已读，不进桶不参与检索）；`breath_search()` 显式排除。
+- `dehydrator.py` 新增 `raw_chat()`：给需要自定 system/user prompt 的调用方（梦境引擎）复用现有 OpenAI 兼容/原生 Gemini/原生 Anthropic 客户端与重试逻辑，不新开 HTTP client；`_chat` 系列方法新增可选 `model` 覆盖参数。
+- 修复此前 `src/VERSION` 落后于根目录 `VERSION` 的历史遗留不同步（2.6.12 发布时只 bump 了根目录）；本次起两处保持一致。
+
 ## 2.6.11
 
 - 修复 `breath` 工具因参数过多（9 个）导致 claude.ai 按需加载工具时常年跳过它、记忆无法自动浮现的问题：拆成 `breath()`（0 参数，日常浮现）/ `breath_search(query, domain, max_results)`（3 参数，检索）/ `breath_advanced(...)`（完整 9 参数，供 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式使用）三个 MCP 工具，共用同一套内部实现，检索/浮现逻辑本身不变。工具总数由 12 个变为 14 个。

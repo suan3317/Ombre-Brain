@@ -404,16 +404,18 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         """统一 chat 入口：对 429 / 5xx / 超时等瞬时错误做指数退避重试。
 
         真正的单次调用在 _chat_once；这里只负责重试与退避，让 Gemini 免费层
-        偶发的 429/503 不至于直接把脱水/合并打挂（见 README 故障表）。"""
+        偶发的 429/503 不至于直接把脱水/合并打挂（见 README 故障表）。
+        model 覆盖默认 self.model（如 dream_engine 想用独立于脱水配置的模型）。"""
         last_exc: BaseException | None = None
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             try:
                 return await self._chat_once(
-                    system, user, max_tokens=max_tokens, temperature=temperature
+                    system, user, max_tokens=max_tokens, temperature=temperature, model=model
                 )
             except Exception as e:
                 if not self._is_transient_error(e) or attempt == _RETRY_MAX_ATTEMPTS - 1:
@@ -436,6 +438,7 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         """统一的 OpenAI-compatible chat 调用。
 
@@ -453,18 +456,19 @@ class Dehydrator:
             system, user — Chat completion 的 system/user 消息
             max_tokens   — 覆盖默认（如 analyze 用 256，digest 用 2048）
             temperature  — 覆盖默认（如 digest / plan_judge 需要 0.0）
+            model        — 覆盖默认 self.model（同一 API key/endpoint 下换模型，不新开 client）
         """
         if self.api_format == "gemini":
-            return await self._chat_gemini(system, user, max_tokens=max_tokens, temperature=temperature)
+            return await self._chat_gemini(system, user, max_tokens=max_tokens, temperature=temperature, model=model)
         if self.api_format == "anthropic":
-            return await self._chat_anthropic(system, user, max_tokens=max_tokens, temperature=temperature)
+            return await self._chat_anthropic(system, user, max_tokens=max_tokens, temperature=temperature, model=model)
         if self.api_format != "openai_compat":
             logger.warning(f"Unknown api_format '{self.api_format}', falling back to openai_compat")
         # openai_compat (default)
         if self.client is None:
             return ""
         response = await self.client.chat.completions.create(
-            model=self.model,
+            model=model if model else self.model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -483,13 +487,14 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         """Native Gemini generateContent API call (no OpenAI-compat wrapper)."""
         if not self.api_key:
             return ""
         import httpx
         # Strip any accidental "models/" prefix — Google rejects double-prefix in the URL
-        model_id = strip_native_resource_prefix(self.model)
+        model_id = strip_native_resource_prefix(model if model else self.model)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
         payload: dict = {
             "system_instruction": {"parts": [{"text": system}]},
@@ -519,6 +524,7 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         """Native Anthropic Messages API call."""
         if not self.api_key:
@@ -532,7 +538,7 @@ class Dehydrator:
             "content-type": "application/json",
         }
         payload: dict = {
-            "model": self.model,
+            "model": model if model else self.model,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "system": system,
             "messages": [{"role": "user", "content": user}],
@@ -997,6 +1003,30 @@ class Dehydrator:
                 "importance": importance,
             })
         return validated
+
+    # ---------------------------------------------------------
+    # Raw chat: bypass the dehydrate/analyze/digest JSON contracts
+    # 裸调用：绕开脱水/打标/拆条的 JSON 契约，给调用方完全自定的 system/user
+    # ---------------------------------------------------------
+    async def raw_chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        model: str | None = None,
+    ) -> str:
+        """给需要完全自定 prompt 的调用方（如 dream_engine）用同一套客户端。
+
+        不解析/不缓存/不校验返回内容——纯转发到 `_chat`，复用其重试与三态
+        （openai_compat/gemini/anthropic）分发逻辑，不新开 HTTP client。
+        model 可选，覆盖 self.model（同一 key/endpoint 下换一个模型，如梦引擎
+        想用独立于脱水配置的 flash-lite）。API 不可用时抛 RuntimeError（同其余
+        公开方法），由调用方决定怎么降级。
+        """
+        self._require_api()
+        return await self._chat(system, user, max_tokens=max_tokens, temperature=temperature, model=model)
 
     # ---------------------------------------------------------
     # API call: judge whether a new event resolves an active plan

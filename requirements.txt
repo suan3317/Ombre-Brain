@@ -33,3 +33,7 @@ jieba>=0.42.1
 # 本地 Ollama 安装包 .tar.zst 安全解压
 zstandard>=0.22.0
 
+# IANA 时区数据（zoneinfo 的 fallback）：python:3.12-slim 与 Windows 都不带系统
+# tz 数据库，dream_engine 用 America/Los_Angeles 排每日梦境任务需要它兜底
+tzdata>=2024.1
+

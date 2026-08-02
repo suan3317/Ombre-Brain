@@ -279,6 +279,7 @@ class RuntimeLifecycle:
 
     logger: Any
     decay_engine: Any = None
+    dream_engine: Any = None
     embedding_outbox: Any = None
     ensure_ollama_child: AsyncCallback | None = None
     stop_ollama_child: AsyncCallback | None = None
@@ -354,6 +355,10 @@ class RuntimeLifecycle:
             "decay engine start",
             getattr(self.decay_engine, "start", None),
         )
+        await self._run_async_step(
+            "dream engine start",
+            getattr(self.dream_engine, "start", None),
+        )
         await self._run_async_step("ollama child boot", self.ensure_ollama_child)
         await self._run_async_step(
             "embedding outbox start",
@@ -391,6 +396,10 @@ class RuntimeLifecycle:
         await self._run_async_step(
             "decay engine stop",
             getattr(self.decay_engine, "stop", None),
+        )
+        await self._run_async_step(
+            "dream engine stop",
+            getattr(self.dream_engine, "stop", None),
         )
         await self._run_async_step("ollama child stop", self.stop_ollama_child)
         if self.stop_tunnel is not None:
