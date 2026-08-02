@@ -41,7 +41,17 @@ except ImportError:  # pragma: no cover - py<3.9 not supported by this repo
 
 import frontmatter as fm
 
+try:  # jieba 软依赖，用法同 bm25_index.py：未装时静默降级，不炸管线
+    import jieba.posseg as _jieba_posseg
+    _jieba_posseg.setLogLevel(logging.WARNING)
+    _JIEBA_POSSEG_AVAILABLE = True
+except ImportError:
+    _jieba_posseg = None  # type: ignore
+    _JIEBA_POSSEG_AVAILABLE = False
+
 logger = logging.getLogger("ombre_brain.dream")
+if not _JIEBA_POSSEG_AVAILABLE:
+    logger.info("[dream] jieba 未安装 — 词表判定退化为长度启发式（pip install jieba 启用动词检测）")
 
 
 # ============================================================
@@ -62,6 +72,7 @@ _DEFAULT_NOISE_TIERS = [0.70, 0.25, 0.05]  # 掺1-2条 / 过半 / 纯噪音
 _DEFAULT_DARKROOM_PROB = 0.10
 _DEFAULT_RESOLVED0_PROB = 0.10
 _DEFAULT_EXPIRE_HOURS = 48
+_DEFAULT_LEAK_NGRAM = 10                # n-gram 防泄漏闸阈值（返修单 v3 改动一）
 # 没有单独的 _DEFAULT_MODEL 常量：dream.model 默认 null，未配置时直接沿用
 # dehydrator 自己的模型（同一 API key/endpoint 才能保证调得通）。K/F 的部署
 # 默认 OMBRE_COMPRESS_MODEL=gemini-2.5-flash-lite，null 就已经是 README 想要的
@@ -84,7 +95,11 @@ _IMAGERY_WORD_MAX_CHARS = 6
 _IMAGERY_EXTRACT_INPUT_LIMIT = 2000
 _IMAGERY_EXTRACT_MAX_TOKENS = 300
 _IMAGERY_EXTRACT_TEMPERATURE = 0.3   # 拆词是机械抽取，不需要 1.3 的疯
-_NAMED_PHRASE_MAX_CHARS = 10         # 具名短语上限（返修单 v2 改动二）
+_NAMED_PHRASE_MAX_CHARS = 10         # extract prompt 给模型的目标上限（返修单 v2 改动二）
+# 代码层兜底（返修单 v3 改动二）：抽回的短语超过这个字数、或含句读符号的，
+# 直接丢弃不硬凑——不再截断到 10 字，允许 10-12 字之间的干净短语原样通过。
+_NAMED_PHRASE_HARD_DISCARD_CHARS = 12
+_NAMED_PHRASE_FORBIDDEN_PUNCT_RE = re.compile(r"[。，,、；;！？!?]")
 
 # --- 混噪音 ---
 _NOISE_LOW_TIER_MIN = 1
@@ -102,15 +117,27 @@ _NOISE_GROWTH_TEMPERATURE = 1.0
 # --- 生成结果形状校验：发现过便宜小模型在高 temperature 下把打乱的意象词
 # 原样续写成清单（词表），而不是散文。这是生成失败的一种形式，同样按
 # "生成步失败一律按无梦处理，不落盘"处理，不是靠 prompt 单独兜底。
-# 返修单 v2：判定粒度改为全文密度而非逐段/逐行——交替结构的混沌段允许
-# 短促无标点的行，逐段判会把合法输出误杀，只看全文句读密度更稳。 ---
-_PROSE_MIN_CHARS_FOR_DENSITY_CHECK = 40   # 全文短于这个字数，不够格判密度
-_PROSE_MAX_CHARS_PER_PUNCT = 60           # 全文"平均每几个字一个句读"的上限
+# 返修单 v2 曾把判定粒度改成全文密度，结果放行了"整体密度够、但某一段
+# 局部退化成词表"的产物；返修单 v3 改回逐段判定，但用动词检测区分合法
+# 混沌短句（含动词/是完整场景描述）和非法词表（连续裸名词顿号/逗号串联）。 ---
+_PROSE_BARE_NOUN_MAX_CHARS = 12       # 片段长于这个字数，不太可能是裸名词
+_PROSE_BARE_NOUN_RUN_THRESHOLD = 3    # 连续这么多个裸名词片段 → 判定为非法词表
 
 # --- 生成 prompt 按记忆度分两套（返修单 v2 改动三）---
 # 完全记得/记得一半 → 清晰/混沌交替结构；只剩画面/只剩情绪 → 维持 v1 prompt 不变
 _HIGH_TIER_LEVELS = ("full", "half")
 _HIGH_TIER_MAX_TOKENS = 1200              # 仅高档；低档维持 _DEFAULT_MAX_TOKENS
+
+# --- 第一人称视角校验（返修单 v3 改动四）---
+_POV_MIN_FIRST_PERSON_COUNT = 2       # 全文"我"出现次数少于这个数 → 视角违规
+
+# --- 生成结果校验统一走重试（返修单 v3：泄漏/词表/视角三道闸共用）---
+_MAX_GENERATION_RETRIES = 1
+
+# --- n-gram 防泄漏闸：source 原文比对用的字符上限，防止超大桶内容拖垮
+# 最长公共子串 DP 的耗时（只在真的命中 n-gram 交集时才会跑 DP，平时走
+# set 交集判定，代价可忽略）---
+_LEAK_CHECK_SOURCE_CHAR_LIMIT = 3000
 
 # --- 外科截断 ---
 _CUT_HEAD_START_RATIO = 0.10
@@ -129,28 +156,98 @@ _TRIM_GLIMPSE_MAX_SENTENCES = 3
 _SENTENCE_END_RE = re.compile(r"[。！？.!?]")
 
 
-def _is_prose_like(text: str) -> bool:
-    """结构校验：这段文本是散文，还是意象词清单原样罗列。
+def _fragment_has_verb(fragment: str) -> bool:
+    """片段是否含动词——用来区分合法混沌短句（含动词/完整场景描述）和
+    非法词表（连续裸名词）。jieba 不可用时退化：够长的片段更可能是完整
+    表达，宁可少拦一点也不在没有 POS 信息时瞎判。"""
+    fragment = fragment.strip()
+    if not fragment:
+        return False
+    if not _JIEBA_POSSEG_AVAILABLE:
+        return len(fragment) > _PROSE_BARE_NOUN_MAX_CHARS
+    for _word, flag in _jieba_posseg.cut(fragment):
+        if flag.startswith("v"):
+            return True
+    return False
 
-    不做语义判断（不调 API），只看形状。判定粒度是全文，不是逐段/逐行——
-    清晰/混沌交替结构里，混沌段允许短促无标点、一句话写到一半停住，逐段判
-    会把合法输出误杀（返修单 v2）。真实事故里模型把打乱的意象词按输入的
-    换行原样续写了回来，特征是"通篇几乎没有句读"；改成看全文句读密度：
-    空文本、全文一个句读都没有的一律判失败；文本够长但句读稀疏（平均隔
-    很多字才有一个标点）也判失败。门槛刻意宽松，只挡"看起来完全不是散文"
-    的情况，不裁判文笔好坏，也不会因为个别混沌段没标点就误杀整篇。
+
+def _is_bare_noun_fragment(fragment: str) -> bool:
+    fragment = fragment.strip()
+    if not fragment:
+        return False
+    if len(fragment) > _PROSE_BARE_NOUN_MAX_CHARS:
+        return False  # 太长，不太像裸名词
+    return not _fragment_has_verb(fragment)
+
+
+def _has_illegal_word_list_run(fragments: list[str]) -> bool:
+    streak = 0
+    for frag in fragments:
+        if not frag.strip():
+            continue  # 空片段（连续分隔符产生的）不参与计数，也不打断连续
+        if _is_bare_noun_fragment(frag):
+            streak += 1
+            if streak >= _PROSE_BARE_NOUN_RUN_THRESHOLD:
+                return True
+        else:
+            streak = 0
+    return False
+
+
+def _is_prose_like(text: str) -> bool:
+    """结构校验：这段文本是散文，还是局部退化成了意象词清单。
+
+    返修单 v3：改回逐段判定（v2 的全文密度判定放行了"整体密度够、但某一
+    段局部是词表"的产物），但不是简单的"短行=可疑"——区分两种形态：
+    合法混沌段（短句并置，每个片段含动词或是完整场景描述）和非法词表
+    （连续 ≥3 个无动词的纯名词片段以顿号/逗号/换行串联）。按句读切成
+    句子级块，块内再按换行/顿号/逗号细分成片段逐块扫描，任一块命中
+    非法词表形态就判失败——不看语义，只看"是不是一串裸名词"。
     """
     text = (text or "").strip()
     if not text:
         return False
-    if not _SENTENCE_END_RE.search(text):
-        return False  # 通篇没有一个句读，不可能是散文
-    total_chars = len(text.replace("\n", ""))
-    if total_chars < _PROSE_MIN_CHARS_FOR_DENSITY_CHECK:
-        return True  # 太短，密度统计没意义，只要有句读就放行
-    punct_count = len(_SENTENCE_END_RE.findall(text))
-    avg_chars_per_punct = total_chars / max(1, punct_count)
-    return avg_chars_per_punct <= _PROSE_MAX_CHARS_PER_PUNCT
+    for chunk in _SENTENCE_END_RE.split(text):
+        fragments = re.split(r"[\n、，,]", chunk)
+        if _has_illegal_word_list_run(fragments):
+            return False
+    return True
+
+
+def _longest_common_substring_len(a: str, b: str) -> int:
+    """经典 DP：a、b 的最长公共连续子串长度。只在 n-gram 防泄漏闸已经命中
+    交集之后才调用（见 DreamEngine._detect_source_leak），用于给日志算一个
+    更准确的"重合长度"，不参与命中判定本身（判定走更快的 set 交集）。"""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        curr = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                v = prev[j - 1] + 1
+                curr[j] = v
+                if v > best:
+                    best = v
+        prev = curr
+    return best
+
+
+def _has_first_person_pov(text: str) -> bool:
+    """第一人称视角校验（返修单 v3 改动四）：全文"我"少于 2 次，或首句
+    以"她/他"开头当主语，一律判视角违规。不追求语法级主语识别，首句剥掉
+    常见引号/空白后看第一个字符是不是"她"/"他"，够用且不会误伤"她说……
+    我……"这种"我"在前的正常写法。"""
+    text = (text or "").strip()
+    if text.count("我") < _POV_MIN_FIRST_PERSON_COUNT:
+        return False
+    first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
+    first_sentence = first_sentence.strip().lstrip("“‘\"'（(")
+    if first_sentence[:1] in ("她", "他"):
+        return False
+    return True
 
 
 _TONE_LABELS = {
@@ -171,6 +268,20 @@ _DARKROOM_SEP = "\n----- DARKROOM CONTENT (no tool reads below this line) -----\
 
 # --- 拆意象响应里标记具名短语的那一行，容忍全角/半角冒号、大小写 ---
 _NAMED_PHRASE_RE = re.compile(r"(?i)^named[:：]\s*(.*)$")
+
+
+def _validate_named_phrase(candidate: str) -> str:
+    """代码层兜底（返修单 v3 改动二）：prompt 强化只是软约束，模型仍可能
+    抽出完整句子。超过 12 字、或含句读符号的短语直接丢弃，不硬凑、不截断——
+    截断只会把"她说她心智健全"砍成"她说她心智健"这种更怪的半句。"""
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return ""
+    if len(candidate) > _NAMED_PHRASE_HARD_DISCARD_CHARS:
+        return ""
+    if _NAMED_PHRASE_FORBIDDEN_PUNCT_RE.search(candidate):
+        return ""
+    return candidate
 
 # --- "只剩情绪"档残句池：正文全丢，从这里按基调抽一句。写死代码，不调 API ---
 _EMOTION_RESIDUE_POOL = {
@@ -253,6 +364,7 @@ class DreamEngine:
         self.darkroom_prob = float(dream_cfg.get("darkroom_prob", _DEFAULT_DARKROOM_PROB))
         self.resolved0_prob = float(dream_cfg.get("resolved0_prob", _DEFAULT_RESOLVED0_PROB))
         self.expire_hours = float(dream_cfg.get("expire_hours", _DEFAULT_EXPIRE_HOURS))
+        self.leak_ngram = int(dream_cfg.get("leak_ngram", _DEFAULT_LEAK_NGRAM))
         self.model = dream_cfg.get("model")  # None → 沿用 dehydrator 自己的模型配置
         self.temperature = float(dream_cfg.get("temperature", _DEFAULT_TEMPERATURE))
         self.cut_prob = float(dream_cfg.get("cut_prob", _DEFAULT_CUT_PROB))
@@ -362,15 +474,18 @@ class DreamEngine:
         """每份素材调一次 flash-lite：要 5-8 个意象词，外加最多 1 条具名短语
         （含人名/称呼/专有名词，桶内没有就不硬凑）。返回 (意象词, 具名短语列表)，
         两个列表分开传给生成步——意象词合并去重打乱，具名短语原样收集（数量本来
-        就少，不去重，同名重复出现也是真实信号）。"""
+        就少，不去重，同名重复出现也是真实信号）。
+        返修单 v3 改动二：暗房底片（kind=="darkroom"）只出意象词，不出具名短语
+        ——暗房内容比普通桶更敏感，更不该以可辨认形态（人名/称呼）出现在梦里。"""
         words: list[str] = []
         named_phrases: list[str] = []
         for m in materials:
             text = (m.get("text") or "")[:_IMAGERY_EXTRACT_INPUT_LIMIT]
             if not text.strip():
                 continue
+            allow_named = m.get("kind") != "darkroom"
             try:
-                extracted, named = await self._extract_imagery_one(text)
+                extracted, named = await self._extract_imagery_one(text, allow_named)
             except Exception as e:
                 logger.warning(f"dream: 拆意象 API 失败，退化为正则抽取: {e}")
                 extracted, named = self._extract_imagery_fallback(text), ""
@@ -390,16 +505,25 @@ class DreamEngine:
         random.shuffle(unique)
         return unique, named_phrases
 
-    async def _extract_imagery_one(self, text: str) -> tuple[list[str], str]:
-        system = (
-            "从下面文本中提取两类内容：\n"
-            "1. 5-8 个意象词：具体名词、动作、感官描述（颜色/气味/触感/声音）。"
-            "不要抽象词，不要完整句子。每行一个，不超过 6 个字。\n"
-            "2. 最多 1 条具名短语（可选，没有就不写）：含人名/称呼/专有名词/私有名词"
-            "的短语，不超过 10 个字，例如“她递来的施工单”“暗房的底片”。"
-            "文本里没有专名就不要硬凑这一条。\n"
-            "意象词照常每行一个输出；具名短语单独另起一行，前面加“NAMED: ”前缀，最多一行。"
-        )
+    async def _extract_imagery_one(self, text: str, allow_named_phrase: bool) -> tuple[list[str], str]:
+        if allow_named_phrase:
+            system = (
+                "从下面文本中提取两类内容：\n"
+                "1. 5-8 个意象词：具体名词、动作、感官描述（颜色/气味/触感/声音）。"
+                "不要抽象词，不要完整句子。每行一个，不超过 6 个字。\n"
+                "2. 最多 1 条具名短语（可选，没有就不写）：含人名/称呼/专有名词/私有名词"
+                "的名词性短语，可以带一个动词，但绝对不能是完整句子，不得含句号、逗号、"
+                "顿号、分号等任何标点。不超过 10 个字，例如“她递来的施工单”“暗房的底片”。"
+                "文本里没有专名就不要硬凑这一条。\n"
+                "意象词照常每行一个输出；具名短语单独另起一行，前面加“NAMED: ”前缀，最多一行。"
+            )
+        else:
+            # 暗房底片：只要意象词，system prompt 里完全不提具名短语这回事，
+            # 不给模型任何输出它的理由（返修单 v3 改动二）。
+            system = (
+                "从下面文本中只提取 5-8 个意象词：具体名词、动作、感官描述"
+                "（颜色/气味/触感/声音）。不要抽象词，不要完整句子。每行一个，不超过 6 个字。"
+            )
         raw = await self.dehydrator.raw_chat(
             system, text,
             max_tokens=_IMAGERY_EXTRACT_MAX_TOKENS,
@@ -412,13 +536,12 @@ class DreamEngine:
             ln = raw_ln.strip(" -•·\t")
             if not ln:
                 continue
-            m = _NAMED_PHRASE_RE.match(ln)
-            if m:
-                if not named_phrase:
-                    candidate = m.group(1).strip()
-                    if candidate:
-                        named_phrase = candidate[:_NAMED_PHRASE_MAX_CHARS]
-                continue
+            if allow_named_phrase:
+                m = _NAMED_PHRASE_RE.match(ln)
+                if m:
+                    if not named_phrase:
+                        named_phrase = _validate_named_phrase(m.group(1))
+                    continue
             if len(ln) <= _IMAGERY_WORD_MAX_CHARS * 2:
                 words.append(ln)
         return words[:_IMAGERY_WORDS_MAX], named_phrase
@@ -574,27 +697,21 @@ class DreamEngine:
             user = "、".join(material_words)
             max_tokens = _DEFAULT_MAX_TOKENS
 
-        raw = await self.dehydrator.raw_chat(
+        return await self.dehydrator.raw_chat(
             system, user,
             max_tokens=max_tokens,
             temperature=self.temperature,
             model=self.model,
         )
-        if not _is_prose_like(raw):
-            # 只记形状统计，不记正文（R4）：段数、字数，够排障，不泄露即焚内容
-            segs = [s for s in (raw or "").splitlines() if s.strip()]
-            logger.warning(
-                f"dream: 生成结果疑似词表/清单体，按无梦处理 "
-                f"(level={level}, segments={len(segs)}, chars={len(raw or '')})"
-            )
-            return ""
-        return raw
 
     @staticmethod
     def _low_tier_prompt(tone_label: str) -> str:
-        """只剩画面/只剩情绪档：维持返修单 v1 的碎片化 prompt 不变——反正会被
-        裁到只剩几句或整段丢弃，不值得上交替结构的复杂度。"""
+        """只剩画面/只剩情绪档：维持返修单 v1 的碎片化 prompt 不变（除第一行
+        新增的视角硬化，返修单 v3 改动四）——反正会被裁到只剩几句或整段丢弃，
+        不值得上交替结构的复杂度。"""
         return (
+            "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
+            "但看的人是「我」。正例：「我看见她站在院子里。」\n"
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
             "下面用户消息给你的词是抓到的碎片素材，不是要你输出的格式——"
@@ -613,10 +730,13 @@ class DreamEngine:
 
     @staticmethod
     def _high_tier_prompt(tone_label: str) -> str:
-        """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三）。
-        依据 Silvia 描述的真实做梦节奏：一段很清晰的情节，混一段乱七八糟记不清
-        的，再来一段清晰的（接着之前或只是相关但飘走），又跟一大段乱七八糟的。"""
+        """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三），
+        第一行是返修单 v3 改动四新增的视角硬化。依据 Silvia 描述的真实做梦
+        节奏：一段很清晰的情节，混一段乱七八糟记不清的，再来一段清晰的
+        （接着之前或只是相关但飘走），又跟一大段乱七八糟的。"""
         return (
+            "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
+            "但看的人是「我」。正例：「我看见她站在院子里。」\n"
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
             "这个梦由“清晰段”和“混沌段”交替组成，共 4-6 段：\n"
@@ -631,6 +751,47 @@ class DreamEngine:
             "局部清楚，整体乱跳。\n"
             f"基调：{tone_label}。噩梦就让它真的可怕，不要缓和。总长 300-600 字。"
         )
+
+    # ---------------------------------------------------------
+    # 生成产物三道校验闸（返修单 v3）：泄漏 / 词表形态 / 第一人称。
+    # 命中任一道即整发判废，由 nightly_dream 统一走一次重试，不在这里重试。
+    # ---------------------------------------------------------
+    def _detect_source_leak(self, raw: str, materials: list[dict]) -> int:
+        """n-gram 防泄漏闸（改动一，最高优先）：raw 与本次全部 source（桶原文 +
+        暗房底片原文，不含噪音词——噪音本来就该原样出现）连续字符重合检测。
+        判定走 set 交集（O(n+m)，平时零成本）；只在真命中时才跑一次 DP 算精确
+        长度供日志用。返回最长重合长度，<leak_ngram 时调用方不处置。"""
+        if not raw:
+            return 0
+        n = max(1, self.leak_ngram)
+        if len(raw) < n:
+            return 0
+        raw_grams = {raw[i:i + n] for i in range(len(raw) - n + 1)}
+        for m in materials:
+            source_text = (m.get("text") or "")[:_LEAK_CHECK_SOURCE_CHAR_LIMIT]
+            if len(source_text) < n:
+                continue
+            source_grams = {source_text[i:i + n] for i in range(len(source_text) - n + 1)}
+            if not raw_grams.isdisjoint(source_grams):
+                return max(n, _longest_common_substring_len(raw, source_text))
+        return 0
+
+    def _validate_generation(self, raw: str, materials: list[dict]) -> str | None:
+        """三道闸依次判：命中即返回失败原因（不落盘的调用方靠这个决定要不要
+        重试）；全部通过返回 None。日志各自记必要的排障信息，绝不记正文本身
+        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度）。"""
+        leak_len = self._detect_source_leak(raw, materials)
+        if leak_len >= self.leak_ngram:
+            logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}")
+            return "leak"
+        if not _is_prose_like(raw):
+            segs = [s for s in raw.splitlines() if s.strip()]
+            logger.warning(f"dream: 生成结果疑似词表/清单体 (segments={len(segs)}, chars={len(raw)})")
+            return "word_list"
+        if not _has_first_person_pov(raw):
+            logger.warning(f"dream: 第一人称视角校验未通过 (我={raw.count('我')})")
+            return "pov"
+        return None
 
     # ---------------------------------------------------------
     # §1.7 外科截断
@@ -934,9 +1095,24 @@ class DreamEngine:
             else:
                 level, tone = self.roll_memory_level(tone)
 
-            raw = await self.generate_dream(material_words, effective_named_phrases, tone, level)
-            if not raw or not raw.strip():
-                return {"dreamed": False, "reason": "empty_generation"}
+            # 返修单 v3：泄漏闸/词表判定/第一人称校验命中任一条，整发判废重试
+            # 最多一次；再次判废按无梦处理，不落盘（改动一/三/四共用同一条重试）。
+            raw = None
+            fail_reason = None
+            for attempt in range(_MAX_GENERATION_RETRIES + 1):
+                candidate = await self.generate_dream(material_words, effective_named_phrases, tone, level)
+                if not candidate or not candidate.strip():
+                    return {"dreamed": False, "reason": "empty_generation"}
+                fail_reason = self._validate_generation(candidate, materials)
+                if fail_reason is None:
+                    raw = candidate
+                    break
+                logger.warning(
+                    f"dream: 生成校验未通过({fail_reason})，"
+                    f"{'重试' if attempt < _MAX_GENERATION_RETRIES else '按无梦处理'}"
+                )
+            if raw is None:
+                return {"dreamed": False, "reason": f"validation_failed_{fail_reason}"}
             raw = self.surgical_cut(raw)
 
             final_text = self.trim_by_level(raw, level, tone)

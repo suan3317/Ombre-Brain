@@ -136,6 +136,7 @@ dream:
   model: null                     # null = 沿用 dehydration.model；也可单独指定
   temperature: 1.3                # 通顺是梦的反义词
   cut_prob: 0.5                   # 外科截断（掐头/断尾各独立 50%）触发概率
+  leak_ngram: 10                  # n-gram 防泄漏闸：与 source 原文连续重合≥此字数即判泄漏
 
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。

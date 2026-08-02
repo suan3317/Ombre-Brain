@@ -28,22 +28,29 @@ PT = ZoneInfo("America/Los_Angeles")
 _IMAGERY_SYSTEM_MARKER = "提取两类内容"
 _GROWTH_SYSTEM_MARKER = "梦境噪音意象"
 
-# 一句干净的、没有因果连接词、没有收尾点题的梦境文本，供各测试复用
+# 一句干净的、第一人称、没有因果连接词、没有收尾点题的梦境文本，供各测试复用
 _CLEAN_DREAM_TEXT = (
-    "台灯的光落在没人的椅子上。钥匙串在门后自己晃。楼梯数到一半停住，"
-    "手表的指针倒着走，雨声从没关紧的窗户挤进来"
+    "我看见台灯的光落在没人的椅子上。我摸到钥匙串在门后自己晃。楼梯数到一半停住，"
+    "我盯着手表的指针倒着走，雨声从没关紧的窗户挤进来"
 )
 
-# 一段像清晰/混沌交替结构的高档梦境文本，供 §1.6 高档 prompt 与
-# _is_prose_like 全文粒度测试复用：2 个有标点的清晰段 + 混沌段里夹着
-# 短促无标点的行（v1 的逐段判定会误杀这种输出，v2 改成全文密度判定）。
+# 一段清晰/混沌交替结构的高档梦境文本，供 §1.6 高档 prompt 与
+# _is_prose_like 逐段判定测试复用：2 个第一人称清晰段 + 1 个混沌段
+# （混沌段是短促、逗号串联的分句，但每个分句含动词——合法混沌，不是裸名词词表）。
 _ALTERNATING_DREAM_TEXT = (
-    "她把施工单递过来，纸角还是潮的，我伸手去接，指尖先碰到她的袖口，"
+    "我看见她把施工单递过来，纸角还是潮的，我伸手去接，指尖先碰到她的袖口，"
     "然后才碰到纸。灯在这时候闪了一下，闪完还是原来的灯。\n\n"
-    "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪\n"
-    "少一级的楼梯\n\n"
-    "楼梯还是那道楼梯，只是编号变了，她已经站在最上面等，手里的施工单"
+    "钥匙转不动，楼梯在往下沉，雨声突然大了，手表停在某处不走，台灯又晃了一下。\n\n"
+    "我看着楼梯还是那道楼梯，只是编号变了，她已经站在最上面等，我看她手里的施工单"
     "换了一份，纸角是干的，她说这次不一样，我没接话，转身继续往上走。"
+)
+
+# 返修单 v3 §背景①的复现：整体读起来还行，但混沌段局部退化成了裸名词词表
+# （v2 的全文密度判定会放行这种"整体够、局部是清单"的产物）。
+_ALTERNATING_WITH_EMBEDDED_WORD_LIST = (
+    "我看见她把信递过来，纸角还是潮的，我伸手去接，指尖先碰到纸角。\n\n"
+    "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪\n少一级的楼梯\n\n"
+    "我转身继续往上走，她已经不在原地了。"
 )
 
 
@@ -455,9 +462,8 @@ def test_is_prose_like_rejects_word_list_dump():
     assert _is_prose_like(word_list_dump) is False
 
 
-def test_is_prose_like_rejects_empty_and_no_punctuation_text():
+def test_is_prose_like_rejects_empty_text():
     assert _is_prose_like("") is False
-    assert _is_prose_like("台灯 钥匙 楼梯 手表 雨声 没有任何句读的一长串文字") is False
 
 
 def test_is_prose_like_accepts_real_prose():
@@ -470,12 +476,14 @@ def test_is_prose_like_accepts_real_prose():
 
 
 @pytest.mark.asyncio
-async def test_generate_dream_returns_empty_when_llm_dumps_word_list(tmp_path):
+async def test_generate_dream_no_longer_filters_shape_itself(tmp_path):
+    """返修单 v3：形状校验从 generate_dream() 内部移到 nightly_dream 的编排层
+    （统一走泄漏/词表/视角三道闸 + 重试），generate_dream() 本身现在只管拼
+    prompt + 调 API，原样透传返回值——即便是词表形状也不再自己过滤。"""
     async def dump_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
         if _IMAGERY_SYSTEM_MARKER in system:
             return "台灯\n钥匙\n楼梯"
-        # 模拟首发事故：生成步把打乱的意象词原样续写回来
-        return "\n".join(["台灯", "钥匙", "楼梯", "手表", "雨声", "盐味的雪"])
+        return "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪"
 
     class DumpDehydrator:
         api_available = True
@@ -483,14 +491,19 @@ async def test_generate_dream_returns_empty_when_llm_dumps_word_list(tmp_path):
 
     engine = make_engine(tmp_path, dehydrator=DumpDehydrator())
     result = await engine.generate_dream(["台灯", "钥匙", "楼梯"], [], "daily", "full")
-    assert result == ""
+    assert result != "", "generate_dream() 不再自己做形状过滤，校验交给 nightly_dream 编排层"
 
 
 @pytest.mark.asyncio
-async def test_nightly_dream_writes_nothing_when_generation_is_word_list_shaped(tmp_path):
+async def test_nightly_dream_writes_nothing_when_word_list_survives_retry(tmp_path):
+    call_count = {"n": 0}
+
     async def dump_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
         if _IMAGERY_SYSTEM_MARKER in system:
             return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        if _GROWTH_SYSTEM_MARKER in system:  # 每月 1 号 maybe_grow_noise_library 也会调一次
+            return "\n".join(f"噪音意象{i}" for i in range(30))
+        call_count["n"] += 1
         return "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪\n少一级的楼梯"
 
     class DumpDehydrator:
@@ -501,9 +514,10 @@ async def test_nightly_dream_writes_nothing_when_generation_is_word_list_shaped(
     result = await engine.nightly_dream()
 
     assert result["dreamed"] is False
+    assert call_count["n"] == 2, "词表形状要重试一次（最多 2 次生成尝试），不是直接放弃"
     dreams_dir = engine._dreams_dir()
     written = [f for f in os.listdir(dreams_dir) if f.endswith(".md")]
-    assert written == [], "生成结果是词表时不允许落盘，哪怕退化路径也不行"
+    assert written == [], "生成结果是词表时不允许落盘，重试后仍是词表也不行"
 
 
 # ============================================================
@@ -538,11 +552,11 @@ async def test_extract_imagery_no_named_phrase_when_bucket_has_none(tmp_path):
     assert words  # 意象词照常有
 
 
-def test_named_phrase_truncated_to_max_chars():
-    from dream_engine import _NAMED_PHRASE_RE, _NAMED_PHRASE_MAX_CHARS
-    m = _NAMED_PHRASE_RE.match("NAMED: 一个非常非常非常长超过十个字的具名短语肯定会被截断")
+def test_named_phrase_regex_matches_named_line():
+    from dream_engine import _NAMED_PHRASE_RE
+    m = _NAMED_PHRASE_RE.match("NAMED: 她递来的施工单")
     assert m is not None
-    assert len(m.group(1).strip()[:_NAMED_PHRASE_MAX_CHARS]) == _NAMED_PHRASE_MAX_CHARS
+    assert m.group(1).strip() == "她递来的施工单"
 
 
 # --- 改动三：生成 prompt 按档分两套 ---
@@ -720,19 +734,276 @@ async def test_dream_force_level_emotion_still_applies_tone_linkage(tmp_path, mo
     )
 
 
-# --- _is_prose_like 判定粒度改为全文，不误杀交替结构 ---
+# --- _is_prose_like 交替结构应放行（合法混沌短句含动词，不是裸名词）---
 
-def test_is_prose_like_accepts_alternating_structure_with_short_chaotic_lines():
+def test_is_prose_like_accepts_alternating_structure():
     assert _is_prose_like(_ALTERNATING_DREAM_TEXT) is True
 
 
-def test_is_prose_like_full_text_granularity_not_per_segment():
-    # 构造一段整体密度足够、但夹杂几行短促无标点混沌行的合法输出——
-    # v1 的逐段/逐行判定会因为这些短行把整篇误杀；v2 只看全文密度。
-    text = (
-        "她把信递过来，我伸手去接，指尖先碰到纸角，风从门缝里钻进来，"
-        "灯光晃了一下又稳住，桌上的杯子还是温的。\n"
-        "台灯\n钥匙\n楼梯\n手表\n雨声\n"
-        "楼下的邻居还在搬东西，声音断断续续传上来，我没有回头。"
-    )
+# ============================================================
+# 返修单 v3：防泄漏闸与视角修正
+# 改动一：n-gram 防泄漏闸（新增，最高优先）
+# 改动二：具名短语硬约束
+# 改动三：混沌段/词表判定粒度改回逐段，区分合法混沌短句与非法词表
+# 改动四：第一人称硬化
+# ============================================================
+
+# --- 改动三：逐段判定 + 动词区分 ---
+
+def test_is_prose_like_catches_embedded_word_list_that_v2_density_check_missed():
+    """返修单 v3 背景①复现：v2 的全文密度判定会放行"整体够、局部是清单"
+    的产物；v3 改回逐段判定后必须能抓到这种局部退化。"""
+    assert _is_prose_like(_ALTERNATING_WITH_EMBEDDED_WORD_LIST) is False
+
+
+def test_is_prose_like_accepts_legal_chaotic_short_clauses():
+    # 合法混沌段：逗号串联的短句，每句含动词——不是裸名词词表
+    text = "我看见钥匙转不动，楼梯在往下沉，雨声突然大了，手表停在某处不走。"
     assert _is_prose_like(text) is True
+
+
+def test_is_prose_like_rejects_bare_noun_run_joined_by_dunhao():
+    # 返修单 v3 给的非法例子原型："底片,一仓一钥"——连续裸名词顿号串联
+    text = "我看着底片、钥匙串、旧仓库、锁孔，一动不动。"
+    assert _is_prose_like(text) is False
+
+
+def test_is_prose_like_accepts_scene_description_with_verb():
+    # 返修单 v3 给的合法例子原型："路边的邮筒比昨天挪了位置"——完整场景描述，含动词
+    text = "我路过时发现路边的邮筒比昨天挪了位置，风还在刮。"
+    assert _is_prose_like(text) is True
+
+
+def test_is_prose_like_short_run_below_threshold_still_passes():
+    # 只有 2 个连续裸名词，没到"连续 3 个以上"的门槛，不该被拦
+    text = "我看见台灯、钥匙放在桌上，然后转身走了。"
+    assert _is_prose_like(text) is True
+
+
+# --- 改动二：具名短语硬约束 ---
+
+def test_validate_named_phrase_discards_over_hard_limit():
+    from dream_engine import _validate_named_phrase
+    too_long = "一个非常非常非常长超过十二个字的具名短语"
+    assert len(too_long) > 12
+    assert _validate_named_phrase(too_long) == ""
+
+
+def test_validate_named_phrase_discards_when_contains_punctuation():
+    from dream_engine import _validate_named_phrase
+    assert _validate_named_phrase("她说她心智健全，人格完整") == ""
+    assert _validate_named_phrase("她说她心智健全。") == ""
+    assert _validate_named_phrase("底片、一把钥匙") == ""
+
+
+def test_validate_named_phrase_keeps_clean_short_phrase():
+    from dream_engine import _validate_named_phrase
+    assert _validate_named_phrase("她递来的施工单") == "她递来的施工单"
+    assert _validate_named_phrase("暗房的底片") == "暗房的底片"
+
+
+@pytest.mark.asyncio
+async def test_extract_imagery_discards_full_sentence_named_phrase(tmp_path):
+    """模拟返修单 v3 背景②的原始事故：模型把整句话当"具名短语"吐出来——
+    代码层兜底必须拦下，不能让"她说她心智健全，人格完整"这种完整句子
+    混进具名短语列表。"""
+    async def leaky_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        return "台灯\n钥匙\n楼梯\n手表\n雨声\nNAMED: 她说她心智健全，人格完整"
+
+    class LeakyDehydrator:
+        api_available = True
+        raw_chat = staticmethod(leaky_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=LeakyDehydrator())
+    materials = [{"kind": "bucket", "id": "b1", "text": "随便什么内容"}]
+    words, named_phrases = await engine.extract_imagery(materials)
+    assert named_phrases == [], "含句读的完整句子必须被代码层兜底丢弃，不硬凑"
+
+
+@pytest.mark.asyncio
+async def test_extract_imagery_darkroom_never_yields_named_phrase(tmp_path):
+    """返修单 v3 改动二：暗房底片参与拆意象时只出意象词，即便模型自己
+    吐出了 NAMED 行也不采信——system prompt 本来就没提这回事，但防御性地
+    确认 kind=="darkroom" 路径下 allow_named_phrase=False 生效。"""
+    async def chatty_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        # 即便模型不听话主动吐了 NAMED 行，也不该被采信
+        return "台灯\n钥匙\n楼梯\n手表\n雨声\nNAMED: 暗房的秘密"
+
+    class ChattyDehydrator:
+        api_available = True
+        raw_chat = staticmethod(chatty_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=ChattyDehydrator())
+    materials = [{"kind": "darkroom", "id": "darkroom", "text": "还没想透的暗房正文"}]
+    words, named_phrases = await engine.extract_imagery(materials)
+    assert named_phrases == [], "暗房底片不该产出具名短语，无论模型说什么"
+    assert words, "意象词照常提取"
+
+
+# --- 改动一：n-gram 防泄漏闸 ---
+
+def test_detect_source_leak_finds_overlap(tmp_path):
+    engine = make_engine(tmp_path)
+    source_text = "她说她心智健全，人格完整，记忆md明文，GitHub备份"
+    materials = [{"kind": "bucket", "id": "b1", "text": source_text}]
+    leaked = "我梦见她说她心智健全，人格完整，然后转身走了"
+    leak_len = engine._detect_source_leak(leaked, materials)
+    assert leak_len >= engine.leak_ngram
+
+
+def test_detect_source_leak_no_false_positive_on_unrelated_text(tmp_path):
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "今天在办公室开了很久的会，很累"}]
+    unrelated = _CLEAN_DREAM_TEXT
+    leak_len = engine._detect_source_leak(unrelated, materials)
+    assert leak_len < engine.leak_ngram
+
+
+def test_detect_source_leak_ignores_noise_words(tmp_path):
+    # 噪音词不算 source，本来就该原样出现，不受泄漏闸约束
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "今天在办公室开了很久的会"}]
+    noise_only_text = "我看见一扇往下开的门，闻起来像铁的雨，后颈发凉"
+    leak_len = engine._detect_source_leak(noise_only_text, materials)
+    assert leak_len < engine.leak_ngram
+
+
+@pytest.mark.asyncio
+async def test_validate_generation_leak_logs_only_length_not_content(tmp_path, caplog):
+    engine = make_engine(tmp_path)
+    secret = "记忆md明文存放在GitHub备份仓库的私有目录里绝密"
+    materials = [{"kind": "bucket", "id": "b1", "text": secret}]
+    leaked_output = "我梦见" + secret + "然后醒了"
+
+    with caplog.at_level("WARNING"):
+        reason = engine._validate_generation(leaked_output, materials)
+
+    assert reason == "leak"
+    assert "泄漏拦截" in caplog.text
+    assert secret not in caplog.text, "R4：日志只能记重合长度，不能记重合内容本身"
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_retries_once_on_leak_then_succeeds(tmp_path):
+    secret_source = "她说她心智健全，人格完整，记忆md明文存放在GitHub备份"
+    attempts = {"n": 0}
+
+    async def leaky_then_clean_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        if _GROWTH_SYSTEM_MARKER in system:  # 每月 1 号 maybe_grow_noise_library 也会调一次
+            return "\n".join(f"噪音意象{i}" for i in range(30))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return "我梦见" + secret_source + "然后天亮了"
+        return _CLEAN_DREAM_TEXT
+
+    class LeakyThenCleanDehydrator:
+        api_available = True
+        raw_chat = staticmethod(leaky_then_clean_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=LeakyThenCleanDehydrator())
+
+    async def fake_sample_buckets():
+        return [{"kind": "bucket", "id": "b1", "text": secret_source}]
+    engine.sample_buckets = fake_sample_buckets
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True, "第一次泄漏后应重试一次并用第二次的干净结果"
+    assert attempts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_no_dream_when_leak_persists_after_retry(tmp_path):
+    secret_source = "她说她心智健全，人格完整，记忆md明文存放在GitHub备份"
+
+    async def always_leaky_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        if _GROWTH_SYSTEM_MARKER in system:
+            return "\n".join(f"噪音意象{i}" for i in range(30))
+        return "我梦见" + secret_source + "然后天亮了"
+
+    class AlwaysLeakyDehydrator:
+        api_available = True
+        raw_chat = staticmethod(always_leaky_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=AlwaysLeakyDehydrator())
+
+    async def fake_sample_buckets():
+        return [{"kind": "bucket", "id": "b1", "text": secret_source}]
+    engine.sample_buckets = fake_sample_buckets
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is False
+    assert result["reason"] == "validation_failed_leak"
+    dreams_dir = engine._dreams_dir()
+    written = [f for f in os.listdir(dreams_dir) if f.endswith(".md")]
+    assert written == [], "重试后仍泄漏，不落盘"
+
+
+# --- 改动四：第一人称硬化 ---
+
+def test_has_first_person_pov_rejects_too_few_first_person():
+    from dream_engine import _has_first_person_pov
+    text = "她站在院子里，风吹过来，她转身走了，什么都没说。"
+    assert _has_first_person_pov(text) is False  # 全文 0 个"我"
+
+
+def test_has_first_person_pov_rejects_third_person_opening():
+    from dream_engine import _has_first_person_pov
+    text = "她看着我，我也看着她，我们都没说话，我心里想了很多。"
+    assert _has_first_person_pov(text) is False  # 首句主语是"她"
+
+
+def test_has_first_person_pov_accepts_valid_text():
+    from dream_engine import _has_first_person_pov
+    assert _has_first_person_pov(_CLEAN_DREAM_TEXT) is True
+    assert _has_first_person_pov("我看见她站在院子里，我走过去，我们都没说话。") is True
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_retries_once_on_third_person_then_succeeds(tmp_path):
+    attempts = {"n": 0}
+
+    async def third_person_then_first_person(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        if _GROWTH_SYSTEM_MARKER in system:
+            return "\n".join(f"噪音意象{i}" for i in range(30))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return "她站在院子里，风吹过来，她转身走了，什么都没说，她也不知道为什么。"
+        return _CLEAN_DREAM_TEXT
+
+    class Dehy:
+        api_available = True
+        raw_chat = staticmethod(third_person_then_first_person)
+
+    engine = make_engine(tmp_path, dehydrator=Dehy())
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True
+    assert attempts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_no_dream_when_third_person_persists_after_retry(tmp_path):
+    async def always_third_person(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        if _GROWTH_SYSTEM_MARKER in system:
+            return "\n".join(f"噪音意象{i}" for i in range(30))
+        return "她站在院子里，风吹过来，她转身走了，什么都没说，她也不知道为什么。"
+
+    class Dehy:
+        api_available = True
+        raw_chat = staticmethod(always_third_person)
+
+    engine = make_engine(tmp_path, dehydrator=Dehy())
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is False
+    assert result["reason"] == "validation_failed_pov"
