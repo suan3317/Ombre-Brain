@@ -98,6 +98,13 @@ _NOISE_GROWTH_COUNT = 30
 _NOISE_GROWTH_MAX_TOKENS = 600
 _NOISE_GROWTH_TEMPERATURE = 1.0
 
+# --- 生成结果形状校验：发现过便宜小模型在高 temperature 下把打乱的意象词
+# 原样续写成清单（词表），而不是散文。这是生成失败的一种形式，同样按
+# "生成步失败一律按无梦处理，不落盘"处理，不是靠 prompt 单独兜底。 ---
+_PROSE_MIN_SEGMENTS_FOR_CHECK = 4     # 少于这么多段落/换行，不判定为清单体
+_PROSE_SHORT_SEGMENT_CHARS = 8        # 段落短于这个字数且无句读 → 疑似词表行
+_PROSE_SHORT_SEGMENT_RATIO = 0.6      # 这类可疑段落占比超过此值 → 判定为清单体
+
 # --- 外科截断 ---
 _CUT_HEAD_START_RATIO = 0.10
 _CUT_HEAD_END_RATIO = 0.40
@@ -113,6 +120,31 @@ _TRIM_GLIMPSE_MIN_SENTENCES = 1
 _TRIM_GLIMPSE_MAX_SENTENCES = 3
 
 _SENTENCE_END_RE = re.compile(r"[。！？.!?]")
+
+
+def _is_prose_like(text: str) -> bool:
+    """结构校验：这段文本是散文，还是意象词清单原样罗列。
+
+    不做语义判断（不调 API），只看形状：清单体的典型特征是"很多短段落，
+    几乎没有句读"——真实事故里模型把打乱的意象词按输入的换行原样续写了
+    回来。空文本、无任何句读的文本一律判失败；段落多且大半段落短促无
+    标点也判失败。门槛刻意宽松，只挡"看起来完全不是散文"的情况，不裁判
+    文笔好坏。
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    if not _SENTENCE_END_RE.search(text):
+        return False  # 通篇没有一个句读，不可能是散文
+    segments = [s.strip() for s in text.splitlines() if s.strip()]
+    if len(segments) < _PROSE_MIN_SEGMENTS_FOR_CHECK:
+        return True  # 段落不够多，不够格判定为"清单体"
+    suspicious = sum(
+        1 for s in segments
+        if len(s) <= _PROSE_SHORT_SEGMENT_CHARS and not _SENTENCE_END_RE.search(s)
+    )
+    return (suspicious / len(segments)) < _PROSE_SHORT_SEGMENT_RATIO
+
 
 _TONE_LABELS = {
     "daily": "日常残渣", "absurd": "荒诞", "anxious": "焦虑",
@@ -489,20 +521,35 @@ class DreamEngine:
         system = (
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
-            "硬规则：禁用因果连接词（因为、所以、于是、接着、然后、由于）；"
+            "下面用户消息给你的词是抓到的碎片素材，不是要你输出的格式——"
+            "绝对禁止把它们原样列出来、分行罗列、写成“名词，名词，名词”这种清单体，"
+            "也不许每行一个词地照抄。你要做的是把这些碎片揉进连续的散文段落里，"
+            "输出必须是连贯的句子组成的正文，不是词表、不是提纲、不是关键词罗列。\n"
+            "硬规则：每一句都必须是含动词的完整句子（可以短，但不能是孤立的名词短语）；"
+            "禁用因果连接词（因为、所以、于是、接着、然后、由于）；"
             "禁止解释任何画面为什么出现；禁止收尾、点题、总结情绪；"
-            "给你的意象词互不相关，让它们并置、相撞，不许编成合理的故事；"
-            "允许场景毫无过渡地切换、一个人说着话变成另一个人、一句话写到一半停住；"
+            "给你的意象词互不相关，让它们在句子里并置、相撞，不许编成合理的故事；"
+            "允许场景毫无过渡地硬切——一句话写着写着换了场景、一个人说着话变成另一个人、"
+            "一句话写到一半停住——但切换前后仍然是完整句子，不是词语拼贴；"
             f"情绪要连贯，情节不需要。基调：{tone_label}。噩梦就让它真的可怕，不要缓和。"
-            "长度 150-400 字，1-3 段。"
+            "长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
         )
-        user = "\n".join(material_words)
-        return await self.dehydrator.raw_chat(
+        user = "、".join(material_words)
+        raw = await self.dehydrator.raw_chat(
             system, user,
             max_tokens=_DEFAULT_MAX_TOKENS,
             temperature=self.temperature,
             model=self.model,
         )
+        if not _is_prose_like(raw):
+            # 只记形状统计，不记正文（R4）：段数、字数，够排障，不泄露即焚内容
+            segs = [s for s in (raw or "").splitlines() if s.strip()]
+            logger.warning(
+                f"dream: 生成结果疑似词表/清单体，按无梦处理 "
+                f"(segments={len(segs)}, chars={len(raw or '')})"
+            )
+            return ""
+        return raw
 
     # ---------------------------------------------------------
     # §1.7 外科截断

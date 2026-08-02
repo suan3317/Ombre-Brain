@@ -18,7 +18,9 @@ import frontmatter as fm
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from dream_engine import DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS  # noqa: E402
+from dream_engine import (  # noqa: E402
+    DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
+)
 
 
 PT = ZoneInfo("America/Los_Angeles")
@@ -425,3 +427,66 @@ async def test_nightly_dream_no_dream_on_generation_failure(tmp_path):
     engine = make_engine(tmp_path, dehydrator=dehy)
     result = await engine.nightly_dream()
     assert result["dreamed"] is False
+
+
+# ============================================================
+# 回归：首发实测发现生成结果是意象词原样罗列，不是叙事散文
+# （生产上 dreams/2026-07-31.md 的正文是清单体）。修复：①§1.6 prompt 明确
+# 要求连续散文、每句含动词、禁止罗列；②形状校验兜底，清单体一律按生成
+# 失败处理，不落盘。
+# ============================================================
+
+def test_is_prose_like_rejects_word_list_dump():
+    word_list_dump = "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪\n少一级的楼梯"
+    assert _is_prose_like(word_list_dump) is False
+
+
+def test_is_prose_like_rejects_empty_and_no_punctuation_text():
+    assert _is_prose_like("") is False
+    assert _is_prose_like("台灯 钥匙 楼梯 手表 雨声 没有任何句读的一长串文字") is False
+
+
+def test_is_prose_like_accepts_real_prose():
+    assert _is_prose_like(_CLEAN_DREAM_TEXT) is True
+    multi_paragraph = (
+        "台灯的光落在没人的椅子上，钥匙串在门后自己晃。\n\n"
+        "楼梯数到一半停住，手表的指针倒着走"
+    )
+    assert _is_prose_like(multi_paragraph) is True
+
+
+@pytest.mark.asyncio
+async def test_generate_dream_returns_empty_when_llm_dumps_word_list(tmp_path):
+    async def dump_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯"
+        # 模拟首发事故：生成步把打乱的意象词原样续写回来
+        return "\n".join(["台灯", "钥匙", "楼梯", "手表", "雨声", "盐味的雪"])
+
+    class DumpDehydrator:
+        api_available = True
+        raw_chat = staticmethod(dump_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=DumpDehydrator())
+    result = await engine.generate_dream(["台灯", "钥匙", "楼梯"], "daily")
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_writes_nothing_when_generation_is_word_list_shaped(tmp_path):
+    async def dump_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        return "台灯\n钥匙\n楼梯\n手表\n雨声\n盐味的雪\n少一级的楼梯"
+
+    class DumpDehydrator:
+        api_available = True
+        raw_chat = staticmethod(dump_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=DumpDehydrator())
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is False
+    dreams_dir = engine._dreams_dir()
+    written = [f for f in os.listdir(dreams_dir) if f.endswith(".md")]
+    assert written == [], "生成结果是词表时不允许落盘，哪怕退化路径也不行"
