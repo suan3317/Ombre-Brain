@@ -30,7 +30,8 @@ from datetime import datetime, timedelta
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from utils import parse_bool, parse_iso_datetime
-from ._verbatim import render_stored_bucket
+from utils import count_tokens_approx
+from ._verbatim import render_stored_bucket, catalog_line
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -76,19 +77,20 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         and not b["metadata"].get("anchor", False)  # 防御：anchor 是坐标系，永不主动浮现，即使 pinned
     ]
     pinned_ids = {b["id"] for b in pinned_buckets}
+    # stage2 fix: 核心准则段本职是提醒"这些原则存在"，不是把 wake 已经全文
+    # 投喂过的正文再喂一遍。这里只出目录行，需要全文用 breath_search(query=...)
+    # 或 breath_advanced(importance_min=...) 拉取。
     pinned_results = []
     token_budget = max_tokens
     budget_blocked = False
     for b in pinned_buckets:
         try:
-            rendered, entry_tokens = render_stored_bucket(
-                b,
-                f"📌 [核心准则] [bucket_id:{b['id']}]",
-            )
+            line = catalog_line(b, prefix="📌 ")
+            entry_tokens = count_tokens_approx(line)
             if entry_tokens > token_budget:
                 budget_blocked = True
                 break
-            pinned_results.append(rendered)
+            pinned_results.append(line)
             token_budget -= entry_tokens
         except Exception as e:
             rt.logger.warning(f"Failed to render pinned bucket / 钉选桶渲染失败: {e}")

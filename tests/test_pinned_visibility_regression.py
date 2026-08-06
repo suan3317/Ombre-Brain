@@ -49,9 +49,20 @@ def install_runtime(bucket_mgr, dehydrator):
 
 
 @pytest.mark.asyncio
-async def test_default_breath_falls_back_to_raw_pinned_content_when_dehydrate_returns_empty(bucket_mgr):
+async def test_default_breath_pinned_segment_is_catalog_only(bucket_mgr):
+    """阶段2：breath 默认浮现的核心准则段本职是"提醒存在"，不是二次投喂正文。
+
+    只出 [bucket_id] 标题 目录行；桶 ID 必须可见（可定位），但任意长度的
+    原文不再整段塞进默认输出——要看全文用 breath_search(query=...) 或
+    breath_advanced(importance_min=...)。"""
+    long_body = (
+        "Pinned bucket body must remain readable but this sentence is now "
+        "deliberately much longer than the 50-character catalog-line cutoff "
+        "so a coincidental short-content pass can't hide a regression back "
+        "to full-text dumping."
+    )
     bucket_id = await bucket_mgr.create(
-        content="Pinned bucket body must remain readable.",
+        content=long_body,
         pinned=True,
         domain=["rules"],
     )
@@ -60,7 +71,9 @@ async def test_default_breath_falls_back_to_raw_pinned_content_when_dehydrate_re
     result = await surface_default(max_results=10, max_tokens=10000, tag_filter=[])
 
     assert bucket_id in result
-    assert "Pinned bucket body must remain readable" in result
+    assert "=== 核心准则 ===" in result
+    # 目录行，不是全文：完整长句不应该整句出现在默认输出里。
+    assert long_body not in result
 
 
 @pytest.mark.asyncio

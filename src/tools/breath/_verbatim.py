@@ -38,6 +38,31 @@ def _miss_block(bucket: dict) -> str:
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
+def catalog_line(bucket: dict, prefix: str = "") -> str:
+    """目录行格式（阶段2/3 共用）：[bucket_id] 标题 · meaning首行（截50字）。
+
+    只用桶里已有的 meaning 字段与标题；meaning 为空则截取正文首行。不做任何
+    LLM 生成式摘要——这是红线2的硬要求，不是风格选择。
+    """
+    meta = bucket.get("metadata", {}) or {}
+    title = meta.get("name") or bucket.get("id", "")
+    meaning_list = meta.get("meaning") or []
+    tail = (meaning_list[-1] if meaning_list else "") or ""
+    tail = tail.strip()
+    if not tail:
+        content = bucket.get("content", "") or ""
+        for line in content.splitlines():
+            line = line.strip()
+            if line:
+                tail = line
+                break
+    tail = tail[:50]
+    rendered = f"{prefix}[{bucket.get('id', '')}] {title}"
+    if tail:
+        rendered += f" · {tail}"
+    return rendered
+
+
 def render_stored_bucket(bucket: dict, metadata_header: str) -> tuple[str, int]:
     """Render metadata around, but never inside, the stored bucket body."""
     # Temporary compatibility patch: force breath to return stored bucket

@@ -1087,9 +1087,12 @@ async def xhs_read(
 _WAKE_BOARD_TAIL = 2000    # 留言板取末尾字符数
 _WAKE_DREAM_CAP = 2600     # 连续性摘要截断字符数
 
+from tools import _wake_dedup as _wk_dedup
+
 
 async def _wake_impl(window_hours: int) -> str:
     parts: list[str] = []
+    core_ids: set = set()
 
     # 1) 自我 —— 我是谁
     try:
@@ -1101,6 +1104,7 @@ async def _wake_impl(window_hours: int) -> str:
     # 2) 核心记忆 —— 压舱石,只取高重要度
     try:
         core = await _t_breath.dispatch(importance_min=8, max_results=8, max_tokens=3000)
+        core_ids = set(_wk_dedup.ID_TAG_RE.findall(core or ""))
         parts.append("## 二、核心记忆(importance>=8,至多 8 条)\n" + (core or "(暂无高重要度记忆)"))
     except Exception as e:
         parts.append(f"## 二、核心记忆\n(读取失败: {e})")
@@ -1122,6 +1126,7 @@ async def _wake_impl(window_hours: int) -> str:
     # 4) 最近连续性 —— 刚才在发生什么
     try:
         recent = await _t_dream.dispatch(window_hours=window_hours)
+        recent = _wk_dedup.collapse_dupe_buckets(recent, core_ids)
         if recent and len(recent) > _WAKE_DREAM_CAP:
             recent = recent[:_WAKE_DREAM_CAP] + f"\n(已截断,完整内容用 dream(window_hours={window_hours}) 查看)"
         parts.append(f"## 四、最近 {window_hours} 小时的连续性\n" + (recent or "(窗口内没有变动)"))

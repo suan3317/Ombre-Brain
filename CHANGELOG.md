@@ -2,6 +2,14 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.20
+
+- fix: 单次调用内去重（任务书阶段2）。同一个桶此前可能在一次 wake() 里全文出现两次（"核心记忆"段 importance_min=8 与"最近连续性"段 dream dispatch 各自独立取数，互不知道对方取了什么），breath() 自己的"核心准则"段又与 wake 的核心记忆段完全重叠。
+  - wake 内部去重：新增 `tools/_wake_dedup.py`（纯字符串处理，不依赖 bucket_mgr，便于独立单测），维护本次调用内已全文出现过的 bucket_id 集合；"最近连续性"段（含其内嵌的核心准则参考子段）里第二次出现的桶只输出 `[bucket_id] 标题 · meaning首行` 目录行，不再重复全文。只在 wake 的组装层生效，不改 tools/breath、tools/dream 自身的独立输出格式——单独调用 breath()/dream() 时行为不变。
+  - breath 与 wake 的重叠：`surface_default` 的"核心准则"段（pinned/protected/permanent 置顶）改为目录格式（`tools/breath/_verbatim.py` 新增共用的 `catalog_line()`），只提醒"这些原则存在"，不再二次投喂正文——wake 已经在核心记忆段给过全文，breath 单独调用时也不该重复大段输出；需要全文用 breath_search(query=...) 或 breath_advanced(importance_min=...)。
+  - 本地起服务实测验证：hold 一条 importance=9 的记忆后调 wake()，核心记忆段全文一次、最近连续性段自动折叠为目录行；trace(pinned=1) 后单独调 breath()，核心准则段只有一行目录，不再带正文。
+  - 修正 `tests/test_pinned_visibility_regression.py` 里一条因巧合（测试正文短于50字截断阈值）而没被我的改动打破、但断言内容已经过期的用例，改为验证新契约（目录行可定位到桶但不再整段带出原文）。新增 `tests/test_wake_dedup.py`（8 个用例覆盖折叠/保留/无关段落不受影响）。全量测试 1164 passed, 45 skipped。
+
 ## 2.6.19
 
 - fix: 浮现记忆（breath 无 query 模式）排序修复。F 窗口实测权重 2.42、3.30 的条目排在权重 10.16 之前——根因是 `surface_default` 选出候选集后做了"冷启动插队 + top1 之后 2~20 随机洗牌"（为制造自发感的既有设计），但没有在渲染/分配 token_budget 前重新按权重降序排列，导致低权重条目先吃掉预算、真正的高权重条目被挤到尾部截断。修法：候选集确定后、渲染前按 `decay_engine.calculate_score` 重新降序排序，选取阶段的插队/洗牌逻辑不变，只保证渲染与截断顺序严格权重降序。新增回归测试 `tests/test_surface_weight_order_regression.py`（多随机种子断言输出严格降序，且能在 revert 后复现原 bug）。顺手修正 token 预算不足提示文案："下一条浮现记忆未被截断或摘要"（病句）→"下一条浮现记忆已被截断，提高 max_tokens 可查看"。
