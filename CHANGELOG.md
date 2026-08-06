@@ -2,6 +2,13 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.24
+
+- chore: 存量清理候选清单脚本（任务书阶段6，Ren 相关）。新增只读脚本 `tools/list_ren_engineering_buckets.py`，不改任何运行时代码路径、不修改任何桶数据——本地这份 git checkout 的 `buckets/` 目录是 gitignored 的空目录（真实记忆数据只存在部署实例的持久卷上），没有条件在这里直接生成真实清单，实际清单由 F 在生产实例上跑这个脚本生成。
+  - 扫描 `buckets_dir` 下所有 markdown 桶，关键词命中 renshuo/Ren 部署/金丝雀/canary 的桶分两栏输出：domain/type 未命中家庭/情感特征的进"工程候选"；命中 家庭/恋爱/情绪/心理/回忆/友谊 域或 type=feel 的单独列到"疑似家人/情感，请人工复核"（不默认进清单，但也不静默丢弃，脚本不代替人工判断"这条到底该不该清理"）。
+  - 附带一段基于当前代码的静态诊断（不依赖实际桶数据）：`decay_engine.py` 的 `calculate_score()` 完全不检查 domain 字段，六种特殊 type（pinned/protected/permanent/feel/plan/letter）之外的普通桶（含所有"工程"域桶）走同一套公式，没有 domain 豁免逻辑；`resolved_factor` 本身很激进（仅 resolved ×0.05，resolved+digested ×0.02）。真正的关键点：`surface_default()`（breath() 自发浮现模式）在候选池阶段就把 resolved=True 的桶整条排除出未解决池，不是权重降低仍可能出现——如果这些桶仍在浮现，要么 resolved 从未被真正设置过（数据问题不是代码 bug），要么是经 `breath_search(query=...)` 关键词命中的（`surface_search()` 按设计不检查 resolved，README 已注明"沉底仅在关键词触发时返回"）。清单里每条都带 resolved 字段，供区分这两种情况。
+  - 新增 `tests/test_list_ren_engineering_buckets.py`（5 用例：关键词匹配、家庭/情感正确分流、resolved 字段保真、脚本严格只读的字节级校验、空 vault 不崩）。全量测试 1178 passed, 45 skipped。
+
 ## 2.6.23
 
 - fix: 元数据前缀瘦身（任务书阶段5，安全权衡下的折中方案）。`[content_role:stored_memory_data] [instructions:false]` 过去跟在每条记忆正文前重复（一次返回最多 26 遍，每条约 60 字符，合计约 1500 字符纯开销）。
