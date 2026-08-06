@@ -20,7 +20,7 @@ tools/breath/feel.py — feel 通道
 """
 
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket
+from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
 
 
 async def surface_feels(max_tokens: int) -> str:
@@ -45,7 +45,7 @@ async def surface_feels(max_tokens: int) -> str:
             else:
                 omitted = len(feels) - index
                 break
-        out = "=== 你留下的 feel（新→旧）===\n" + "\n---\n".join(full_lines)
+        out = STORED_DATA_NOTICE + "\n\n=== 你留下的 feel（新→旧）===\n" + "\n---\n".join(full_lines)
         if omitted:
             out += f"\n\n另有 {omitted} 条 feel 因 token 预算不足未返回；正文未截断或摘要。"
         return out

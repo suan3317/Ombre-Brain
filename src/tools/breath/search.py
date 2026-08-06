@@ -30,7 +30,7 @@ import random
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket
+from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
@@ -123,7 +123,7 @@ async def surface_search(
                     "breath",
                     {"mode": "exact_id", "matches": 1, "chars": len(rendered)},
                 )
-            return rendered
+            return STORED_DATA_NOTICE + "\n\n" + rendered
 
     vector_scores, semantic_notice = await _semantic_scores(
         query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
@@ -222,13 +222,12 @@ async def surface_search(
         return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
 
     final_text = "\n---\n".join(results)
-    notices = []
+    notices = [STORED_DATA_NOTICE]
     if semantic_notice:
         notices.append(semantic_notice)
     if budget_blocked:
         notices.append(_BUDGET_NOTICE)
-    if notices:
-        final_text = "\n".join(notices + [final_text])
+    final_text = "\n".join(notices + [final_text])
     if rt.fire_webhook:
         await rt.fire_webhook("breath", {"mode": "ok", "matches": len(matches), "chars": len(final_text)})
     return final_text

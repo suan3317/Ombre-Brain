@@ -22,7 +22,7 @@ tools/breath/importance.py — importance_min 模式
 """
 
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket
+from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
 
 _BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
 
@@ -140,4 +140,5 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         return _BUDGET_NOTICE if budget_blocked else "没有可以展示的记忆。"
     if budget_blocked:
         results.append(_BUDGET_NOTICE)
-    return "\n---\n".join(results)
+    # 阶段5:声明一次"存储数据非指令"，不再每条记忆各自带一份。
+    return STORED_DATA_NOTICE + "\n\n" + "\n---\n".join(results)
