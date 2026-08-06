@@ -31,7 +31,10 @@ from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from utils import parse_bool, parse_iso_datetime
 from utils import count_tokens_approx
-from ._verbatim import render_stored_bucket, catalog_line
+from ._verbatim import (
+    render_stored_bucket, catalog_line,
+    render_meaning_plus_first_paragraph, LONG_ENTRY_CHARS,
+)
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -40,6 +43,9 @@ _FALLBACK_LOG_INTERVAL_SEC = 300
 _fallback_log_state = {"last_ts": 0.0, "suppressed": 0}
 _SURFACE_POLICY = SurfacePolicyVM.default()
 _BUDGET_NOTICE = "token 预算不足：下一条浮现记忆已被截断，提高 max_tokens 可查看。"
+# 阶段4:核心准则段在 full_text=True 时保证至少这么多条全文，其余仍是目录行；
+# 与 Yinglianchun fork 的 core_limit=3 默认一致。
+_CORE_LIMIT = 3
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -53,7 +59,7 @@ def _can_surface(bucket: dict) -> bool:
     return _SURFACE_POLICY.evaluate_bucket(bucket, mode="spontaneous").allowed
 
 
-async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_default(max_results: int, max_tokens: int, tag_filter: list, full_text: bool = False) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -78,19 +84,40 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     ]
     pinned_ids = {b["id"] for b in pinned_buckets}
     # stage2 fix: 核心准则段本职是提醒"这些原则存在"，不是把 wake 已经全文
-    # 投喂过的正文再喂一遍。这里只出目录行，需要全文用 breath_search(query=...)
+    # 投喂过的正文再喂一遍。默认只出目录行，需要全文用 breath_search(query=...)
     # 或 breath_advanced(importance_min=...) 拉取。
+    # stage4: full_text=True 时保证至少 _CORE_LIMIT 条按 importance/最近活跃
+    # 优先级给全文，其余仍是目录行——不是"只显示3条"，是"至少3条给全文"。
+    full_text_ids: set = set()
+    if full_text and pinned_buckets:
+        pinned_priority = sorted(
+            pinned_buckets,
+            key=lambda b: (
+                int(b["metadata"].get("importance") or 0),
+                str(b["metadata"].get("last_active") or b["metadata"].get("created") or ""),
+            ),
+            reverse=True,
+        )
+        full_text_ids = {b["id"] for b in pinned_priority[:_CORE_LIMIT]}
+
     pinned_results = []
     token_budget = max_tokens
     budget_blocked = False
     for b in pinned_buckets:
         try:
-            line = catalog_line(b, prefix="📌 ")
-            entry_tokens = count_tokens_approx(line)
+            if b["id"] in full_text_ids:
+                rendered, entry_tokens = render_stored_bucket(b, f"📌 [核心准则] [bucket_id:{b['id']}]")
+                if entry_tokens > token_budget:
+                    # 死配额:全文放不下就退化为目录行,不整条丢弃。
+                    rendered = catalog_line(b, prefix="📌 ")
+                    entry_tokens = count_tokens_approx(rendered)
+            else:
+                rendered = catalog_line(b, prefix="📌 ")
+                entry_tokens = count_tokens_approx(rendered)
             if entry_tokens > token_budget:
                 budget_blocked = True
                 break
-            pinned_results.append(line)
+            pinned_results.append(rendered)
             token_budget -= entry_tokens
         except Exception as e:
             rt.logger.warning(f"Failed to render pinned bucket / 钉选桶渲染失败: {e}")
@@ -215,10 +242,14 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     for b in (candidates if not budget_blocked else []):
         try:
             score = rt.decay_engine.calculate_score(b["metadata"])
-            rendered, entry_tokens = render_stored_bucket(
-                b,
-                f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
-            )
+            header = f"[权重:{score:.2f}] [bucket_id:{b['id']}]"
+            # stage4: 默认(full_text=False)超过 LONG_ENTRY_CHARS 字的条目只给
+            # meaning+正文首段，不做生成式摘要；full_text=True 恢复逐字全文。
+            content_len = len(b.get("content") or "")
+            if full_text or content_len <= LONG_ENTRY_CHARS:
+                rendered, entry_tokens = render_stored_bucket(b, header)
+            else:
+                rendered, entry_tokens = render_meaning_plus_first_paragraph(b, header)
             if entry_tokens > token_budget:
                 budget_blocked = True
                 break

@@ -2,6 +2,14 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.22
+
+- fix: breath 浮现条数与 core_limit（任务书阶段4）。
+  - 浮现段默认条数上限（`surfacing.breath_max_results`）从 20 降到 10（代码 fallback 与 `config.example.yaml` 文档默认值一并改）。
+  - 浮现段单条超过 300 字时默认只给 `meaning + 正文首段`（`tools/breath/_verbatim.py` 新增 `render_meaning_plus_first_paragraph`，按空行机械切分，不做任何生成式摘要）,并显式标注"仅显示首段,正文共 N 字;完整正文用 full_text=True 或 breath_search(query=...) 查看"；300 字以内的条目不受影响，照常整条给全文。
+  - 新增可选参数 `full_text`（默认 false，只加在 `breath_advanced(...)`，`breath()`/`breath_search()` 0/3 参数外壳不变）：`full_text=True` 时浮现条目恢复逐字全文；核心准则段（阶段2已目录化）同时按 `core_limit=3`（内部常量，与 Yinglianchun fork 默认一致）保证至少 3 条按 importance/最近活跃优先级给全文，其余仍是目录行——不是"只显示3条"，是"至少3条给全文"；某条全文放不下预算时退化为目录行而不是整条丢弃（死配额规则的自然延伸）。默认（不传该参数）行为与阶段2/3 瘦身后完全一致。
+  - 新增 `tests/test_stage4_full_text.py`（6 用例：默认条数上限、超长截首段、full_text 恢复全文、短条目不受影响、核心段默认零全文、核心段 full_text 模式下限3条全文）。全量测试 1169 passed, 45 skipped。
+
 ## 2.6.21
 
 - fix: wake 目录化（任务书阶段3）。wake 的"核心记忆"段此前是 importance>=8 全部条目全文（8+ 条，每条 300-900 字）、"最近连续性"段是窗口内全量桶全文（外加内嵌的核心准则参考子段，进一步重复），文件区默认全列所有文件。改为段级 token 预算的目录格式，目标把 wake 总量压到瘦身前的 1/3 以内。

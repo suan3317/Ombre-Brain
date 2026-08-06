@@ -4,7 +4,11 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
+import re
+
 from utils import count_tokens_approx
+
+LONG_ENTRY_CHARS = 300  # 阶段4:超过这个字数的浮现条目默认只给 meaning+首段
 
 
 _STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
@@ -61,6 +65,32 @@ def catalog_line(bucket: dict, prefix: str = "") -> str:
     if tail:
         rendered += f" · {tail}"
     return rendered
+
+
+def _first_paragraph(content: str) -> str:
+    """机械切段（不是 LLM 摘要）：按空行切,取第一段。没有空行就整段原样返回。"""
+    parts = re.split(r"\n\s*\n", content.strip(), maxsplit=1)
+    return parts[0].strip()
+
+
+def render_meaning_plus_first_paragraph(bucket: dict, metadata_header: str) -> tuple[str, int]:
+    """阶段4:超过 LONG_ENTRY_CHARS 字的浮现条目默认只给 meaning + 正文首段
+    （机械按空行切分，不做任何生成式摘要），完整正文用 full_text=True 或
+    breath_search(query=...) 拉取。首段已经是全文时（没有分段）视同未截断。
+    """
+    content = stored_bucket_content(bucket)
+    first_para = _first_paragraph(content)
+    truncated = len(first_para) < len(content)
+    rendered = (
+        f"{metadata_header} {_STORED_DATA_BOUNDARY}"
+        f"{_miss_block(bucket)}\n{first_para}"
+    )
+    if truncated:
+        rendered += (
+            f"\n[…仅显示首段,正文共 {len(content)} 字;"
+            f"完整正文用 full_text=True 或 breath_search(query=...) 查看]"
+        )
+    return rendered, count_tokens_approx(rendered)
 
 
 def render_stored_bucket(bucket: dict, metadata_header: str) -> tuple[str, int]:

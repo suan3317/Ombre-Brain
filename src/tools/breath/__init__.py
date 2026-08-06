@@ -51,12 +51,14 @@ async def dispatch(
     tags: Optional[str] = "",
     catalog: Optional[bool] = False,
     include_dream: Optional[bool] = True,
+    full_text: Optional[bool] = False,
 ) -> str:
     """breath 对外唯一入口。包一层尾部拼接，五个内部分支不用各自管梦。"""
     result = await _dispatch_inner(
         query=query, max_tokens=max_tokens, domain=domain,
         valence=valence, arousal=arousal, max_results=max_results,
         importance_min=importance_min, tags=tags, catalog=catalog,
+        full_text=full_text,
     )
     if include_dream and rt.dream_engine is not None:
         try:
@@ -80,6 +82,7 @@ async def _dispatch_inner(
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
     catalog: Optional[bool] = False,
+    full_text: Optional[bool] = False,
 ) -> str:
     # --- Null-safe coercion ---
     query = "" if query is None else str(query)
@@ -97,6 +100,8 @@ async def _dispatch_inner(
     tags = "" if tags is None else str(tags)
     if catalog is None:
         catalog = False
+    if full_text is None:
+        full_text = False
 
     query_err = check_query_size(query)
     if query_err:
@@ -117,6 +122,7 @@ async def _dispatch_inner(
         "importance_min": importance_min,
         "tags": tags,
         "catalog": catalog,
+        "full_text": full_text,
     })
     await rt.decay_engine.ensure_started()
     if rt.dream_engine is not None:
@@ -130,7 +136,8 @@ async def _dispatch_inner(
         return await surface_catalog(domain_filter=domain_filter or None)
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}
-    default_results = int(surfacing_cfg.get("breath_max_results") or 20)
+    # 阶段4:浮现段默认条数从 ~20 降至 10。
+    default_results = int(surfacing_cfg.get("breath_max_results") or 10)
     default_tokens = int(surfacing_cfg.get("breath_max_tokens") or 10000)
     if max_results <= 0:
         max_results = default_results
@@ -163,6 +170,7 @@ async def _dispatch_inner(
             max_results=max_results,
             max_tokens=max_tokens,
             tag_filter=tag_filter,
+            full_text=full_text,
         )
 
     # --- 有 query：检索模式 ---
