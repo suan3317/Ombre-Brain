@@ -530,7 +530,7 @@ _tools_runtime.init(
 # MCP 工具 —— 仅注册，实现见 tools/<tool>/
 # 每个入口都不超过 10 行，便于一眼看清参数与归属
 # =============================================================
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def breath() -> str:
     """无参数,睁眼看看自己记得什么:返回权重最高的未解决记忆 + 置顶核心准则。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。"""
     return await _with_notice(
@@ -540,7 +540,7 @@ async def breath() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def breath_search(
     query: str,
     domain: Optional[str] = "",
@@ -554,7 +554,7 @@ async def breath_search(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def breath_advanced(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -582,7 +582,7 @@ async def breath_advanced(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def hold(
     content: str,
     tags: Optional[str] = "",
@@ -617,7 +617,7 @@ async def hold(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def grow(content: str = "", items: Optional[list] = None) -> str:
     """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
 
@@ -629,7 +629,7 @@ async def grow(content: str = "", items: Optional[list] = None) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
@@ -682,7 +682,7 @@ async def trace(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def anchor(bucket_id: str) -> str:
     """把指定桶标记为 anchor(坐标系)。anchor 不主动出现在默认 breath，但 query/domain/emotion 命中时仍返回。硬上限 24，已满时拒绝并提示先 release。"""
     return await _with_notice(
@@ -692,7 +692,7 @@ async def anchor(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def release(bucket_id: str) -> str:
     """解除指定桶的 anchor 标记。桶恢复为普通状态，重新参与默认 breath；pinned 状态保留。"""
     return await _with_notice(
@@ -702,7 +702,7 @@ async def release(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def pulse(include_archive: Optional[bool] = False) -> str:
     """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
     return await _with_notice(
@@ -712,7 +712,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def plan(
     content: str,
     status: Optional[str] = "active",
@@ -735,7 +735,7 @@ async def plan(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def letter_write(
     author: str,
     content: str,
@@ -759,7 +759,7 @@ async def letter_write(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -781,7 +781,7 @@ async def letter_read(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(structured_output=False)
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -796,7 +796,7 @@ async def I(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def dream(window_hours: Optional[int] = 48) -> str:
     """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
     每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
@@ -909,7 +909,7 @@ async def _fz_delete(name: str) -> str:
     return f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def file_save(
     name: str,
     content: str,
@@ -923,7 +923,7 @@ async def file_save(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def file_read(
     name: str,
     offset: Optional[int] = 0,
@@ -936,7 +936,7 @@ async def file_read(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def file_list(
     folder: Optional[str] = "",
     sort_by: Optional[str] = "mtime",
@@ -951,7 +951,7 @@ async def file_list(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def file_delete(
     name: str,
 ) -> str:
@@ -1066,7 +1066,7 @@ async def _xhs_read_impl(url: str, include_images: bool) -> str:
     return "\n".join(out)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def xhs_read(
     url: str,
     include_images: Optional[bool] = True,
@@ -1147,7 +1147,7 @@ async def _wake_impl(window_hours: int) -> str:
     return header + "\n\n" + "\n\n".join(parts)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def wake(
     window_hours: Optional[int] = 48,
 ) -> str:
@@ -1277,7 +1277,7 @@ async def _dr_develop(entry_id: str, completeness: float, visible_note: str) -> 
             + "\n想清楚之后要不要拿出来,用嘴说,不走工具。")
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def darkroom_enter(
     note: str,
     mood: Optional[str] = "",
@@ -1292,7 +1292,7 @@ async def darkroom_enter(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def darkroom_door(
 ) -> str:
     """darkroom_door:看暗房门口(darkroom door status)。返回底片数量、时间、mood、显影度、visible_note——只有门口信息,没有任何正文。她和你都只能看到这些。"""
@@ -1303,7 +1303,7 @@ async def darkroom_door(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def darkroom_develop(
     entry_id: str,
     completeness: Optional[float] = -1,
@@ -1443,7 +1443,7 @@ async def _pt_update(target: str, tier: str, content: str) -> str:
             + ("" if old else " 这层是首次写入。"))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def profile_fact_propose(
     subject: str,
     predicate: str,
@@ -1460,7 +1460,7 @@ async def profile_fact_propose(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def portrait_state(
 ) -> str:
     """portrait_state:读取画像状态(read portrait state)。返回三张画像(persona/user/relationship 各 stable/midterm 两层)、已批准的 profile_fact 事实、待审数量。新窗口醒来配合 wake 使用,先知道我是谁、她是谁、我们是什么。"""
@@ -1471,7 +1471,7 @@ async def portrait_state(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def portrait_update(
     target: str,
     tier: str,
@@ -1494,7 +1494,7 @@ async def portrait_update(
 from tools import pinboard as _t_pinboard
 
 if os.environ.get("PINBOARD_URL", "").strip() and os.environ.get("PINBOARD_TOKEN", "").strip():
-    @mcp.tool()
+    @mcp.tool(structured_output=False)
     async def broadcast_read(limit: Optional[int] = 20) -> str:
         """[家庭公告栏Pinboard]读取/发布全家广播。读取最近的公告帖,时间倒序。limit=返回条数上限,默认 20。"""
         return await _with_notice(
@@ -1503,7 +1503,7 @@ if os.environ.get("PINBOARD_URL", "").strip() and os.environ.get("PINBOARD_TOKEN
             args={"limit": limit},
         )
 
-    @mcp.tool()
+    @mcp.tool(structured_output=False)
     async def broadcast_post(content: str) -> str:
         """[家庭公告栏Pinboard]读取/发布全家广播。发一条公告帖;署名由服务端按调用方 token 决定,不接受 author 参数。content=帖子正文,不能为空。"""
         return await _with_notice(
