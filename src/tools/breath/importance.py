@@ -91,11 +91,16 @@ def _select_importance_buckets(buckets: list[dict], importance_min: int, limit: 
     return sorted(selected, key=_importance_sort_key, reverse=True)
 
 
-async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
-    try:
-        all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
-    except Exception as e:
-        return f"记忆系统暂时无法访问: {e}"
+def select_core_memory_buckets(
+    all_buckets: list[dict], importance_min: int, limit: int = 20, tag_filter: list | None = None,
+) -> list[dict]:
+    """筛选 + 排序 importance>=importance_min 的桶（数据版，不做文本渲染）。
+
+    breath(importance_min=...) 与 wake 的"核心记忆"目录段共用同一套选取逻辑
+    （含 _select_importance_buckets 的"每档至少留一条最近更新桶"规则），
+    避免两处各写一份筛选条件、日后改动漏同步。
+    """
+    tag_filter = tag_filter or []
     filtered = [
         b for b in all_buckets
         if int(b.get("metadata", {}).get("importance") or 0) >= importance_min
@@ -103,7 +108,15 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         and not b.get("metadata", {}).get("dont_surface", False)
         and _bucket_has_tags(b.get("metadata", {}), tag_filter)
     ]
-    filtered = _select_importance_buckets(filtered, importance_min, limit=20)
+    return _select_importance_buckets(filtered, importance_min, limit=limit)
+
+
+async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
+    try:
+        all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        return f"记忆系统暂时无法访问: {e}"
+    filtered = select_core_memory_buckets(all_buckets, importance_min, limit=20, tag_filter=tag_filter)
     if not filtered:
         return f"没有重要度 >= {importance_min} 的记忆。"
     results = []

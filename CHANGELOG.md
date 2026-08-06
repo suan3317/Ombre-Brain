@@ -2,6 +2,17 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.21
+
+- fix: wake 目录化（任务书阶段3）。wake 的"核心记忆"段此前是 importance>=8 全部条目全文（8+ 条，每条 300-900 字）、"最近连续性"段是窗口内全量桶全文（外加内嵌的核心准则参考子段，进一步重复），文件区默认全列所有文件。改为段级 token 预算的目录格式，目标把 wake 总量压到瘦身前的 1/3 以内。
+  - 核心记忆段（importance>=8，至多 8 条）：改走数据直取（`tools/breath/importance.py` 新增 `select_core_memory_buckets`，从 `surface_by_importance` 抽出的纯选取逻辑，两处共用同一套"每档至少留一条最近更新桶"规则），逐条渲染 `[bucket_id] 标题 · meaning`（阶段2的 `catalog_line`）；段头加"需要全文时用 breath_search(query=...) 拉取"。
+  - 最近连续性段：改走 `tools/dream/candidates.py` 的 `collect_candidates`（同一套窗口筛选/软上限，不再经过 `format_dream_output`），同样目录化；与核心记忆段重叠的桶不重复整条列出，但重叠数量显式留痕（"另有 N 桶已在上方核心记忆段列出，不重复"）——不是静默消失。dream() 里"用第一人称想：这些东西里有什么留下了重量"的引导语属于 dream 的职能，只是没有被带进 wake（因为 wake 不再经过 format_dream_output），dream_engine 本体与 dream() 工具自身的输出格式一个字没动。
+  - 文件区：默认只列最近修改的 10 个文件 + 所有 handoff/交接文件（哪怕不在最近之列）；历史存档目录整体折叠成一行摘要。`server.py` 的 `_fz_list` 拆出纯数据版 `_fz_list_entries`（`file_list` 工具本身格式与行为不变，只是内部复用）。
+  - 死配额规则（K 提出，硬性，本阶段贯彻到所有段）：任何一段预算不够时绝不切半一条——要么整条完整渲染，要么整条不进，被跳过的数量必须显式留痕并指路怎么补看（`tools/_wake_render.py` 新增 `render_catalog_segment`/`render_file_zone_summary`，纯函数、不依赖 bucket_mgr，独立单测覆盖：预算恰好卡在整条边界不切半、空预算全部显式标未展示、文件区 top_n 窗口外非 handoff 文件的数量必须点出，不能只靠头部总数隐含）。
+  - 梦投递段（红线1，K/F 均已确认必须原样保留）：`dream_engine.latest_unread_tail()` 过去是核心记忆段调用 `_t_breath.dispatch()` 时顺路带出的；核心记忆段改走数据直拼后，wake 自己补上同一次 `ensure_started()` + `latest_unread_tail()` 调用，拼接位置/分隔符/格式与 `tools/breath/__init__.py` 完全一致。dream_engine.py 一个字未改。本地起服务实测：手工塞一条 unread 梦境文件，wake() 里核心记忆段尾部原样出现"——— 昨夜的梦 ———"段落；再调一次 wake() 确认梦已标记已读、不重复投递。
+  - 阶段2引入的 `tools/_wake_dedup.py`（基于正则的文本后处理去重）随本阶段移除：它是对着 `_t_breath.dispatch()`/`_t_dream.dispatch()` 的文本格式做事后折叠，本阶段核心记忆/连续性两段已经改成从桶数据直接构造、天然去重（共享 `core_ids` 集合），旧的文本正则不会再匹配到任何东西，是真正的死代码，删除时一并移除对应测试。
+  - 本地起服务实测（9 条 importance=9 + 3 条普通最近记忆 + 18 个文件含 2 个 handoff 与 3 个历史存档）：核心记忆段严格 8 条上限生效、被 limit 挤掉的第 9 条正确落回连续性段；文件区默认 10 个 + 2 个 handoff、3 个历史存档折叠一行、其余 5 个显式标"另有 5 个文件未展示"。新增 `tests/test_wake_render.py`（7 用例）。全量测试 1163 passed, 45 skipped。
+
 ## 2.6.20
 
 - fix: 单次调用内去重（任务书阶段2）。同一个桶此前可能在一次 wake() 里全文出现两次（"核心记忆"段 importance_min=8 与"最近连续性"段 dream dispatch 各自独立取数，互不知道对方取了什么），breath() 自己的"核心准则"段又与 wake 的核心记忆段完全重叠。

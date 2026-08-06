@@ -873,11 +873,9 @@ async def _fz_read(name: str, offset: int) -> str:
     return f"{head}\n{chunk}{tail}"
 
 
-async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", keyword: str = "") -> str:
-    root = _fz_root()
-    base = _fz_safe(folder) if (folder or "").strip() else root
-    if not os.path.isdir(base):
-        return f"OB-FZ03 文件夹不存在: files/{folder}"
+def _fz_list_entries(base: str, root: str, keyword: str = "") -> list:
+    """文件区遍历的数据版（不做文本渲染）。file_list 工具与 wake 的文件区
+    摘要共用这一份遍历逻辑，只是各自决定要不要格式化成整段文本。"""
     kw = (keyword or "").strip().lower()
     entries = []
     for r, dirs, fnames in os.walk(base):
@@ -891,11 +889,25 @@ async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", key
                 continue
             st = os.stat(p)
             entries.append((rel, st.st_size, st.st_mtime))
+    return entries
+
+
+def _fz_format_rows(entries: list) -> list:
+    return [f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})"
+            for rel, size, mt in entries]
+
+
+async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", keyword: str = "") -> str:
+    root = _fz_root()
+    base = _fz_safe(folder) if (folder or "").strip() else root
+    if not os.path.isdir(base):
+        return f"OB-FZ03 文件夹不存在: files/{folder}"
+    kw = (keyword or "").strip().lower()
+    entries = _fz_list_entries(base, root, kw)
     _keys = {"name": lambda e: e[0].lower(), "size": lambda e: e[1]}
     entries.sort(key=_keys.get((sort_by or "mtime").lower(), lambda e: e[2]),
                  reverse=(order or "desc").lower() != "asc")
-    rows = [f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})"
-            for rel, size, mt in entries]
+    rows = _fz_format_rows(entries)
     if not rows:
         return "没有匹配的文件。" if kw else "文件区是空的。用 file_save 存入第一个文件。"
     return f"文件区共 {len(rows)} 个文件:\n" + "\n".join(rows)
@@ -1085,14 +1097,32 @@ async def xhs_read(
 # =============================================================
 
 _WAKE_BOARD_TAIL = 2000    # 留言板取末尾字符数
-_WAKE_DREAM_CAP = 2600     # 连续性摘要截断字符数
 
-from tools import _wake_dedup as _wk_dedup
+# 阶段3:段级 token 预算(而非拼完全文再整体截断)。目标:wake 总量压到瘦身前的
+# 1/3 以内。核心记忆/最近连续性都改成目录格式,每条一行,配额天然远比过去的
+# 全文段宽松;真正预算不够时("死配额"规则,K 提出、硬性)绝不切半一条——要么
+# 整条完整进,要么整条不进,被跳过的数量显式留痕在段尾并指路怎么补看。
+_WAKE_CORE_IMPORTANCE_MIN = 8
+_WAKE_CORE_LIMIT = 8              # 核心记忆目录条数上限,与既有 "至多8条" 口径一致
+_WAKE_CORE_BUDGET_TOKENS = 1200
+_WAKE_CONTINUITY_BUDGET_TOKENS = 2000
+_WAKE_FILE_ZONE_TOP_N = 10
+
+from tools.breath.importance import select_core_memory_buckets as _wk_select_core
+from tools.dream.candidates import collect_candidates as _wk_collect_candidates
+from tools._wake_render import render_catalog_segment as _wk_render_catalog
+from tools._wake_render import render_file_zone_summary as _wk_render_files
 
 
 async def _wake_impl(window_hours: int) -> str:
     parts: list[str] = []
     core_ids: set = set()
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        all_buckets = []
+        logger.warning(f"wake: list_all 失败,各段按空数据降级: {e}")
 
     # 1) 自我 —— 我是谁
     try:
@@ -1101,11 +1131,33 @@ async def _wake_impl(window_hours: int) -> str:
     except Exception as e:
         parts.append(f"## 一、自我\n(读取失败: {e})")
 
-    # 2) 核心记忆 —— 压舱石,只取高重要度
+    # 2) 核心记忆 —— 压舱石,只取高重要度。阶段3:改为目录格式,每条一行
+    # [bucket_id] 标题 · meaning(无 meaning 则正文首行,截50字);需要全文时
+    # 用 breath_search(query=...) 或 breath_advanced(importance_min=8) 拉取。
     try:
-        core = await _t_breath.dispatch(importance_min=8, max_results=8, max_tokens=3000)
-        core_ids = set(_wk_dedup.ID_TAG_RE.findall(core or ""))
-        parts.append("## 二、核心记忆(importance>=8,至多 8 条)\n" + (core or "(暂无高重要度记忆)"))
+        core_buckets = _wk_select_core(all_buckets, _WAKE_CORE_IMPORTANCE_MIN, limit=_WAKE_CORE_LIMIT)
+        core_ids = {b["id"] for b in core_buckets}
+        core_lines = _wk_render_catalog(
+            core_buckets, _WAKE_CORE_BUDGET_TOKENS,
+            overflow_hint="完整列表用 breath_advanced(importance_min=8) 查看。",
+        )
+        core_text = "\n".join(core_lines) if core_lines else "(暂无高重要度记忆)"
+        # 梦投递段(红线1:一个字不改,原格式原样保留,只挪调用位置——过去经
+        # _t_breath.dispatch() 顺路带出,现在核心记忆段改走数据直拼,自己补上
+        # 同一次 latest_unread_tail() 调用,拼接方式与 tools/breath/__init__.py
+        # 完全一致)。
+        if dream_engine is not None:
+            try:
+                await dream_engine.ensure_started()
+                dream_tail = dream_engine.latest_unread_tail()
+                if dream_tail:
+                    core_text = f"{core_text}\n\n{dream_tail}"
+            except Exception as e:
+                logger.warning(f"wake: 梦投递段拼接失败(不影响正文): {e}")
+        parts.append(
+            f"## 二、核心记忆(importance>={_WAKE_CORE_IMPORTANCE_MIN},至多 {_WAKE_CORE_LIMIT} 条,目录)\n"
+            "需要全文时用 breath_search(query=...) 拉取。\n" + core_text
+        )
     except Exception as e:
         parts.append(f"## 二、核心记忆\n(读取失败: {e})")
 
@@ -1123,24 +1175,37 @@ async def _wake_impl(window_hours: int) -> str:
     except Exception as e:
         parts.append(f"## 三、留言板\n(读取失败: {e})")
 
-    # 4) 最近连续性 —— 刚才在发生什么
+    # 4) 最近连续性 —— 刚才在发生什么。阶段3:同样目录化,每桶一行;与核心
+    # 记忆段重叠的桶不重复列(已经在二里有目录行了)。dream() 里那段"用第一
+    # 人称想:这些东西里有什么留下了重量"的引导语属于 dream 的职能,这里
+    # 不再经过 format_dream_output,原文不会被带进来(dream_engine 本体、
+    # dream() 工具自身的输出格式一个字没动,见红线1)。
     try:
-        recent = await _t_dream.dispatch(window_hours=window_hours)
-        recent = _wk_dedup.collapse_dupe_buckets(recent, core_ids)
-        if recent and len(recent) > _WAKE_DREAM_CAP:
-            recent = recent[:_WAKE_DREAM_CAP] + f"\n(已截断,完整内容用 dream(window_hours={window_hours}) 查看)"
-        parts.append(f"## 四、最近 {window_hours} 小时的连续性\n" + (recent or "(窗口内没有变动)"))
+        candidates = _wk_collect_candidates(all_buckets, window_hours)
+        overlap = len({b["id"] for b in candidates} & core_ids)
+        continuity_lines = _wk_render_catalog(
+            candidates, _WAKE_CONTINUITY_BUDGET_TOKENS,
+            overflow_hint=f"完整内容用 dream(window_hours={window_hours}) 查看。",
+            exclude_ids=core_ids,
+        )
+        if overlap:
+            # 死配额规则:被跳过不能是"消失",数量必须显式留痕——这些桶不是没有
+            # 展示,是已经在上面"核心记忆"段整条列过了,这里不重复列。
+            continuity_lines.append(f"（另有 {overlap} 桶已在上方核心记忆段列出，不重复。）")
+        continuity_text = "\n".join(continuity_lines) if continuity_lines else "(窗口内没有变动)"
+        parts.append(
+            f"## 四、最近 {window_hours} 小时的连续性(目录,共 {len(candidates)} 桶)\n"
+            f"需要全文时用 dream(window_hours={window_hours}) 查看。\n" + continuity_text
+        )
     except Exception as e:
         parts.append(f"## 四、最近连续性\n(读取失败: {e})")
 
-    # 5) 文件区目录 —— 手边有什么,按需 file_read
+    # 5) 文件区目录 —— 手边有什么,按需 file_read。阶段3:默认只列最近修改
+    # 的 10 个 + handoff/交接文件;历史存档目录折叠成一行摘要。
     try:
-        flist = await _fz_list("")
-        handoffs = [ln for ln in flist.splitlines() if "handoff" in ln.lower() or "交接" in ln]
-        hint = ""
-        if handoffs:
-            hint = "\n交接文件在这,需要完整背景时 file_read:\n" + "\n".join(handoffs)
-        parts.append("## 五、文件区目录\n" + flist + hint)
+        fz_root_path = _fz_root()
+        entries = _fz_list_entries(fz_root_path, fz_root_path)
+        parts.append("## 五、文件区目录\n" + _wk_render_files(entries, top_n=_WAKE_FILE_ZONE_TOP_N))
     except Exception as e:
         parts.append(f"## 五、文件区目录\n(读取失败: {e})")
 
