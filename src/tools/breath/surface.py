@@ -38,7 +38,7 @@ from ._verbatim import render_stored_bucket
 _FALLBACK_LOG_INTERVAL_SEC = 300
 _fallback_log_state = {"last_ts": 0.0, "suppressed": 0}
 _SURFACE_POLICY = SurfacePolicyVM.default()
-_BUDGET_NOTICE = "token 预算不足：下一条浮现记忆未被截断或摘要，请提高 max_tokens 后重试。"
+_BUDGET_NOTICE = "token 预算不足：下一条浮现记忆已被截断，提高 max_tokens 可查看。"
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -202,6 +202,12 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             non_cold = top1 + pool + non_cold[min(20, len(non_cold)):]
         candidates = cold_start + non_cold
     candidates = candidates[:max_results]
+
+    # F-05/stage1 fix: 选取阶段的冷启动插队 + 随机洗牌只决定"谁入选"，
+    # 渲染前必须按权重重新降序排列，否则低权重条目排在前面先吃掉 token_budget，
+    # 导致真正的高权重条目被挤到尾部截断（F 窗口实测：2.42/3.30 排在 10.16 之前）。
+    # 保证截断只发生在候选集里权重最低的一端。
+    candidates.sort(key=lambda b: rt.decay_engine.calculate_score(b["metadata"]), reverse=True)
 
     dynamic_results = []
     for b in (candidates if not budget_blocked else []):

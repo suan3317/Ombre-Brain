@@ -2,6 +2,10 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.19
+
+- fix: 浮现记忆（breath 无 query 模式）排序修复。F 窗口实测权重 2.42、3.30 的条目排在权重 10.16 之前——根因是 `surface_default` 选出候选集后做了"冷启动插队 + top1 之后 2~20 随机洗牌"（为制造自发感的既有设计），但没有在渲染/分配 token_budget 前重新按权重降序排列，导致低权重条目先吃掉预算、真正的高权重条目被挤到尾部截断。修法：候选集确定后、渲染前按 `decay_engine.calculate_score` 重新降序排序，选取阶段的插队/洗牌逻辑不变，只保证渲染与截断顺序严格权重降序。新增回归测试 `tests/test_surface_weight_order_regression.py`（多随机种子断言输出严格降序，且能在 revert 后复现原 bug）。顺手修正 token 预算不足提示文案："下一条浮现记忆未被截断或摘要"（病句）→"下一条浮现记忆已被截断，提高 max_tokens 可查看"。
+
 ## 2.6.18
 
 - fix: MCP 工具返回双份内容。26 个 `@mcp.tool()`/`@mcp_extra.tool()` 均返回 `-> str`，FastMCP（mcp SDK）默认对原生类型返回值自动生成 outputSchema 并把同一份文本同时塞进 `structuredContent`，导致每次工具调用实际负载翻倍。所有工具返回的都是长文本，结构化字段没有消费方。加 `structured_output=False` 关闭该行为，只发纯文本 `content`。本地起服务用 curl 直连 `/mcp` 对 `darkroom_door` 实测验证：改前 `result.content[0].text` 与 `result.structuredContent.result` 逐字重复，`tools/list` 里 26 个工具全部带 `outputSchema`；改后两者均消失，仅保留 `content`。
