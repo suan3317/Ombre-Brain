@@ -47,6 +47,13 @@ RUN pip install --no-cache-dir --retries 10 --timeout 120 \
 # Copy project files / 复制项目文件
 COPY src/ ./src/
 COPY frontend/ ./frontend/
+# tools/ 的维护脚本（回填/迁移/诊断，均以 `docker exec ombre-brain python3
+# /app/tools/xxx.py` 方式在容器内直接跑）此前一直没进镜像——只 COPY 了
+# src/ 和 frontend/，镜像里压根没有 tools/ 目录，diagnose_permanent_reads.py
+# 等脚本文档里写的 docker exec 用法实际执行不了。这里补上，K 家部署这版
+# 前必须先有这行，否则返修单一号的回填脚本、施工单的迁移脚本在生产容器里
+# 找不到文件。
+COPY tools/ ./tools/
 COPY VERSION ./VERSION
 COPY config.example.yaml ./config.default.yaml
 COPY entrypoint.sh ./entrypoint.sh
