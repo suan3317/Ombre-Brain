@@ -177,6 +177,10 @@ surfacing:
   breath_max_results: 10          # 1-50, hard cap of buckets returned per breath (stage4 slimdown: was 20)
   breath_max_tokens: 10000        # 500-20000, total token cap per breath
   feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  # 返修单一号改动三:浮现权重下限。低于这个 decay_engine 分数的桶不进默认
+  # 浮现候选池(breath_search / breath_advanced 的检索路径不受限,想找还是能找到)。
+  # 4 会误伤一批日常桶档(实测过),2.5 是安全值,按需调高。
+  min_weight: 2.5
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
   # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。

@@ -46,6 +46,8 @@ _BUDGET_NOTICE = "token 预算不足：下一条浮现记忆已被截断，提�
 # 阶段4:核心准则段在 full_text=True 时保证至少这么多条全文，其余仍是目录行；
 # 与 Yinglianchun fork 的 core_limit=3 默认一致。
 _CORE_LIMIT = 3
+# 返修单一号改动三:浮现权重下限默认值。K 实测 4 会误伤 7 月末的日常桶档，2.5 不会。
+_DEFAULT_SURFACING_MIN_WEIGHT = 2.5
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -132,6 +134,12 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     all_buckets_non_anchor = [b for b in all_buckets if not b["metadata"].get("anchor", False)]
 
     # --- 未解决桶 ---
+    # 返修单一号改动三:浮现权重下限,低于 surfacing.min_weight 的桶不进默认
+    # 浮现候选池(下面 passive association 也是从这个池子里挑,一并生效)。
+    # 显式检索(breath_search / breath_advanced 的 query 与 full_text 路径)
+    # 不经过这个池子,不受此限——想找的东西低权重也照样能找到,只是不会
+    # 自己冒出来。K 实测:阈值设 4 会误伤 7 月末的日常桶档,默认给 2.5。
+    min_weight = float(surfacing_cfg.get("min_weight", _DEFAULT_SURFACING_MIN_WEIGHT))
     unresolved = [
         b for b in all_buckets_non_anchor
         if _can_surface(b)
@@ -141,6 +149,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
         and not b["metadata"].get("protected", False)
         and not b["metadata"].get("dont_surface", False)
         and _bucket_has_tags(b["metadata"], tag_filter)
+        and rt.decay_engine.calculate_score(b["metadata"]) >= min_weight
     ]
 
     rt.logger.info(

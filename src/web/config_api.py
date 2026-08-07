@@ -200,6 +200,7 @@ def register(mcp) -> None:
                 "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
                 "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 10000),
                 "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 6000),
+                "min_weight": float(sh.config.get("surfacing", {}).get("min_weight", 2.5)),
             },
             "merge_threshold": sh.config.get("merge_threshold", 75),
             "transport": sh.config.get("transport", "stdio"),
@@ -431,6 +432,14 @@ def register(mcp) -> None:
                         updated.append(f"surfacing.{key}")
                     except (TypeError, ValueError):
                         pass
+            # 返修单一号改动三:浮现权重下限,浮点数,0-10。
+            if "min_weight" in body["surfacing"]:
+                try:
+                    val = float(body["surfacing"]["min_weight"])
+                    sf["min_weight"] = max(0.0, min(10.0, val))
+                    updated.append("surfacing.min_weight")
+                except (TypeError, ValueError):
+                    pass
 
         # --- Persist to config.yaml if requested ---
         if persist_requested:
@@ -494,6 +503,11 @@ def register(mcp) -> None:
                                 sc_sf[key] = int(body["surfacing"][key])
                             except (TypeError, ValueError):
                                 pass
+                    if "min_weight" in body["surfacing"]:
+                        try:
+                            sc_sf["min_weight"] = float(body["surfacing"]["min_weight"])
+                        except (TypeError, ValueError):
+                            pass
                     if "sampling" in body["surfacing"] and isinstance(body["surfacing"]["sampling"], dict):
                         sc_samp = sc_sf.setdefault("sampling", {})
                         if not isinstance(sc_samp, dict):

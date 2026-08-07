@@ -2726,6 +2726,8 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。breath 单次返回总 token 上限</div>
         <div class="config-row"><label>feel 历史 token</label><input type="number" id="cfg-sf-feel-tokens" min="500" max="20000" step="500" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。dream / breath(domain=feel) 中新 feel 的全文预算</div>
+        <div class="config-row"><label>浮现权重下限</label><input type="number" id="cfg-sf-min-weight" min="0" max="10" step="0.1" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-10，默认 2.5。低于此权重的桶不进 breath 默认浮现；breath_search / breath_advanced 的检索不受限</div>
       </div>
     </div>
 
@@ -6686,6 +6688,7 @@ async function loadConfig() {
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
+    document.getElementById('cfg-sf-min-weight').value = (sf.min_weight === undefined || sf.min_weight === null) ? 2.5 : sf.min_weight;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>数据目录: <strong>' + esc(cfg.buckets_dir) + '</strong>'
       + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
@@ -6920,6 +6923,7 @@ async function saveConfig(persist) {
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 10000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 6000,
+      min_weight: parseFloat(document.getElementById('cfg-sf-min-weight').value) || 2.5,
     },
     persist: persist,
   };
