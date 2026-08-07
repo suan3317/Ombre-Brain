@@ -1391,7 +1391,6 @@ def test_burn_expired_dreams_replaces_only_fresh_past_48h(tmp_path):
     kept_old_day = dt.date(2026, 6, 1)
 
     old_ts = (dt.datetime.now(PT) - dt.timedelta(hours=100)).isoformat(timespec="seconds")
-    recent_ts = dt.datetime.now(PT).isoformat(timespec="seconds")
 
     p1 = _write_unread_dream(engine, fresh_old_day)
     post1 = fm.load(p1)
