@@ -190,6 +190,10 @@ surfacing:
     sample_k: 2                   # 抽出几个
     temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
 
+# 返修单一号改动五：anchor 上限从硬编码改为可配置。
+anchor:
+  max_count: 24                   # anchor(坐标系桶)数量上限，默认 24；超限时 set_anchor()/update(anchor=True) 拒绝并给出清晰报错
+
 # --- Limits / 边界限制（iter 1.6 §5）---
 # Single-bucket size cap and pinned bucket quota. Exceeding either is
 # rejected at hold/grow/trace boundaries with a Chinese hint string.

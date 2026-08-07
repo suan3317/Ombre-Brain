@@ -129,6 +129,7 @@ _DEFAULT_AROUSAL = 0.3
 _DEFAULT_IMPORTANCE = 5
 _PINNED_IMPORTANCE = 10           # pinned/protected 桶 importance 锁定值
 _DEFAULT_DOMAIN_NAME = "未分类"     # 未提供 domain 时的占位
+ANCHOR_LIMIT_DEFAULT = 24         # 返修单一号改动五：anchor 上限默认值，config anchor.max_count 可覆盖
 
 # --- 字段截断长度（避免 frontmatter 肨胀）---
 _SOURCE_TOOL_MAX = 32
@@ -227,6 +228,10 @@ class BucketManager:
         self.letter_dir = os.path.join(self.base_dir, "letters")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.max_results = config.get("matching", {}).get("max_results", 5)
+
+        # 返修单一号改动五：anchor 上限从硬编码改为可配置。实例属性覆盖下面
+        # 类属性 ANCHOR_LIMIT 的默认值 24；config 没配就还是 24，行为不变。
+        self.ANCHOR_LIMIT = int(config.get("anchor", {}).get("max_count", ANCHOR_LIMIT_DEFAULT))
 
         # --- Wikilink config / 双链配置 ---
         wikilink_cfg = config.get("wikilink", {})
@@ -1280,7 +1285,7 @@ class BucketManager:
                   # weight 在 plan 上才有意义；这里不在这个循环里校验类型，由上层 server.py 保证传入范围。
                   "why_remembered", "dont_surface", "first_of_kind",
                   "weight", "triggered_by",
-                  # iter 2.0 新增 anchor。bool 字段，不参与评分，硬上限 24。
+                  # iter 2.0 新增 anchor。bool 字段，不参与评分，上限见 self.ANCHOR_LIMIT。
                   # 上限校验在下面 anchor 分支里做（False→True 切换时计数），
                   # set_anchor() 仍是首选入口，update() 只是兜底兼容批量迁移脚本。
                   "anchor",
@@ -1302,7 +1307,7 @@ class BucketManager:
                 elif k == "anchor":
                     # iter 2.0: anchor 是布尔；False 时直接删除字段保持 frontmatter 干净。
                     # 修复：透传路径之前会绕过 ANCHOR_LIMIT，导致批量脚本/前端直接 update(anchor=True)
-                    # 可以让 anchor 总数突破 24 上限。这里补一道校验：
+                    # 可以让 anchor 总数突破 ANCHOR_LIMIT 上限。这里补一道校验：
                     # 仅当从 False→True 切换时才计数；当前已是 anchor 的桶重复设置不计数。
                     if kwargs[k]:
                         already_anchor = parse_bool(
@@ -1870,21 +1875,23 @@ class BucketManager:
         return calc_touch_score(meta)
 
     # ---------------------------------------------------------
-    # iter 2.0: anchor 系统（坐标系桶，硬上限 24）
-    # anchor system — coordinate-system buckets, hard cap of 24
+    # iter 2.0: anchor 系统（坐标系桶，上限默认 24）
+    # anchor system — coordinate-system buckets, default cap 24
+    # 返修单一号改动五：上限从硬编码改为可配置(config.anchor.max_count)，
+    # __init__ 里用实例属性覆盖这个类属性默认值；没配置时行为不变。
     # ---------------------------------------------------------
-    ANCHOR_LIMIT = 24
+    ANCHOR_LIMIT = ANCHOR_LIMIT_DEFAULT
 
     async def count_anchors(self) -> int:
         """Return current count of buckets with anchor=True."""
-        # 用 list_all 数；规模小（最多 24）所以扫描成本可忽略。
+        # 用 list_all 数；规模小（默认最多 24，可配置调高）所以扫描成本可忽略。
         all_b = await self.list_all(include_archive=False)
         return sum(1 for b in all_b if b.get("metadata", {}).get("anchor"))
 
     async def set_anchor(self, bucket_id: str, value: bool) -> dict:
         """
         Toggle the anchor flag on a bucket. Hard-rejects if cap reached.
-        切换桶的 anchor 标记。设为 True 且当前已满 24 时拒绝。
+        切换桶的 anchor 标记。设为 True 且当前已满 self.ANCHOR_LIMIT 时拒绝。
 
         Returns: {"ok": bool, "anchor": bool, "count": int, "limit": int, "error": Optional[str]}
         """

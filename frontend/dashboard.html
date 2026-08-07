@@ -2238,7 +2238,7 @@
       <h3><i data-lucide="anchor" style="width:16px;height:16px;vertical-align:-2px;"></i> Anchor — 坐标系</h3>
       <p style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
         anchor 是「定义我们是谁」的事实。它们<b>不会</b>主动出现在默认 breath 里——只在 query / domain / emotion 命中时浮现。<br>
-        硬上限 <b>24</b>。满了之后，要 anchor 新的就必须先 release 一条旧的。
+        上限 <b id="anchor-limit-text">24</b>（可在「桶行为」配置页调整）。满了之后，要 anchor 新的就必须先 release 一条旧的。
       </p>
       <div style="font-size:13px;margin-bottom:10px;">当前：<span id="anchors-count-text">…</span></div>
       <div id="anchors-list" style="display:flex;flex-direction:column;gap:10px;">
@@ -2728,6 +2728,8 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。dream / breath(domain=feel) 中新 feel 的全文预算</div>
         <div class="config-row"><label>浮现权重下限</label><input type="number" id="cfg-sf-min-weight" min="0" max="10" step="0.1" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-10，默认 2.5。低于此权重的桶不进 breath 默认浮现；breath_search / breath_advanced 的检索不受限</div>
+        <div class="config-row"><label>anchor 上限</label><input type="number" id="cfg-anchor-max-count" min="1" max="200" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-200，默认 24。坐标系桶(anchor)数量上限，满了要 anchor 新的须先 release 一条旧的。保存后需重启服务生效</div>
       </div>
     </div>
 
@@ -4574,7 +4576,7 @@ async function showDetail(id) {
       triggeredFeelsHtml +
       '<div class="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketPin(this.dataset.bucketId)" class="icon-btn">' + (meta.pinned ? '<i data-lucide="pin-off"></i> 取消钉选' : '<i data-lucide="pin"></i> 钉选') + '</button>' +
-        '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketAnchor(this.dataset.bucketId)" class="icon-btn" title="anchor = 坐标系，不主动浮现，硬上限 24">' + (meta.anchor ? '<i data-lucide="anchor"></i> 释放 anchor' : '<i data-lucide="anchor"></i> 设为 anchor') + '</button>' +
+        '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketAnchor(this.dataset.bucketId)" class="icon-btn" title="anchor = 坐标系，不主动浮现，上限 ' + _anchorLimitCache + '">' + (meta.anchor ? '<i data-lucide="anchor"></i> 释放 anchor' : '<i data-lucide="anchor"></i> 设为 anchor') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketResolve(this.dataset.bucketId)" class="icon-btn">' + (meta.resolved ? '<i data-lucide="rotate-ccw"></i> 取消已解决' : '<i data-lucide="check"></i> 标记已解决') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketForget(this.dataset.bucketId)" class="icon-btn">' + (meta.dont_surface ? '<i data-lucide="eye"></i> 重新允许浮现' : '<i data-lucide="eye-off"></i> 主动遗忘') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketArchive(this.dataset.bucketId)" class="icon-btn"><i data-lucide="archive"></i> 归档</button>' +
@@ -6689,6 +6691,8 @@ async function loadConfig() {
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
     document.getElementById('cfg-sf-min-weight').value = (sf.min_weight === undefined || sf.min_weight === null) ? 2.5 : sf.min_weight;
+    var anc = cfg.anchor || {};
+    document.getElementById('cfg-anchor-max-count').value = anc.max_count || 24;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>数据目录: <strong>' + esc(cfg.buckets_dir) + '</strong>'
       + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
@@ -6924,6 +6928,9 @@ async function saveConfig(persist) {
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 10000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 6000,
       min_weight: parseFloat(document.getElementById('cfg-sf-min-weight').value) || 2.5,
+    },
+    anchor: {
+      max_count: parseInt(document.getElementById('cfg-anchor-max-count').value) || 24,
     },
     persist: persist,
   };
@@ -8436,19 +8443,23 @@ let _lettersCache = [];
 // ========================================
 // iter 2.0: Anchor counter + view
 // ========================================
+let _anchorLimitCache = 24;  // 返修单一号改动五：anchor 上限可配置，缓存最近一次 /api/anchors 拿到的真实值给别处(如逐桶按钮 tooltip)复用
 async function refreshAnchorCounter() {
   try {
     const resp = await authFetch('/api/anchors');
     if (!resp || !resp.ok) return;
     const d = await resp.json();
+    if (d.limit) _anchorLimitCache = d.limit;
     const el = document.getElementById('anchor-counter-text');
     if (el) el.textContent = `${d.count}/${d.limit}`;
-    // 满额（24/24）→ 锚图标变沉，像「压舱物已经很重了」
+    const limitEl = document.getElementById('anchor-limit-text');
+    if (limitEl) limitEl.textContent = d.limit;
+    // 满额（N/N）→ 锚图标变沉，像「压舱物已经很重了」
     const wrap = document.getElementById('anchor-counter');
     if (wrap) {
       const full = d.limit && d.count >= d.limit;
       wrap.classList.toggle('full', !!full);
-      wrap.title = full ? 'anchor 已满（' + d.count + '/' + d.limit + '）— 要 anchor 新的，得先 release 一条旧的' : 'anchor = 坐标系桶，硬上限 ' + d.limit;
+      wrap.title = full ? 'anchor 已满（' + d.count + '/' + d.limit + '）— 要 anchor 新的，得先 release 一条旧的' : 'anchor = 坐标系桶，上限 ' + d.limit;
     }
     return d;
   } catch(e) { /* ignore */ }

@@ -642,6 +642,35 @@ class TestBucketManagerAnchor:
         assert result["ok"] is False
         assert count_after == 24
 
+    # --- 返修单一号改动五：anchor 上限从硬编码改为可配置 ---
+
+    @pytest.mark.asyncio
+    async def test_anchor_limit_configurable_via_config(self, bm_config):
+        """config.anchor.max_count 覆盖默认 24；已有 anchor 不受追溯影响
+        （这里从 0 开始建，行为等价于"改配置后新建的桶按新上限走"）。"""
+        from bucket_manager import BucketManager
+        bm_config = dict(bm_config, anchor={"max_count": 2})
+        bm = BucketManager(bm_config, embedding_engine=_FakeEmbeddingEngine())
+        assert bm.ANCHOR_LIMIT == 2
+
+        ids = [await bm.create(content=f"anchor test {i}") for i in range(3)]
+        for bid in ids[:2]:
+            result = await bm.set_anchor(bid, True)
+            assert result["ok"] is True
+        count = await bm.count_anchors()
+        assert count == 2
+
+        rejected = await bm.set_anchor(ids[2], True)
+        assert rejected["ok"] is False
+        assert "2" in rejected["error"], "超限报错文案要清晰报出实际配置的上限，不是写死的 24"
+        assert await bm.count_anchors() == 2
+
+    @pytest.mark.asyncio
+    async def test_anchor_limit_defaults_to_24_when_not_configured(self, bm_config):
+        from bucket_manager import BucketManager
+        bm = BucketManager(dict(bm_config), embedding_engine=_FakeEmbeddingEngine())
+        assert bm.ANCHOR_LIMIT == 24, "不配置 anchor.max_count 时行为必须不变，仍是 24"
+
 
 # ===========================================================
 # 3. DecayEngine — scoring formulas

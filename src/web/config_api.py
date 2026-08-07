@@ -202,6 +202,10 @@ def register(mcp) -> None:
                 "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 6000),
                 "min_weight": float(sh.config.get("surfacing", {}).get("min_weight", 2.5)),
             },
+            # 返修单一号改动五：anchor 上限从硬编码改为可配置。
+            "anchor": {
+                "max_count": int(sh.config.get("anchor", {}).get("max_count") or 24),
+            },
             "merge_threshold": sh.config.get("merge_threshold", 75),
             "transport": sh.config.get("transport", "stdio"),
             "buckets_dir": sh.config.get("buckets_dir", ""),
@@ -438,6 +442,17 @@ def register(mcp) -> None:
                     val = float(body["surfacing"]["min_weight"])
                     sf["min_weight"] = max(0.0, min(10.0, val))
                     updated.append("surfacing.min_weight")
+                except (TypeError, ValueError):
+                    pass
+
+        # --- Anchor cap (返修单一号改动五) ---
+        if "anchor" in body and isinstance(body["anchor"], dict):
+            anc = sh.config.setdefault("anchor", {})
+            if "max_count" in body["anchor"]:
+                try:
+                    val = int(body["anchor"]["max_count"])
+                    anc["max_count"] = max(1, min(200, val))
+                    updated.append("anchor.max_count")
                 except (TypeError, ValueError):
                     pass
 
