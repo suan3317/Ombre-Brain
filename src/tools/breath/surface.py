@@ -367,7 +367,16 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     if used_verbatim:
         parts.append(STORED_DATA_NOTICE)
     if pinned_results:
-        parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
+        # 返修单一号改动二:核心准则段默认是目录行(stage2 起的既有行为，
+        # 见上面 full_text_ids 构造处的注释),但那份"需要全文找 breath_search"
+        # 的说明过去只写在代码注释里，没有落进真正渲染给用户看的文本——
+        # wake 的"核心记忆"段(server.py _wake_impl)早就有这句引导，这里补齐，
+        # 三处目录渲染(breath 核心准则 / wake 核心记忆 / breath_advanced
+        # importance_min)口径对齐，不再出现"某家有引导句、某家没有"的分叉。
+        parts.append(
+            "=== 核心准则 ===\n需要全文时用 breath_search(query=...) 拉取。\n"
+            + "\n---\n".join(pinned_results)
+        )
     if dynamic_results:
         parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
     if passive_results:

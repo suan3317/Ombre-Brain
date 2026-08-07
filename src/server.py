@@ -532,7 +532,7 @@ _tools_runtime.init(
 # =============================================================
 @mcp.tool(structured_output=False)
 async def breath() -> str:
-    """无参数,睁眼看看自己记得什么:返回权重最高的未解决记忆 + 置顶核心准则。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。"""
+    """无参数,睁眼看看自己记得什么:返回权重最高的未解决记忆 + 置顶核心准则。核心准则段为目录行,正文用 breath_search(query=...) 逐字拉取;浮现段超长条目(>300字)默认只给 meaning+首段,要逐字全文用 breath_advanced(full_text=True)。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens/full_text 等高级模式用 breath_advanced(...)。"""
     return await _with_notice(
         _t_breath.dispatch(),
         op="breath",
@@ -567,7 +567,7 @@ async def breath_advanced(
     catalog: Optional[bool] = False,
     full_text: Optional[bool] = False,
 ) -> str:
-    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆;传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写；max_tokens 不足时整桶省略，绝不截断正文。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 10,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。仅在无 query 的浮现模式下生效:full_text=False(默认)时,超过 300 字的浮现条目只给 meaning+正文首段,核心准则段全部是目录行(不给全文);full_text=True 时浮现条目恢复逐字全文,核心准则段保证至少 3 条给全文、其余仍是目录行。"""
+    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆(浮现模式);传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索——检索命中的桶逐字返回当前 content，不调用 LLM 摘要/改写，max_tokens 不足时整桶省略，绝不做桶内截断。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 10,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。full_text 仅在无 query 的浮现模式下生效(检索模式一律逐字,不受此参数影响):full_text=False(默认)时,核心准则段全部是目录行,超过 300 字的浮现条目只给 meaning+正文首段(不做生成式摘要,是机械截段),要逐字正文用 breath_search(query=...) 单独拉取;full_text=True 时浮现条目恢复逐字全文,核心准则段保证至少 3 条给全文、其余仍是目录行。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,

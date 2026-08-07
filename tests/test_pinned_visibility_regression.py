@@ -74,6 +74,9 @@ async def test_default_breath_pinned_segment_is_catalog_only(bucket_mgr):
     assert "=== 核心准则 ===" in result
     # 目录行，不是全文：完整长句不应该整句出现在默认输出里。
     assert long_body not in result
+    # 返修单一号改动二：核心准则段头必须补引导句，跟 wake 的"核心记忆"段
+    # 口径对齐（过去这句只写在代码注释里，没进真正渲染给用户看的文本）。
+    assert "需要全文时用 breath_search(query=...) 拉取。" in result
 
 
 @pytest.mark.asyncio
