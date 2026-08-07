@@ -210,6 +210,11 @@ async def test_token_budget_omits_whole_bucket_instead_of_truncating(monkeypatch
     assert "[bucket_id:second]" not in output
     assert second["content"][:20] not in output
     assert "token 预算不足" in output
+    # 返修单一号改动六:病句清理——不再是费解的"未被截断或摘要"，且带上
+    # 显式省略条数(还有 1 条)，跟 wake 段的"显式留痕"规则口径统一。
+    assert "还有 1 条命中的记忆未返回" in output
+    assert "整条省略，不是截断" in output
+    assert "未被截断或摘要" not in output
     assert manager.touched == ["first"]
     assert dehydrator.calls == 0
 

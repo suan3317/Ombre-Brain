@@ -42,7 +42,13 @@ from ._verbatim import (
 _FALLBACK_LOG_INTERVAL_SEC = 300
 _fallback_log_state = {"last_ts": 0.0, "suppressed": 0}
 _SURFACE_POLICY = SurfacePolicyVM.default()
-_BUDGET_NOTICE = "token 预算不足：下一条浮现记忆已被截断，提高 max_tokens 可查看。"
+# 返修单一号改动六:病句清理——"已被截断"不准确，这条记忆是整条省略
+# (budget_blocked 直接 break，没有截一半出来)，不是截断出一半，照实说清楚；
+# 并按 wake 段(_wake_render.py)已立的"显式留痕"规则带上省略条数。
+def _budget_notice(remaining: int) -> str:
+    if remaining > 0:
+        return f"token 预算不足：还有 {remaining} 条浮现记忆未返回(整条省略，不是截断)，提高 max_tokens 可查看。"
+    return "token 预算不足：部分浮现记忆未返回(整条省略，不是截断)，提高 max_tokens 可查看。"
 # 阶段4:核心准则段在 full_text=True 时保证至少这么多条全文，其余仍是目录行；
 # 与 Yinglianchun fork 的 core_limit=3 默认一致。
 _CORE_LIMIT = 3
@@ -108,7 +114,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     pinned_results = []
     token_budget = max_tokens
     budget_blocked = False
-    for b in pinned_buckets:
+    budget_blocked_count = 0
+    for i, b in enumerate(pinned_buckets):
         try:
             if b["id"] in full_text_ids:
                 rendered, entry_tokens = render_stored_bucket(b, f"📌 [核心准则] [bucket_id:{b['id']}]")
@@ -123,6 +130,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
                 entry_tokens = count_tokens_approx(rendered)
             if entry_tokens > token_budget:
                 budget_blocked = True
+                budget_blocked_count = len(pinned_buckets) - i
                 break
             pinned_results.append(rendered)
             token_budget -= entry_tokens
@@ -253,7 +261,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     candidates.sort(key=lambda b: rt.decay_engine.calculate_score(b["metadata"]), reverse=True)
 
     dynamic_results = []
-    for b in (candidates if not budget_blocked else []):
+    for i, b in enumerate(candidates if not budget_blocked else []):
         try:
             score = rt.decay_engine.calculate_score(b["metadata"])
             header = f"[权重:{score:.2f}] [bucket_id:{b['id']}]"
@@ -266,6 +274,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
                 rendered, entry_tokens = render_meaning_plus_first_paragraph(b, header)
             if entry_tokens > token_budget:
                 budget_blocked = True
+                budget_blocked_count = len(candidates) - i
                 break
             dynamic_results.append(rendered)
             token_budget -= entry_tokens
@@ -276,7 +285,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
 
     if not pinned_results and not dynamic_results:
         if budget_blocked:
-            return _BUDGET_NOTICE
+            return _budget_notice(budget_blocked_count)
         if rt.mark_op:
             rt.mark_op("breath_empty")
         stats = await rt.bucket_mgr.get_stats()
@@ -393,5 +402,5 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     if dream_results:
         parts.append("=== 偶然想起 ===\n" + "\n---\n".join(dream_results))
     if budget_blocked:
-        parts.append(_BUDGET_NOTICE)
+        parts.append(_budget_notice(budget_blocked_count))
     return "\n\n".join(parts)

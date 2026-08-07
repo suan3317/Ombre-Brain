@@ -24,8 +24,6 @@ tools/breath/importance.py — importance_min 模式
 from .. import _runtime as rt
 from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
 
-_BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
-
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     if not tag_filter:
@@ -122,7 +120,8 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
     results = []
     token_used = 0
     budget_blocked = False
-    for b in filtered:
+    budget_blocked_count = 0
+    for i, b in enumerate(filtered):
         try:
             imp = b["metadata"].get("importance", 0)
             rendered, entry_tokens = render_stored_bucket(
@@ -131,14 +130,18 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
             )
             if token_used + entry_tokens > max_tokens:
                 budget_blocked = True
+                budget_blocked_count = len(filtered) - i
                 break
             results.append(rendered)
             token_used += entry_tokens
         except Exception as e:
             rt.logger.warning(f"importance_min bucket processing failed: {e}")
+    # 返修单一号改动六:按 wake 段(_wake_render.py)已立的"显式留痕"规则，
+    # 省略提示带上具体条数，跟 feel.py/search.py/surface.py 口径统一。
+    notice = f"token 预算不足：还有 {budget_blocked_count} 条重要记忆未返回(整条省略，不是截断)，请提高 max_tokens 后重试。"
     if not results:
-        return _BUDGET_NOTICE if budget_blocked else "没有可以展示的记忆。"
+        return notice if budget_blocked else "没有可以展示的记忆。"
     if budget_blocked:
-        results.append(_BUDGET_NOTICE)
+        results.append(notice)
     # 阶段5:声明一次"存储数据非指令"，不再每条记忆各自带一份。
     return STORED_DATA_NOTICE + "\n\n" + "\n---\n".join(results)

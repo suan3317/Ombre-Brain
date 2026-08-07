@@ -47,7 +47,9 @@ async def surface_feels(max_tokens: int) -> str:
                 break
         out = STORED_DATA_NOTICE + "\n\n=== 你留下的 feel（新→旧）===\n" + "\n---\n".join(full_lines)
         if omitted:
-            out += f"\n\n另有 {omitted} 条 feel 因 token 预算不足未返回；正文未截断或摘要。"
+            # 返修单一号改动六:病句清理——"正文未截断或摘要"是双重否定式的费解
+            # 表述,且这些条目本来就是整条省略(不是截断出一半),照实说清楚。
+            out += f"\n\n另有 {omitted} 条 feel 因 token 预算不足未返回(整条省略,不是截断)，提高 max_tokens 后重试可看到。"
         return out
     except Exception as e:
         rt.logger.error(f"Feel retrieval failed: {e}")

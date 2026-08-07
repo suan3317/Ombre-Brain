@@ -37,7 +37,19 @@ _SURFACE_POLICY = SurfacePolicyVM.default()
 _VECTOR_QUERY_TOPK = 50
 
 _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
-_BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
+# 返修单一号改动六:病句清理——"未被截断或摘要"是双重否定式的费解表述，
+# 且这条记忆本来就是整条省略(不是截断出一半)，照实说清楚；同时按 wake
+# 段(_wake_render.py)已立的"显式留痕"规则补上省略条数，不再是模糊的
+# "下一条"，全段自查后跟 feel.py/importance.py/surface.py 口径统一。
+def _budget_notice(remaining: int) -> str:
+    # remaining<=0：命中列表本身已经全部渲染完，是随机"忽然想起来"分支
+    # 另外撞了预算(边界情况，说不清切确条数)，不硬凑数字，给通用措辞。
+    if remaining > 0:
+        return (
+            f"[token 预算不足：还有 {remaining} 条命中的记忆未返回"
+            f"(整条省略，不是截断)，请提高 max_tokens 后重试。]"
+        )
+    return "[token 预算不足：部分内容未返回(整条省略，不是截断)，请提高 max_tokens 后重试。]"
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -114,7 +126,7 @@ async def surface_search(
                 f"[exact_bucket_id:true] [bucket_id:{exact_bucket['id']}]",
             )
             if entry_tokens > max_tokens:
-                return _BUDGET_NOTICE
+                return _budget_notice(0)
             asyncio.create_task(
                 rt.bucket_mgr.touch_many([exact_bucket["id"]], ripple=False)
             )
@@ -153,8 +165,9 @@ async def surface_search(
     results = []
     token_used = 0
     budget_blocked = False
+    budget_blocked_count = 0
     touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
-    for bucket in matches:
+    for i, bucket in enumerate(matches):
         meta = bucket["metadata"]
         bucket_id = bucket["id"]
         is_core = meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent"
@@ -167,6 +180,7 @@ async def surface_search(
         rendered, entry_tokens = render_stored_bucket(bucket, header)
         if token_used + entry_tokens > max_tokens:
             budget_blocked = True
+            budget_blocked_count = len(matches) - i
             break
         results.append(rendered)
         token_used += entry_tokens
@@ -212,7 +226,8 @@ async def surface_search(
 
     if not results:
         if budget_blocked:
-            return f"{semantic_notice}\n{_BUDGET_NOTICE}" if semantic_notice else _BUDGET_NOTICE
+            notice = _budget_notice(budget_blocked_count)
+            return f"{semantic_notice}\n{notice}" if semantic_notice else notice
         if rt.fire_webhook:
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
         empty_text = (
@@ -226,7 +241,7 @@ async def surface_search(
     if semantic_notice:
         notices.append(semantic_notice)
     if budget_blocked:
-        notices.append(_BUDGET_NOTICE)
+        notices.append(_budget_notice(budget_blocked_count))
     final_text = "\n".join(notices + [final_text])
     if rt.fire_webhook:
         await rt.fire_webhook("breath", {"mode": "ok", "matches": len(matches), "chars": len(final_text)})

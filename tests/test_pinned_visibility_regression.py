@@ -92,3 +92,21 @@ async def test_dream_includes_core_bucket_content_as_reference(bucket_mgr):
 
     assert bucket_id in result
     assert "Pinned dream context must remain visible" in result
+
+
+@pytest.mark.asyncio
+async def test_default_surfacing_budget_notice_reports_explicit_remaining_count(bucket_mgr):
+    """返修单一号改动六:省略提示要带具体条数(显式留痕)，不能是费解的
+    "未被截断或摘要"，也不能是模糊的"下一条"——跟 wake 段
+    (_wake_render.py)已立的"还有 N 条未展示"规则口径统一。"""
+    long_body = "浮现记忆正文标记" * 200
+    await bucket_mgr.create(content=long_body, importance=8, domain=["daily"])
+    await bucket_mgr.create(content=long_body, importance=7, domain=["daily"])
+    install_runtime(bucket_mgr, EmptyDehydrator())
+
+    result = await surface_default(max_results=10, max_tokens=5, tag_filter=[])
+
+    assert "还有 2 条浮现记忆未返回" in result
+    assert "整条省略，不是截断" in result
+    assert "未被截断或摘要" not in result
+    assert "已被截断" not in result
