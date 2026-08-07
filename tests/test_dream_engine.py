@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from dream_engine import (  # noqa: E402
     DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
+    dream_book_dir, dream_book_path, dream_book_id, list_dream_book_entries,
+    dream_book_keep, dream_book_delete, burn_expired_dreams,
 )
 
 
@@ -168,12 +170,14 @@ async def test_five_dreams_manual_check(tmp_path, caplog):
         post = fm.load(path)
 
         # --- front-matter 格式检查 ---
-        for key in ("date", "tone", "level", "sources", "noise", "status", "generated_at"):
+        for key in ("id", "date", "tone", "level", "sources", "noise",
+                    "read_status", "keep_status", "created_at"):
             assert key in post.metadata, f"缺 front-matter 字段: {key}"
-        assert post["status"] == "unread"
+        assert post["read_status"] == "unread"
+        assert post["keep_status"] == "fresh"
         assert isinstance(post["sources"], list) and post["sources"]
         assert isinstance(post["noise"], int)
-        dt.datetime.fromisoformat(post["generated_at"])  # 不抛异常即合法 ISO
+        dt.datetime.fromisoformat(post["created_at"])  # 不抛异常即合法 ISO
 
         # --- 无因果连接词 ---
         body = str(post.content)
@@ -288,13 +292,15 @@ def test_trim_by_level_emotion_is_from_residue_pool_and_raw_unrecoverable(tmp_pa
 
 def _write_unread_dream(engine, day, tone="荒诞", level="只剩画面", body="一段昨夜的梦境正文"):
     post = fm.Post(body)
+    post["id"] = f"dream_{day.isoformat()}"
     post["date"] = day.isoformat()
     post["tone"] = tone
     post["level"] = level
     post["sources"] = ["b1", "b2"]
     post["noise"] = 1
-    post["status"] = "unread"
-    post["generated_at"] = dt.datetime.now(PT).isoformat(timespec="seconds")
+    post["read_status"] = "unread"
+    post["keep_status"] = "fresh"
+    post["created_at"] = dt.datetime.now(PT).isoformat(timespec="seconds")
     path = engine._dream_path(day)
     with open(path, "w", encoding="utf-8") as f:
         f.write(fm.dumps(post))
@@ -362,7 +368,7 @@ def test_latest_unread_tail_peek_does_not_mark_read(tmp_path):
 
     first_peek = engine.latest_unread_tail(consume=False)
     assert "——— 昨夜的梦 ———" in first_peek
-    assert fm.load(path)["status"] == "unread", "wake 的预览调用不该消费掉 unread 状态"
+    assert fm.load(path)["read_status"] == "unread", "wake 的预览调用不该消费掉 unread 状态"
 
     second_peek = engine.latest_unread_tail(consume=False)
     assert second_peek == first_peek, "消费前重复预览应看到同一条,不因为看过就消失"
@@ -418,11 +424,12 @@ async def test_breath_search_does_not_mount_dream_tail(tmp_path, clean_rt, bucke
 def test_cleanup_expired_replaces_body_past_48h(tmp_path):
     engine = make_engine(tmp_path, expire_hours=48)
     today = dt.datetime.now(PT).date()
-    path = _write_unread_dream(engine, today - dt.timedelta(days=3))
+    belongs_day = today - dt.timedelta(days=3)
+    path = _write_unread_dream(engine, belongs_day)
 
     post = fm.load(path)
-    old_generated_at = dt.datetime.now(PT) - dt.timedelta(hours=50)
-    post["generated_at"] = old_generated_at.isoformat(timespec="seconds")
+    old_created_at = dt.datetime.now(PT) - dt.timedelta(hours=50)
+    post["created_at"] = old_created_at.isoformat(timespec="seconds")
     with open(path, "w", encoding="utf-8") as f:
         f.write(fm.dumps(post))
 
@@ -430,8 +437,8 @@ def test_cleanup_expired_replaces_body_past_48h(tmp_path):
     assert cleaned == 1
 
     reloaded = fm.load(path)
-    assert reloaded["status"] == "expired"
-    assert str(reloaded.content).strip() == "那晚做过梦，没记住。"
+    assert reloaded["keep_status"] == "burned"
+    assert str(reloaded.content).strip() == f"{belongs_day.isoformat()} 那晚做了梦，没留下来。"
 
 
 def test_cleanup_expired_leaves_fresh_dream_untouched(tmp_path):
@@ -443,7 +450,28 @@ def test_cleanup_expired_leaves_fresh_dream_untouched(tmp_path):
     assert cleaned == 0
 
     reloaded = fm.load(path)
-    assert reloaded["status"] == "unread"
+    assert reloaded["keep_status"] == "fresh"
+
+
+def test_cleanup_expired_leaves_kept_dream_untouched_even_when_old(tmp_path):
+    """施工单·工程二核心承诺：被主动 keep 的不会被烧，不管多老。"""
+    engine = make_engine(tmp_path, expire_hours=48)
+    today = dt.datetime.now(PT).date()
+    belongs_day = today - dt.timedelta(days=10)
+    path = _write_unread_dream(engine, belongs_day)
+
+    post = fm.load(path)
+    post["keep_status"] = "kept"
+    post["created_at"] = (dt.datetime.now(PT) - dt.timedelta(hours=500)).isoformat(timespec="seconds")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post))
+
+    cleaned = engine.cleanup_expired()
+    assert cleaned == 0
+
+    reloaded = fm.load(path)
+    assert reloaded["keep_status"] == "kept"
+    assert str(reloaded.content).strip() == "一段昨夜的梦境正文"
 
 
 # ============================================================
@@ -1271,3 +1299,186 @@ async def test_nightly_dream_end_to_end_with_alias_cleaned_material(tmp_path):
     for user_text in calls:
         assert "哥哥" not in user_text
         assert "K老师" not in user_text
+
+
+# ============================================================
+# 施工单·工程二：梦境书（Dream Book）—— 独立存储
+# 改动一：独立存储，不在 files/ 文件区下
+# 改动二：dream_keep（MCP 工具背后的模块函数）
+# 改动三：烧毁任务（keep_status 生命周期，与 read_status 投递状态无关）
+# 改动四：投递提示（latest_unread_tail 尾部追加一行）
+# 改动五：Dashboard 列表/删除（list_dream_book_entries / dream_book_delete）
+# ============================================================
+
+def test_dream_book_storage_is_not_under_file_zone(tmp_path):
+    """验收:file_list 不再出现 dreams/ —— 梦境书目录必须在 files/ 之外。"""
+    engine = make_engine(tmp_path)
+    d = dream_book_dir(str(tmp_path))
+    files_root = os.path.join(str(tmp_path), "files")
+    assert not d.startswith(files_root)
+    assert engine._dreams_dir() == d
+
+
+def test_dream_book_id_is_unique_prefixed_not_bare_date():
+    """附加验收(数据完整性):梦境书条目必须有独立于日期字符串本身的 id，
+    否则跟 diary/ 同名日期文件撞 stem 兜底 id 的老毛病会原样重现。"""
+    assert dream_book_id("2026-07-31") == "dream_2026-07-31"
+    assert dream_book_id("2026-07-31") != "2026-07-31"
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_writes_unique_id_into_frontmatter(tmp_path):
+    dehy = make_fake_dehydrator()
+    engine = make_engine(tmp_path, dehydrator=dehy, memory_levels=[1.0, 0.0, 0.0, 0.0])
+    result = await engine.nightly_dream()
+    assert result["dreamed"] is True
+    post = fm.load(result["path"])
+    assert post["id"] == dream_book_id(result["date"])
+
+
+def test_dream_book_keep_marks_kept_and_sets_kept_at(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.date(2026, 7, 6)
+    _write_unread_dream(engine, day)
+
+    result = dream_book_keep(str(tmp_path), day.isoformat())
+
+    assert result["ok"] is True
+    assert result["already_kept"] is False
+    post = fm.load(dream_book_path(str(tmp_path), day))
+    assert post["keep_status"] == "kept"
+    assert post.get("kept_at")
+
+
+def test_dream_book_keep_is_idempotent_on_already_kept(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.date(2026, 7, 6)
+    _write_unread_dream(engine, day)
+    dream_book_keep(str(tmp_path), day.isoformat())
+
+    result = dream_book_keep(str(tmp_path), day.isoformat())
+
+    assert result["ok"] is True
+    assert result["already_kept"] is True
+
+
+def test_dream_book_keep_rejects_already_burned(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.date(2026, 7, 6)
+    path = _write_unread_dream(engine, day)
+    post = fm.load(path)
+    post["keep_status"] = "burned"
+    post.content = f"{day.isoformat()} 那晚做了梦，没留下来。"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post))
+
+    result = dream_book_keep(str(tmp_path), day.isoformat())
+
+    assert result["ok"] is False
+    assert "烧" in result["error"]
+
+
+def test_dream_book_keep_missing_date_reports_error(tmp_path):
+    engine = make_engine(tmp_path)  # noqa: F841 - 只为触发 buckets_dir 创建
+    result = dream_book_keep(str(tmp_path), "2026-01-01")
+    assert result["ok"] is False
+
+
+def test_burn_expired_dreams_replaces_only_fresh_past_48h(tmp_path):
+    engine = make_engine(tmp_path)
+    fresh_old_day = dt.date(2026, 7, 1)
+    fresh_recent_day = dt.date(2026, 7, 6)
+    kept_old_day = dt.date(2026, 6, 1)
+
+    old_ts = (dt.datetime.now(PT) - dt.timedelta(hours=100)).isoformat(timespec="seconds")
+    recent_ts = dt.datetime.now(PT).isoformat(timespec="seconds")
+
+    p1 = _write_unread_dream(engine, fresh_old_day)
+    post1 = fm.load(p1)
+    post1["created_at"] = old_ts
+    with open(p1, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post1))
+
+    _write_unread_dream(engine, fresh_recent_day)  # created_at 是"现在"，未过期
+
+    p3 = _write_unread_dream(engine, kept_old_day)
+    post3 = fm.load(p3)
+    post3["created_at"] = old_ts
+    post3["keep_status"] = "kept"
+    with open(p3, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post3))
+
+    burned = burn_expired_dreams(str(tmp_path), expire_hours=48, tz=PT)
+
+    assert burned == 1
+    reloaded1 = fm.load(p1)
+    assert reloaded1["keep_status"] == "burned"
+    assert str(reloaded1.content).strip() == f"{fresh_old_day.isoformat()} 那晚做了梦，没留下来。"
+    reloaded3 = fm.load(p3)
+    assert reloaded3["keep_status"] == "kept"
+    assert str(reloaded3.content).strip() == "一段昨夜的梦境正文"
+
+
+def test_latest_unread_tail_hint_line_present_when_fresh(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+    _write_unread_dream(engine, day)
+
+    tail = engine.latest_unread_tail(consume=False)
+
+    assert f'dream_keep(date="{day.isoformat()}")' in tail
+    assert "48 小时内没留的会烧掉" in tail
+
+
+def test_latest_unread_tail_hint_line_absent_when_already_kept(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+    path = _write_unread_dream(engine, day)
+    post = fm.load(path)
+    post["keep_status"] = "kept"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post))
+
+    tail = engine.latest_unread_tail(consume=False)
+
+    assert "dream_keep(" not in tail
+    assert "一段昨夜的梦境正文" in tail
+
+
+def test_list_dream_book_entries_sorted_desc_by_date(tmp_path):
+    engine = make_engine(tmp_path)
+    _write_unread_dream(engine, dt.date(2026, 7, 1))
+    _write_unread_dream(engine, dt.date(2026, 7, 31))
+    _write_unread_dream(engine, dt.date(2026, 8, 3))
+
+    entries = list_dream_book_entries(str(tmp_path))
+
+    assert [e["date"] for e in entries] == ["2026-08-03", "2026-07-31", "2026-07-01"]
+    assert all(e["keep_status"] == "fresh" for e in entries)
+
+
+def test_dream_book_delete_removes_fresh_and_kept(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.date(2026, 7, 6)
+    path = _write_unread_dream(engine, day)
+
+    result = dream_book_delete(str(tmp_path), day.isoformat())
+
+    assert result["ok"] is True
+    assert not os.path.isfile(path)
+
+
+def test_dream_book_delete_rejects_burned(tmp_path):
+    engine = make_engine(tmp_path)
+    day = dt.date(2026, 7, 6)
+    path = _write_unread_dream(engine, day)
+    post = fm.load(path)
+    post["keep_status"] = "burned"
+    post.content = f"{day.isoformat()} 那晚做了梦，没留下来。"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(fm.dumps(post))
+
+    result = dream_book_delete(str(tmp_path), day.isoformat())
+
+    assert result["ok"] is False
+    assert os.path.isfile(path), "burned 骨架不可删，必须原样保留"

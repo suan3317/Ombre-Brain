@@ -1898,6 +1898,7 @@
   <div class="tab" data-tab="plan"><span>计划</span><span class="tab-en">Plans</span></div>
   <div class="tab" data-tab="letters"><span>信</span><span class="tab-en">Letters</span></div>
   <div class="tab" data-tab="anchors"><span>锚点</span><span class="tab-en">Anchors</span></div>
+  <div class="tab" data-tab="dream-book"><span>梦境书</span><span class="tab-en">Dream Book</span></div>
   <div class="tab" data-tab="import"><span>导入</span><span class="tab-en">Import</span></div>
   <div class="tab" data-tab="logs"><span>日志</span><span class="tab-en">Logs</span></div>
   <div class="tab" data-tab="settings"><span>设置</span><span class="tab-en">Settings</span></div>
@@ -2245,6 +2246,23 @@
         <div style="color:var(--text-dim);font-size:12px;">加载中… / Loading…</div>
       </div>
       <button class="btn-secondary" onclick="loadAnchorsView()" title="刷新" style="margin-top:14px;padding:6px 12px;font-size:12px;"><i data-lucide="refresh-cw"></i></button>
+    </div>
+  </div>
+</div>
+
+<!-- 施工单·工程二：梦境书（Dream Book）—— log 式，按日期倒序 -->
+<div class="content" id="dream-book-view" style="display:none">
+  <div style="max-width:920px;margin:0 auto;">
+    <div class="config-section">
+      <h3><i data-lucide="moon" style="width:16px;height:16px;vertical-align:-2px;"></i> 梦境书 — Dream Book</h3>
+      <p style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        梦独立存储，不在文件区里。新梦默认 <b>48 小时</b>后烧掉（正文换成占位句，日期骨架永久保留）——
+        只有 keep 过的才永久留下。keep 用 <code>dream_keep(date="YYYY-MM-DD")</code>，或直接点下面的按钮。
+      </p>
+      <div id="dream-book-list" style="display:flex;flex-direction:column;gap:10px;">
+        <div style="color:var(--text-dim);font-size:12px;">加载中… / Loading…</div>
+      </div>
+      <button class="btn-secondary" onclick="loadDreamBookView()" title="刷新" style="margin-top:14px;padding:6px 12px;font-size:12px;"><i data-lucide="refresh-cw"></i></button>
     </div>
   </div>
 </div>
@@ -4275,6 +4293,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('settings-view').style.display = target === 'settings' ? '' : 'none';
     document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
     document.getElementById('anchors-view').style.display = target === 'anchors' ? '' : 'none';
+    document.getElementById('dream-book-view').style.display = target === 'dream-book' ? '' : 'none';
     document.getElementById('about-view').style.display = target === 'about' ? '' : 'none';
     if (target !== 'network' && _netRAF) { cancelAnimationFrame(_netRAF); _netRAF = null; }
     if (target === 'network') loadNetwork();
@@ -4301,6 +4320,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     }
     if (target === 'letters') loadLetters();
     if (target === 'anchors') loadAnchorsView();
+    if (target === 'dream-book') loadDreamBookView();
     if (target === 'about') loadAbout();
   });
 });
@@ -8538,6 +8558,91 @@ async function toggleAnchor(bucketId, value) {
 async function releaseAnchor(bucketId) {
   await toggleAnchor(bucketId, false);
   loadAnchorsView();
+}
+
+// ========================================
+// 施工单·工程二：梦境书（Dream Book）
+// ========================================
+function _dreamBookRemainingLabel(createdAt, expireHours) {
+  if (!createdAt) return '';
+  const createdMs = Date.parse(createdAt);
+  if (isNaN(createdMs)) return '';
+  const deadlineMs = createdMs + expireHours * 3600 * 1000;
+  const remainMs = deadlineMs - Date.now();
+  if (remainMs <= 0) return '即将烧毁';
+  const hours = Math.floor(remainMs / 3600000);
+  const minutes = Math.floor((remainMs % 3600000) / 60000);
+  return `还剩 ${hours} 小时 ${minutes} 分钟`;
+}
+
+async function loadDreamBookView() {
+  const list = document.getElementById('dream-book-list');
+  list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;">加载中… / Loading…</div>';
+  try {
+    const resp = await authFetch('/api/dream-book');
+    if (!resp || !resp.ok) { list.innerHTML = '<div style="color:#c33;">加载失败</div>'; return; }
+    const d = await resp.json();
+    if (!d.entries || d.entries.length === 0) {
+      list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:14px 0;">梦境书还是空的。有梦的夜晚会自动出现在这里。</div>';
+      return;
+    }
+    const expireHours = d.expire_hours || 48;
+    list.innerHTML = d.entries.map(e => {
+      let bodyHtml, badge, actions;
+      if (e.keep_status === 'kept') {
+        badge = '<span style="font-size:10px;color:var(--accent);">⊕ kept</span>';
+        bodyHtml = esc(e.content).replace(/\n/g, '<br>');
+        actions = `<button class="btn-secondary" data-date="${escAttr(e.date)}" style="padding:4px 10px;font-size:11px;" onclick="dreamBookDelete(this.dataset.date)">删除</button>`;
+      } else if (e.keep_status === 'burned') {
+        badge = '<span style="font-size:10px;color:var(--text-dim);">已烧毁</span>';
+        bodyHtml = '<span style="color:var(--text-dim);font-style:italic;">' + esc(e.content) + '</span>';
+        actions = '';
+      } else {
+        const remaining = _dreamBookRemainingLabel(e.created_at, expireHours);
+        badge = '<span style="font-size:10px;color:var(--negative);">fresh · ' + esc(remaining) + '</span>';
+        bodyHtml = esc(e.content).replace(/\n/g, '<br>');
+        actions = `<button class="btn-secondary" data-date="${escAttr(e.date)}" style="padding:4px 10px;font-size:11px;" onclick="dreamBookKeep(this.dataset.date)">keep</button>`
+          + `<button class="btn-secondary" data-date="${escAttr(e.date)}" style="padding:4px 10px;font-size:11px;" onclick="dreamBookDelete(this.dataset.date)">删除</button>`;
+      }
+      return `
+        <div style="background:var(--surface);border-radius:var(--radius-inner);padding:12px 16px;box-shadow:4px 4px 10px var(--shadow-dark-subtle),-3px -3px 8px var(--shadow-light);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div style="font-family:'Cormorant Garamond',serif;font-size:16px;color:var(--accent);">${esc(e.date)} ${e.tone ? '· ' + esc(e.tone) : ''} ${e.level ? '· ' + esc(e.level) : ''}</div>
+            ${badge}
+          </div>
+          <div style="font-size:13px;line-height:1.7;">${bodyHtml}</div>
+          <div style="display:flex;gap:8px;margin-top:10px;">${actions}</div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = `<div style="color:#c33;">加载失败：${esc(e && e.message ? e.message : e)}</div>`;
+  }
+}
+
+async function dreamBookKeep(date) {
+  try {
+    const resp = await authFetch(`/api/dream-book/${encodeURIComponent(date)}/keep`, {method: 'POST'});
+    if (!resp) return;
+    const body = await resp.json();
+    if (!resp.ok) { alert(`保留失败：${body.error || resp.status}`); return; }
+    loadDreamBookView();
+  } catch(e) {
+    alert(`保留失败：${e}`);
+  }
+}
+
+async function dreamBookDelete(date) {
+  if (!confirm(`删除 ${date} 这条梦境书记录？这个操作不可撤销。`)) return;
+  try {
+    const resp = await authFetch(`/api/dream-book/${encodeURIComponent(date)}`, {method: 'DELETE'});
+    if (!resp) return;
+    const body = await resp.json();
+    if (!resp.ok) { alert(`删除失败：${body.error || resp.status}`); return; }
+    loadDreamBookView();
+  } catch(e) {
+    alert(`删除失败：${e}`);
+  }
 }
 
 async function loadLetters() {

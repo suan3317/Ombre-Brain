@@ -34,6 +34,7 @@ from . import onboarding
 from . import v3_debug
 from . import files_api
 from . import portrait_api
+from . import dream_book_api
 
 
 _WEB_MODULES = (
@@ -57,6 +58,7 @@ _WEB_MODULES = (
     ("web.v3_debug", v3_debug.register),
     ("web.files_api", files_api.register),
     ("web.portrait_api", portrait_api.register),
+    ("web.dream_book_api", dream_book_api.register),
 )
 
 

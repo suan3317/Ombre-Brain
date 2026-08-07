@@ -133,7 +133,10 @@ dream:
   noise_tiers: [0.70, 0.25, 0.05] # 掺1-2条 / 噪音过半 / 纯噪音梦
   darkroom_prob: 0.10             # 暗房底片低概率加抽（各家开关自定，可设 0 关闭）
   resolved0_prob: 0.10            # resolved=0 桶低概率加抽
-  expire_hours: 48                # 未读正文过期时限
+  # 施工单·工程二：梦境书生命周期——多久没被 dream_keep(date=...) 保留就烧
+  # （正文换成占位句，日期骨架永久保留）。跟"看没看过"(read_status)无关，
+  # 没 keep 就烧是默认行为，不是"没投递就算了"。
+  expire_hours: 48
   model: null                     # null = 沿用 dehydration.model；也可单独指定
   temperature: 1.3                # 通顺是梦的反义词
   cut_prob: 0.5                   # 外科截断（掐头/断尾各独立 50%）触发概率

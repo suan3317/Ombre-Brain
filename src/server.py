@@ -8,8 +8,10 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 14 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
-  trace/anchor/release/pulse/plan/letter_write/letter_read/dream/I；每个入口
+- 启动后暴露一批 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
+  trace/anchor/release/pulse/plan/letter_write/letter_read/dream/dream_keep/
+  I/wake/file_*/darkroom_*/portrait_*/...(数量随功能增长，见各 @mcp.tool 定义，
+  这行只列核心几个，不再维护精确总数)；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
   breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
   复杂的工具，全塞一个 breath() 会导致它常年加载不上（见 issue #17）。
@@ -809,6 +811,26 @@ async def dream(window_hours: Optional[int] = 48) -> str:
         _t_dream.dispatch(window_hours=window_hours),
         op="dream",
         args={"window_hours": window_hours},
+    )
+
+
+async def _dream_keep_impl(date: str) -> str:
+    from dream_engine import dream_book_keep
+    result = dream_book_keep(config.get("buckets_dir", "buckets"), str(date or "").strip())
+    if not result["ok"]:
+        return f"没留成:{result['error']}"
+    if result.get("already_kept"):
+        return f"{result['date']} 这晚的梦本来就是 kept 状态，还在梦境书里，没有变化。"
+    return f"已保留 {result['date']} 这晚的梦，永久留在梦境书里，不会再被烧掉。"
+
+
+@mcp.tool(structured_output=False)
+async def dream_keep(date: str) -> str:
+    """保留某晚的梦。梦默认 48 小时后烧毁,只有 kept 的留在梦境书。date=YYYY-MM-DD（对应梦投递段/梦境书里显示的那个日期）。已经烧掉的梦无法再保留。"""
+    return await _with_notice(
+        _dream_keep_impl(date),
+        op="dream_keep",
+        args={"date": date},
     )
 
 

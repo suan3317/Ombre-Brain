@@ -11,10 +11,17 @@ breath 睁眼时看到裁剪后的结果，无法触发、无法预约、无法�
 
 关键行为：
 - nightly_dream()：每晚一次的完整管线，30% 概率有梦，其余夜晚零痕迹
-- 拆意象（断粮防圆）：不把桶全文交给生成步，只喂打乱的意象词
+- 拆意象（断粮防圆）：不把桶全文交给生成步，只喂打乱的意象词，送入前先经
+  dreamer_aliases 清洗（施工单·工程一：做梦者本人称呼整词替换成"我"）
 - 生成用便宜、小的模型（flash-lite）+ 高 temperature：通顺是梦的反义词
 - 裁剪按记忆度四档执行，完整原文生成后即焚，不落盘、不进日志
-- 挂载点是 breath 响应尾部，不新增任何生成/触发类 MCP 工具（R3）
+- 挂载点是 breath 响应尾部（consume=True 消费）+ wake 响应尾部
+  （consume=False 只预览不消费，返修单一号改动一），不新增任何生成/
+  触发类 MCP 工具（R3）——dream_keep 是例外：它只标记既有梦为 kept，
+  不生成、不触发新一轮做梦，不违反 R3 的精神
+- 梦境书（施工单·工程二）：独立存储 <buckets_dir>/dream_book/，不在
+  files/ 文件区下；48h 内不 keep 就烧（正文替换占位句，日期骨架永久
+  保留），dream_keep(date=...) 是唯一的保留入口
 
 不做什么（边界）：
 - 不提供任何"点单"式生成接口，唯一入口是后台定时任务
@@ -23,7 +30,10 @@ breath 睁眼时看到裁剪后的结果，无法触发、无法预约、无法�
 
 对外暴露：DreamEngine 类（nightly_dream / cleanup_expired /
          start / stop / ensure_started）、latest_unread_tail() 供 breath（消费）
-         与 wake（consume=False 预览，不消费）调用
+         与 wake（consume=False 预览，不消费）调用；模块级梦境书函数
+         （dream_book_dir / list_dream_book_entries / dream_book_keep /
+         dream_book_delete / burn_expired_dreams）供 Dashboard API 与
+         MCP dream_keep 工具直接调用，不依赖 DreamEngine 实例
 ========================================
 """
 
@@ -396,6 +406,168 @@ def _tzinfo(tz_name: str):
         return None
 
 
+# ================================================================
+# 施工单·工程二：梦境书（Dream Book）—— 独立存储
+# ================================================================
+# 梦不再写进 files/ 文件区（file_list/文件区目录不会看到这里），改用
+# <buckets_dir>/dream_book/ 下按日期一个 .md 文件，frontmatter 字段：
+#   id          —— 显式给唯一 id（"dream_YYYY-MM-DD"），不能靠文件名 stem
+#                  兜底：vault_health.inspect_vault 按 id（缺省 stem）去重
+#                  统计 duplicate_id_count，dreams/ 旧址跟 diary/ 同名日期
+#                  文件撞过 id，迁出后要真正消失这个 id 就必须唯一。
+#   date        —— 梦所属日期（belongs_date，通常是"昨夜"）
+#   tone/level/sources/noise —— 沿用 dream_engine 原有的生成元信息
+#   created_at  —— 生成时刻（原 generated_at 改名，对齐工单用词）
+#   read_status —— "unread"/"read"：breath/wake 的投递消费状态（返修单一号
+#                  改动一），与下面的 keep_status 是两件正交的事——发没发
+#                  给用户看 vs 会不会被烧掉。
+#   keep_status —— "fresh"/"kept"/"burned"：梦境书生命周期。fresh 默认
+#                  48h 后烧（正文替换成占位句，日期骨架永久保留）；
+#                  dream_keep() 主动标记 kept 后永久留下，不再烧。
+#   kept_at     —— dream_keep() 调用时刻；未 keep 过则不出现该字段。
+# 这些函数只依赖 buckets_dir，不依赖 DreamEngine 实例——Dashboard API、
+# MCP dream_keep 工具都能直接调用，不需要一整个引擎对象。
+# ================================================================
+
+_DREAM_BOOK_DIRNAME = "dream_book"
+
+
+def dream_book_dir(buckets_dir: str) -> str:
+    path = os.path.join(buckets_dir, _DREAM_BOOK_DIRNAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def dream_book_path(buckets_dir: str, day) -> str:
+    date_str = day if isinstance(day, str) else day.isoformat()
+    return os.path.join(dream_book_dir(buckets_dir), f"{date_str}.md")
+
+
+def dream_book_id(date_str: str) -> str:
+    return f"dream_{date_str}"
+
+
+def _burned_placeholder(date_str: str) -> str:
+    return f"{date_str} 那晚做了梦，没留下来。"
+
+
+def list_dream_book_entries(buckets_dir: str) -> list[dict]:
+    """给 Dashboard 用：全部条目，按日期倒序。不做分页——梦境书按设计
+    体量有限（burned 的只剩占位句，kept 的才是真正的存档）。"""
+    root = dream_book_dir(buckets_dir)
+    entries = []
+    for fn in sorted(os.listdir(root), reverse=True):
+        if not fn.endswith(".md"):
+            continue
+        path = os.path.join(root, fn)
+        try:
+            post = fm.load(path)
+        except Exception as e:
+            logger.warning(f"dream_book: 读条目失败(跳过) {fn}: {e}")
+            continue
+        entries.append({
+            "date": post.get("date", fn[:-3]),
+            "content": str(post.content or ""),
+            "keep_status": post.get("keep_status", "fresh"),
+            "tone": post.get("tone", ""),
+            "level": post.get("level", ""),
+            "created_at": post.get("created_at", ""),
+            "kept_at": post.get("kept_at", ""),
+        })
+    entries.sort(key=lambda e: e["date"], reverse=True)
+    return entries
+
+
+def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None) -> dict:
+    """把某晚的梦标记 kept，永久保留。已经 burned 的没法再 keep——正文
+    已经被占位句替换掉，keep 也留不回原文，如实拒绝而不是假装成功。"""
+    date_str = (date_str or "").strip()
+    path = dream_book_path(buckets_dir, date_str)
+    if not os.path.isfile(path):
+        return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
+    try:
+        post = fm.load(path)
+    except Exception as e:
+        return {"ok": False, "error": f"读取失败: {e}"}
+    keep_status = post.get("keep_status", "fresh")
+    if keep_status == "burned":
+        return {"ok": False, "error": f"{date_str} 这晚的梦已经烧掉了，没留下来，没法再留。"}
+    if keep_status == "kept":
+        return {"ok": True, "date": date_str, "already_kept": True}
+    now = now or datetime.now()
+    post["keep_status"] = "kept"
+    post["kept_at"] = now.isoformat(timespec="seconds")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(fm.dumps(post))
+    except Exception as e:
+        return {"ok": False, "error": f"写入失败: {e}"}
+    return {"ok": True, "date": date_str, "already_kept": False}
+
+
+def dream_book_delete(buckets_dir: str, date_str: str) -> dict:
+    """Dashboard 手动删除：物理删该条。burned 的骨架永久保留，不给删——
+    骨架本身就是"那晚做过梦"的唯一痕迹，删了这个日期就彻底没了记录。"""
+    date_str = (date_str or "").strip()
+    path = dream_book_path(buckets_dir, date_str)
+    if not os.path.isfile(path):
+        return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
+    try:
+        post = fm.load(path)
+    except Exception as e:
+        return {"ok": False, "error": f"读取失败: {e}"}
+    if post.get("keep_status") == "burned":
+        return {"ok": False, "error": "burned 的骨架不可删——那是唯一留下的痕迹了。"}
+    try:
+        os.remove(path)
+    except OSError as e:
+        return {"ok": False, "error": f"删除失败: {e}"}
+    return {"ok": True, "date": date_str}
+
+
+def burn_expired_dreams(buckets_dir: str, expire_hours: float, tz=None) -> int:
+    """挂进衰减引擎同周期的定时任务：status=fresh 且 created_at 超过
+    expire_hours 的，正文替换成占位句，keep_status 置 burned。日期骨架
+    永久保留。返回本次烧毁的条数。跟"投递没投递"(read_status)无关——
+    没 keep 就烧，是梦境书的默认生命周期，不是"没看到就算了"。"""
+    root = dream_book_dir(buckets_dir)
+    if not os.path.isdir(root):
+        return 0
+    now = datetime.now(tz) if tz else datetime.now()
+    burned = 0
+    for fn in os.listdir(root):
+        if not fn.endswith(".md"):
+            continue
+        path = os.path.join(root, fn)
+        try:
+            post = fm.load(path)
+        except Exception as e:
+            logger.warning(f"dream_book: 读条目失败(跳过烧毁检查) {fn}: {e}")
+            continue
+        if post.get("keep_status", "fresh") != "fresh":
+            continue
+        created_raw = post.get("created_at")
+        try:
+            created_at = datetime.fromisoformat(str(created_raw))
+            if created_at.tzinfo is None and now.tzinfo is not None:
+                created_at = created_at.replace(tzinfo=tz)
+        except (TypeError, ValueError):
+            continue
+        age_hours = (now - created_at).total_seconds() / 3600.0
+        if age_hours < expire_hours:
+            continue
+        date_ = post.get("date", fn[:-3])
+        post["keep_status"] = "burned"
+        post.content = _burned_placeholder(date_)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(fm.dumps(post))
+            burned += 1
+        except Exception as e:
+            logger.warning(f"dream_book: 写回烧毁条目失败 {fn}: {e}")
+    return burned
+
+
 class DreamEngine:
     """
     夜间梦境生成引擎——定时任务：掷骰、抽材料、生成、裁剪、落盘、过期清理。
@@ -445,16 +617,14 @@ class DreamEngine:
         return self._running
 
     # ---------------------------------------------------------
-    # 路径 helpers —— 与 server.py 的 files/ 文件区、darkroom 用同一套
-    # buckets_dir 约定，但不导入 server.py 的私有函数（避免循环 import）
+    # 路径 helpers —— 梦境书（工程二）是独立存储，不在 files/ 文件区下，
+    # 具体路径规则见上面模块级的 dream_book_dir/dream_book_path。
     # ---------------------------------------------------------
     def _dreams_dir(self) -> str:
-        path = os.path.join(self.buckets_dir, "files", "dreams")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return dream_book_dir(self.buckets_dir)
 
     def _dream_path(self, day: _date) -> str:
-        return os.path.join(self._dreams_dir(), f"{day.isoformat()}.md")
+        return dream_book_path(self.buckets_dir, day)
 
     def _darkroom_dir(self) -> str:
         return os.path.join(self.buckets_dir, "darkroom")
@@ -1012,60 +1182,30 @@ class DreamEngine:
         sources: list[str], noise_count: int, belongs_date: _date,
     ) -> str:
         now = datetime.now(self._tz) if self._tz else datetime.now()
+        date_str = belongs_date.isoformat()
         post = fm.Post(final_text)
-        post["date"] = belongs_date.isoformat()
+        # 工程二附加验收：显式 id，不能靠文件名 stem 兜底——旧 dreams/ 跟
+        # diary/ 撞过同日期文件名的 id，迁出后要真正不再撞就得有自己的 id。
+        post["id"] = dream_book_id(date_str)
+        post["date"] = date_str
         post["tone"] = _TONE_LABELS.get(tone, tone)
         post["level"] = _LEVEL_LABELS[_LEVEL_KEYS.index(level)]
         post["sources"] = sources
         post["noise"] = noise_count
-        post["status"] = "unread"
-        post["generated_at"] = now.isoformat(timespec="seconds")
+        post["read_status"] = "unread"       # 投递消费状态（返修单一号）
+        post["keep_status"] = "fresh"        # 梦境书生命周期（工程二）
+        post["created_at"] = now.isoformat(timespec="seconds")
         path = self._dream_path(belongs_date)
         with open(path, "w", encoding="utf-8") as f:
             f.write(fm.dumps(post))
         return path
 
     # ---------------------------------------------------------
-    # §5 过期清理
+    # §5 过期清理 → 工程二扩展为梦境书烧毁任务（keep_status 生命周期，
+    # 与 read_status 投递状态无关：没 keep 就烧，看没看过不影响）
     # ---------------------------------------------------------
     def cleanup_expired(self) -> int:
-        """generated_at 超 expire_hours 且 status=unread → 正文替换为占位句，
-        status=expired，front-matter 保留。返回本次清理的条数。"""
-        root = self._dreams_dir()
-        if not os.path.isdir(root):
-            return 0
-        now = datetime.now(self._tz) if self._tz else datetime.now()
-        cleaned = 0
-        for fn in os.listdir(root):
-            if not fn.endswith(".md"):
-                continue
-            path = os.path.join(root, fn)
-            try:
-                post = fm.load(path)
-            except Exception as e:
-                logger.warning(f"dream: 读梦文件失败(跳过) {fn}: {e}")
-                continue
-            if post.get("status") != "unread":
-                continue
-            gen_raw = post.get("generated_at")
-            try:
-                gen_at = datetime.fromisoformat(str(gen_raw))
-                if gen_at.tzinfo is None and now.tzinfo is not None:
-                    gen_at = gen_at.replace(tzinfo=self._tz)
-            except (TypeError, ValueError):
-                continue
-            age_hours = (now - gen_at).total_seconds() / 3600.0
-            if age_hours < self.expire_hours:
-                continue
-            post["status"] = "expired"
-            post.content = "那晚做过梦，没记住。"
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(fm.dumps(post))
-                cleaned += 1
-            except Exception as e:
-                logger.warning(f"dream: 写回过期梦文件失败 {fn}: {e}")
-        return cleaned
+        return burn_expired_dreams(self.buckets_dir, self.expire_hours, self._tz)
 
     # ---------------------------------------------------------
     # 供 breath/wake 调用：取最新一条未读未过期的梦，返回渲染好的尾部文本。
@@ -1098,23 +1238,29 @@ class DreamEngine:
                 post = fm.load(path)
             except Exception:
                 continue
-            if post.get("status") != "unread":
+            if post.get("read_status") != "unread":
                 continue
             date_ = post.get("date", fn[:-3])
             tone = post.get("tone", "")
             level = post.get("level", "")
             body = str(post.content or "").strip()
             if consume:
-                post["status"] = "read"
+                post["read_status"] = "read"
                 try:
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(fm.dumps(post))
                 except Exception as e:
                     logger.warning(f"dream: 标已读失败 {fn}: {e}")
+            # 工程二改动四：投递提示——只加这一行，其余格式不动。keep_status
+            # 已经 kept/burned 时不再提示（kept 已经永久留了；burned 的
+            # content 已经是占位句，dream_keep() 对它只会报错，提示没意义）。
+            hint = ""
+            if post.get("keep_status", "fresh") == "fresh":
+                hint = f"\n想留这个梦:dream_keep(date=\"{date_}\")。48 小时内没留的会烧掉。"
             return (
                 f"——— 昨夜的梦 ———\n"
                 f"[{date_} 夜 · {tone} · {level}]\n"
-                f"{body}"
+                f"{body}{hint}"
             )
         return ""
 
