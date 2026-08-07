@@ -1149,10 +1149,14 @@ async def _wake_impl(window_hours: int) -> str:
         # _t_breath.dispatch() 顺路带出,现在核心记忆段改走数据直拼,自己补上
         # 同一次 latest_unread_tail() 调用,拼接方式与 tools/breath/__init__.py
         # 完全一致)。
+        # 返修单一号改动一:consume=False——wake 只预览、不消费 read 状态。
+        # breath 才是 Silvia 确认的每日投递点,真正的"已读"消费只归 breath;
+        # 否则 CC 固定先调 wake 再调 breath,wake 会抢在 breath 前把梦悄悄
+        # 吃掉,breath 那天就再也看不到(见 dream_engine.latest_unread_tail 注释)。
         if dream_engine is not None:
             try:
                 await dream_engine.ensure_started()
-                dream_tail = dream_engine.latest_unread_tail()
+                dream_tail = dream_engine.latest_unread_tail(consume=False)
                 if dream_tail:
                     core_text = f"{core_text}\n\n{dream_tail}"
             except Exception as e:

@@ -22,7 +22,8 @@ breath 睁眼时看到裁剪后的结果，无法触发、无法预约、无法�
 - 不重试失败的生成：任一环节异常，当晚按无梦处理，静默退出
 
 对外暴露：DreamEngine 类（nightly_dream / cleanup_expired /
-         start / stop / ensure_started）、latest_unread_tail() 供 breath 调用
+         start / stop / ensure_started）、latest_unread_tail() 供 breath（消费）
+         与 wake（consume=False 预览，不消费）调用
 ========================================
 """
 
@@ -1018,9 +1019,23 @@ class DreamEngine:
         return cleaned
 
     # ---------------------------------------------------------
-    # 供 breath 调用：取最新一条未读未过期的梦，标已读，返回渲染好的尾部文本
+    # 供 breath/wake 调用：取最新一条未读未过期的梦，返回渲染好的尾部文本。
+    #
+    # 返修单一号改动一（2.6.24 回归修复）：2.6.21 的 wake 目录重写给 wake 加了
+    # 第二个调用点（server.py _wake_impl），与 breath 共享同一个「读了就置 read」
+    # 的消费型状态位——谁先调用谁就把梦吃掉，CC 每个新窗口固定先调 wake 再调
+    # breath，于是 wake 总是先手，把梦悄悄消费在自己那段不起眼的核心记忆拼接里，
+    # 当天真正的每日投递点 breath 反而总拿到「已读」，只能从文件区原文才看得到
+    # （K 家实测复现的正是这个时序）。Silvia 确认的口径：breath 才是每日触点，
+    # wake 一个窗口只开一次；两个挂载点都要保留（红线：不得擅自迁移挂载点），
+    # 但只有 breath 的调用应该真正「消费」——wake 只做不改状态的预览，让用户
+    # 提前瞥一眼「昨夜有梦」，不抢 breath 的投递权。
+    #
+    # consume=True（breath 默认）：渲染后把 status 置 read，之后不再重复投递。
+    # consume=False（wake 用）：只读渲染，不落盘、不改状态，breath 之后仍能
+    # 正常消费同一条梦；wake 本身允许重复看到同一条直到 breath 真正消费掉。
     # ---------------------------------------------------------
-    def latest_unread_tail(self) -> str:
+    def latest_unread_tail(self, consume: bool = True) -> str:
         self.cleanup_expired()  # §5：breath 检查时惰性触发
         root = self._dreams_dir()
         if not os.path.isdir(root):
@@ -1040,12 +1055,13 @@ class DreamEngine:
             tone = post.get("tone", "")
             level = post.get("level", "")
             body = str(post.content or "").strip()
-            post["status"] = "read"
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(fm.dumps(post))
-            except Exception as e:
-                logger.warning(f"dream: 标已读失败 {fn}: {e}")
+            if consume:
+                post["status"] = "read"
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(fm.dumps(post))
+                except Exception as e:
+                    logger.warning(f"dream: 标已读失败 {fn}: {e}")
             return (
                 f"——— 昨夜的梦 ———\n"
                 f"[{date_} 夜 · {tone} · {level}]\n"

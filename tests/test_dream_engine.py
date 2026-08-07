@@ -346,6 +346,47 @@ async def test_breath_mount_shows_unread_dream_then_marks_read(tmp_path, clean_r
     assert "——— 昨夜的梦 ———" not in second, "已读的梦不该再出现在下一次 breath 里"
 
 
+# ============================================================
+# 返修单一号改动一(2.6.24 回归):wake 目录重写给 wake 加了第二个消费点,
+# 与 breath 抢同一条 unread 状态——CC 固定先调 wake 再调 breath,wake 总是
+# 先手把梦吃掉,breath(Silvia 确认的真正每日投递点)那天就再也看不到。
+# 修法:wake 改走 consume=False 的只读预览,不改状态;只有 breath(默认
+# consume=True)才真正消费。下面三条覆盖"写入后未消费前非 read"、
+# "peek 不改状态、可重复看"、"peek 之后 breath 仍能正常消费且只消费一次"。
+# ============================================================
+
+def test_latest_unread_tail_peek_does_not_mark_read(tmp_path):
+    engine = make_engine(tmp_path)
+    today = dt.datetime.now(PT).date()
+    path = _write_unread_dream(engine, today - dt.timedelta(days=1))
+
+    first_peek = engine.latest_unread_tail(consume=False)
+    assert "——— 昨夜的梦 ———" in first_peek
+    assert fm.load(path)["status"] == "unread", "wake 的预览调用不该消费掉 unread 状态"
+
+    second_peek = engine.latest_unread_tail(consume=False)
+    assert second_peek == first_peek, "消费前重复预览应看到同一条,不因为看过就消失"
+
+
+def test_latest_unread_tail_peek_then_consume_still_delivers_exactly_once(tmp_path):
+    engine = make_engine(tmp_path)
+    today = dt.datetime.now(PT).date()
+    _write_unread_dream(engine, today - dt.timedelta(days=1))
+
+    # 模拟 CC 固定顺序:先 wake(peek)后 breath(consume)
+    peeked = engine.latest_unread_tail(consume=False)
+    assert "——— 昨夜的梦 ———" in peeked
+
+    delivered = engine.latest_unread_tail(consume=True)
+    assert delivered == peeked, "breath 消费时看到的内容应与 wake 预览时一致"
+
+    again = engine.latest_unread_tail(consume=True)
+    assert again == "", "breath 消费过一次后不该重复投递"
+
+    later_peek = engine.latest_unread_tail(consume=False)
+    assert later_peek == "", "breath 消费之后,wake 的预览也不该再看到已读的梦"
+
+
 @pytest.mark.asyncio
 async def test_breath_search_does_not_mount_dream_tail(tmp_path, clean_rt, bucket_mgr):
     from unittest.mock import MagicMock
