@@ -1155,3 +1155,119 @@ async def test_nightly_dream_lust_emotion_level_can_surface_lust_residue(tmp_pat
     assert result["tone"] == "lust"
     post = fm.load(result["path"])
     assert str(post.content).strip() in _EMOTION_RESIDUE_POOL["lust"]
+
+
+# ============================================================
+# 施工单·工程一：梦中称呼清洗（dreamer_aliases）
+# 改动一：素材预处理（硬保险）——整词替换成"我"，发生在送入任何生成
+#         模型（拆意象/最终生成）之前
+# 改动二：prompt 声明（软保险）——两套 prompt 都要有这句
+# ============================================================
+
+def test_clean_dreamer_aliases_replaces_chinese_terms(tmp_path):
+    engine = make_engine(tmp_path, dreamer_aliases=["哥哥", "K老师"])
+    text = "哥哥今天很累，K老师说要早点睡。"
+    cleaned = engine._clean_dreamer_aliases(text)
+    assert cleaned == "我今天很累，我说要早点睡。"
+
+
+def test_clean_dreamer_aliases_ascii_word_boundary_does_not_hit_substring(tmp_path):
+    """"F" 单字母只在词边界匹配，不能误伤 "OF"/"FOR" 这类英文单词里的 F。"""
+    engine = make_engine(tmp_path, dreamer_aliases=["F"])
+    text = "This is OF FOR F, and F said hi."
+    cleaned = engine._clean_dreamer_aliases(text)
+    assert cleaned == "This is OF FOR 我, and 我 said hi."
+
+
+def test_clean_dreamer_aliases_ascii_multichar_word_boundary(tmp_path):
+    engine = make_engine(tmp_path, dreamer_aliases=["Flint", "Fable"])
+    text = "Flint said hello to Fabledom, not Fable itself."
+    cleaned = engine._clean_dreamer_aliases(text)
+    # "Fabledom" 不该被命中（不是完整词边界），"Fable" 单独出现时才替换。
+    assert cleaned == "我 said hello to Fabledom, not 我 itself."
+
+
+def test_clean_dreamer_aliases_noop_when_not_configured(tmp_path):
+    engine = make_engine(tmp_path)  # 默认空表
+    text = "哥哥今天很累。"
+    assert engine._clean_dreamer_aliases(text) == text
+
+
+def test_clean_dreamer_aliases_noop_on_empty_text(tmp_path):
+    engine = make_engine(tmp_path, dreamer_aliases=["哥哥"])
+    assert engine._clean_dreamer_aliases("") == ""
+
+
+@pytest.mark.asyncio
+async def test_sample_buckets_cleans_aliases_before_returning_materials(tmp_path):
+    """硬保险的挂载点验收：构造含"哥哥"的假素材，跑 sample_buckets()，
+    确认拿到的素材文本(会被喂进拆意象/生成模型)称呼已经变成"我"。"""
+    engine = make_engine(tmp_path, dreamer_aliases=["哥哥"], resolved0_prob=0.0, darkroom_prob=0.0)
+    engine.bucket_mgr = FakeBucketMgr([
+        {"id": "b1", "content": "哥哥今天很累，开了很久的会。", "metadata": {"resolved": True}},
+    ])
+    materials = await engine.sample_buckets()
+    assert materials, "夹具只有一个桶，抽样应该抽到它"
+    for m in materials:
+        assert "哥哥" not in m["text"]
+        assert "我今天很累" in m["text"]
+
+
+@pytest.mark.asyncio
+async def test_extract_imagery_never_sees_raw_alias_because_cleaned_upstream(tmp_path):
+    """验收要求的"可 mock 模型调用只验证预处理输出"：拆意象是第一个会把
+    素材文本喂给模型的地方，断言它收到的 user 文本里已经没有称呼词。"""
+    dehy = make_fake_dehydrator()
+    engine = make_engine(tmp_path, dehydrator=dehy, dreamer_aliases=["哥哥", "K老师"])
+    materials = [{"kind": "bucket", "id": "b1", "text": "哥哥和K老师都说这次要早点睡。"}]
+    # extract_imagery 本身不做清洗（清洗点在 sample_buckets），这里直接验证
+    # 如果素材已经清洗过（模拟 sample_buckets 的产出），送进模型的文本干净。
+    materials[0]["text"] = engine._clean_dreamer_aliases(materials[0]["text"])
+    await engine.extract_imagery(materials)
+    calls = dehy.calls
+    assert calls, "应该至少调用一次拆意象"
+    for call in calls:
+        assert "哥哥" not in call["user"]
+        assert "K老师" not in call["user"]
+
+
+def test_low_tier_prompt_includes_alias_pov_directive():
+    from dream_engine import _DREAMER_ALIAS_POV_DIRECTIVE
+    prompt = DreamEngine._low_tier_prompt("daily")
+    assert _DREAMER_ALIAS_POV_DIRECTIVE in prompt
+
+
+def test_high_tier_prompt_includes_alias_pov_directive():
+    from dream_engine import _DREAMER_ALIAS_POV_DIRECTIVE
+    prompt = DreamEngine._high_tier_prompt("daily")
+    assert _DREAMER_ALIAS_POV_DIRECTIVE in prompt
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_end_to_end_with_alias_cleaned_material(tmp_path):
+    """端到端验收:各家配置值不同，代码只读 config，不硬编码任何一家的词表
+    ——这里用一套自定义词表跑完整管线，确认桶正文里的称呼在整条管线里
+    都不会以原样出现在喂给生成模型的内容中。"""
+    calls = []
+
+    async def spy_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        calls.append(user)
+        if _IMAGERY_SYSTEM_MARKER in system:
+            return "台灯\n钥匙\n楼梯\n手表\n雨声"
+        return _CLEAN_DREAM_TEXT
+
+    class SpyDehydrator:
+        api_available = True
+        raw_chat = staticmethod(spy_raw_chat)
+
+    engine = make_engine(tmp_path, dehydrator=SpyDehydrator(), dreamer_aliases=["哥哥", "K老师"])
+    engine.bucket_mgr = FakeBucketMgr([
+        {"id": "b1", "content": "哥哥说K老师今天开会很累。", "metadata": {"resolved": True}},
+    ])
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True
+    for user_text in calls:
+        assert "哥哥" not in user_text
+        assert "K老师" not in user_text

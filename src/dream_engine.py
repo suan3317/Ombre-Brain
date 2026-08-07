@@ -308,6 +308,31 @@ def _validate_named_phrase(candidate: str) -> str:
         return ""
     return candidate
 
+
+# --- 施工单·工程一：梦中称呼清洗（dreamer_aliases）---
+# 记忆素材里做梦者本人的第三人称称呼（哥哥/K老师/老公等）在断粮防圆步
+# 喂给 flash-lite 时，1.3 温度下会被生成成梦里的"另一个人"，造成人称
+# 分裂。修法：素材文本送入任何生成模型之前，把 config.dream.dreamer_aliases
+# 里配置的词整词替换成"我"。纯 ASCII 词（Flint/Fable/单字母 F 等）加词
+# 边界守卫，避免把 "OF"/"FOR" 这类英文单词里的 "F" 也当命中；中文称呼
+# （哥哥/老公/K老师）本身没有天然词边界，直接按字面子串匹配即可。
+_ASCII_WORD_RE = re.compile(r"^[A-Za-z0-9]+$")
+
+
+def _compile_alias_pattern(alias: str) -> re.Pattern:
+    escaped = re.escape(alias)
+    if _ASCII_WORD_RE.match(alias):
+        return re.compile(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])")
+    return re.compile(escaped)
+
+
+# 软保险（工程一）：素材预处理是硬保险，这句是万一漏网时的第二道防线，
+# 两套 prompt（高档/低档）共用，原文照抄，不因基调/档位改写。
+_DREAMER_ALIAS_POV_DIRECTIVE = (
+    "素材中的称呼若指做梦者本人，梦中一律第一人称“我”；她是梦里唯一的他者。"
+)
+
+
 # --- "只剩情绪"档残句池：正文全丢，从这里按基调抽一句。写死代码，不调 API ---
 _EMOTION_RESIDUE_POOL = {
     "daily": [
@@ -398,6 +423,12 @@ class DreamEngine:
         self.model = dream_cfg.get("model")  # None → 沿用 dehydrator 自己的模型配置
         self.temperature = float(dream_cfg.get("temperature", _DEFAULT_TEMPERATURE))
         self.cut_prob = float(dream_cfg.get("cut_prob", _DEFAULT_CUT_PROB))
+        # 施工单·工程一：梦中称呼清洗。各家配置值不同（F/K/G 各自的称呼词表），
+        # 代码只读 config，不硬编码任何一家的词，默认空表 = 不做任何替换。
+        self.dreamer_aliases = [
+            str(a).strip() for a in (dream_cfg.get("dreamer_aliases") or []) if str(a or "").strip()
+        ]
+        self._alias_patterns = [_compile_alias_pattern(a) for a in self.dreamer_aliases]
 
         self.bucket_mgr = bucket_mgr
         self.dehydrator = dehydrator
@@ -476,7 +507,23 @@ class DreamEngine:
             if note:
                 materials.append({"kind": "darkroom", "id": "darkroom", "text": note})
 
+        # 工程一：清洗做梦者称呼，发生在任何素材送入生成模型（拆意象/最终
+        # 生成）之前——如果只在最终生成前清，拆意象那一步（也是一次 LLM
+        # 调用）仍会先看到"哥哥""K老师"这些词，可能把它们当具名短语抽出来，
+        # 下游清洗就晚了。在这里统一清一次，后面所有环节拿到的都是干净文本。
+        if self._alias_patterns:
+            for m in materials:
+                m["text"] = self._clean_dreamer_aliases(m.get("text") or "")
+
         return materials
+
+    def _clean_dreamer_aliases(self, text: str) -> str:
+        if not text or not self._alias_patterns:
+            return text
+        cleaned = text
+        for pattern in self._alias_patterns:
+            cleaned = pattern.sub("我", cleaned)
+        return cleaned
 
     def _sample_darkroom_note(self) -> str:
         root = self._darkroom_dir()
@@ -744,6 +791,7 @@ class DreamEngine:
             "但看的人是「我」。正例：「我看见她站在院子里。」\n"
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
+            f"{_DREAMER_ALIAS_POV_DIRECTIVE}\n"
             "下面用户消息给你的词是抓到的碎片素材，不是要你输出的格式——"
             "绝对禁止把它们原样列出来、分行罗列、写成“名词，名词，名词”这种清单体，"
             "也不许每行一个词地照抄。你要做的是把这些碎片揉进连续的散文段落里，"
@@ -769,6 +817,7 @@ class DreamEngine:
             "但看的人是「我」。正例：「我看见她站在院子里。」\n"
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
+            f"{_DREAMER_ALIAS_POV_DIRECTIVE}\n"
             "这个梦由“清晰段”和“混沌段”交替组成，共 4-6 段：\n"
             "清晰段（2-3 个，每个 80-150 字）：围绕给你的一条具名短语展开一个具体、"
             "连续的小场景。段内允许情节连贯、允许“接着/然后”、允许动作有因果。"

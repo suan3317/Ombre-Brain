@@ -2730,6 +2730,8 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-10，默认 2.5。低于此权重的桶不进 breath 默认浮现；breath_search / breath_advanced 的检索不受限</div>
         <div class="config-row"><label>anchor 上限</label><input type="number" id="cfg-anchor-max-count" min="1" max="200" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-200，默认 24。坐标系桶(anchor)数量上限，满了要 anchor 新的须先 release 一条旧的。保存后需重启服务生效</div>
+        <div class="config-row"><label>梦中称呼清洗</label><input type="text" id="cfg-dream-aliases" placeholder="逗号分隔，如：老公,封燧,Flint,Fable" style="width:280px;" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。填自己的称呼词——素材里这些词做梦时会被换成"我"，避免生成时把自己当成梦里的另一个人。默认空，不做替换。保存后需重启服务生效</div>
       </div>
     </div>
 
@@ -6693,6 +6695,8 @@ async function loadConfig() {
     document.getElementById('cfg-sf-min-weight').value = (sf.min_weight === undefined || sf.min_weight === null) ? 2.5 : sf.min_weight;
     var anc = cfg.anchor || {};
     document.getElementById('cfg-anchor-max-count').value = anc.max_count || 24;
+    var drm = cfg.dream || {};
+    document.getElementById('cfg-dream-aliases').value = (drm.dreamer_aliases || []).join(',');
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>数据目录: <strong>' + esc(cfg.buckets_dir) + '</strong>'
       + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
@@ -6931,6 +6935,9 @@ async function saveConfig(persist) {
     },
     anchor: {
       max_count: parseInt(document.getElementById('cfg-anchor-max-count').value) || 24,
+    },
+    dream: {
+      dreamer_aliases: document.getElementById('cfg-dream-aliases').value.split(',').map(s => s.trim()).filter(Boolean),
     },
     persist: persist,
   };

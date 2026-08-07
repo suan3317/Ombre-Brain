@@ -206,6 +206,10 @@ def register(mcp) -> None:
             "anchor": {
                 "max_count": int(sh.config.get("anchor", {}).get("max_count") or 24),
             },
+            # 施工单·工程一：梦中称呼清洗词表。各家各自的值，代码不给默认词表。
+            "dream": {
+                "dreamer_aliases": list(sh.config.get("dream", {}).get("dreamer_aliases") or []),
+            },
             "merge_threshold": sh.config.get("merge_threshold", 75),
             "transport": sh.config.get("transport", "stdio"),
             "buckets_dir": sh.config.get("buckets_dir", ""),
@@ -456,6 +460,16 @@ def register(mcp) -> None:
                 except (TypeError, ValueError):
                     pass
 
+        # --- Dream dreamer_aliases (施工单·工程一) ---
+        if "dream" in body and isinstance(body["dream"], dict):
+            dr = sh.config.setdefault("dream", {})
+            if "dreamer_aliases" in body["dream"]:
+                raw = body["dream"]["dreamer_aliases"]
+                if isinstance(raw, list):
+                    cleaned = [str(a).strip()[:32] for a in raw if str(a or "").strip()][:32]
+                    dr["dreamer_aliases"] = cleaned
+                    updated.append("dream.dreamer_aliases")
+
         # --- Persist to config.yaml if requested ---
         if persist_requested:
             from utils import config_file_path
@@ -542,6 +556,33 @@ def register(mcp) -> None:
                                 sc_samp["temperature"] = float(src_samp["temperature"])
                             except (TypeError, ValueError):
                                 pass
+
+                # 返修单一号改动五：anchor 上限持久化（补漏：运行时 sh.config 那份
+                # 保存路径之前漏了这块，persist=True 时改了也不会写进 config.yaml，
+                # 重启就丢——这里跟 surfacing/anchor 的运行时校验保持同一套边界）。
+                if "anchor" in body and isinstance(body["anchor"], dict):
+                    sc_anc = save_config.setdefault("anchor", {})
+                    if not isinstance(sc_anc, dict):
+                        sc_anc = {}
+                        save_config["anchor"] = sc_anc
+                    if "max_count" in body["anchor"]:
+                        try:
+                            sc_anc["max_count"] = max(1, min(200, int(body["anchor"]["max_count"])))
+                        except (TypeError, ValueError):
+                            pass
+
+                # 施工单·工程一：dreamer_aliases 持久化。
+                if "dream" in body and isinstance(body["dream"], dict):
+                    sc_dream = save_config.setdefault("dream", {})
+                    if not isinstance(sc_dream, dict):
+                        sc_dream = {}
+                        save_config["dream"] = sc_dream
+                    if "dreamer_aliases" in body["dream"]:
+                        raw = body["dream"]["dreamer_aliases"]
+                        if isinstance(raw, list):
+                            sc_dream["dreamer_aliases"] = [
+                                str(a).strip()[:32] for a in raw if str(a or "").strip()
+                            ][:32]
 
                 with open(config_path, "w", encoding="utf-8") as f:
                     yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True)
