@@ -439,7 +439,7 @@ class DecayEngine:
         推论一），语义与过渡实现一致，只是数据来源换成了正式的
         last_meaningful_at 强信号时间戳。
         """
-        return round(self.seed_floor + self.activity_bonus(metadata), 4)
+        return round(self.seed_floor + self.activity_bonus(metadata, for_seed=True), 4)
 
     def _encoded_age_days(self, metadata: dict, now: datetime) -> float:
         """v3 Commit C：retention() 的年龄输入。年龄基准是 created（"神圣不可
@@ -523,7 +523,9 @@ class DecayEngine:
 
         return round(value, 4)
 
-    def activity_bonus(self, metadata: dict, now: datetime | None = None) -> float:
+    def activity_bonus(
+        self, metadata: dict, now: datetime | None = None, *, for_seed: bool = False
+    ) -> float:
         """v3 Commit C：排序结构第二根轴。≥0，非负贡献，不承担惩罚；数值
         随 last_meaningful_at 新鲜度衰减回 0；强信号不构成永久累积优势——
         不是 monotonic counter，纯粹是"上次强信号多久以前"的衰减函数，
@@ -532,6 +534,16 @@ class DecayEngine:
         last_meaningful_at 从未设置（从未有过 hold 追加 / meaning_append /
         citation_credit 强信号，见 bucket_manager.record_strong_signal）
         → 0.0。
+
+        Commit E 修正：importance 递减只对 for_seed=True（_calc_seed_score
+        的种子路径）生效——那是设计定稿"种子条款"里明写的"activity 仍可
+        小幅正向增益（受高 importance 递减）"，专属种子。通用排序轴（
+        band_ranked() 走的非 seed 默认路径，for_seed=False）不递减：设计
+        定稿"不对称原则"明写"加分类规则看 weight（捞沉底）……importance
+        10 / weight 低位的非 seed 桶必须能吃到反向匹配与全额 activity_
+        bonus"——两条要求主体不同，此前实现把种子专属的递减曲线套用到了
+        全部桶（含非 seed）上，是 Commit C 遗留的不对称原则违规，回归 e
+        验收时发现并在此修正。
         """
         if not isinstance(metadata, dict):
             return 0.0
@@ -544,12 +556,17 @@ class DecayEngine:
         except (ValueError, TypeError):
             return 0.0
 
-        try:
-            importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
-        except (TypeError, ValueError):
-            importance = _DEFAULT_IMPORTANCE
-        # 宪法推论一：高权重桶不需要更多分。importance=10 时递减到 0。
-        diminish = max(0.0, (10 - importance) / 9.0)
+        if for_seed:
+            try:
+                importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
+            except (TypeError, ValueError):
+                importance = _DEFAULT_IMPORTANCE
+            # 宪法推论一 × 种子条款：种子的 importance=10 时递减到 0。
+            diminish = max(0.0, (10 - importance) / 9.0)
+        else:
+            # 不对称原则：非 seed 桶的 activity_bonus 不看 importance，
+            # 一律全额——importance 只用来定 band，不用来打折加分。
+            diminish = 1.0
 
         hours = max(0.0, (now - last).total_seconds() / _SECONDS_PER_HOUR)
         if self.activity_bonus_half_life_hrs <= 0:

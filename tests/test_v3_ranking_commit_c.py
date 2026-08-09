@@ -231,12 +231,28 @@ class TestActivityBonus:
         )
         assert fresh > stale >= 0.0
 
-    def test_diminishes_at_high_importance(self, decay_eng):
+    def test_general_path_does_not_diminish_at_high_importance(self, decay_eng):
+        """Commit E 修正（回归 e，不对称原则）：默认 for_seed=False 走
+        band_ranked() 的通用排序轴，不看 importance 打折——"加分类规则看
+        weight（捞沉底）"，importance=10 的非 seed 桶必须拿到全额
+        activity_bonus。种子专属的递减曲线见下面
+        test_seed_path_diminishes_at_high_importance（for_seed=True）。"""
         now = datetime.now()
         base = {"type": "dynamic", "last_meaningful_at": now.isoformat()}
         low_imp = decay_eng.activity_bonus({**base, "importance": 1}, now)
         high_imp = decay_eng.activity_bonus({**base, "importance": 10}, now)
-        assert high_imp == 0.0, "宪法推论一：importance=10 时递减到 0"
+        assert high_imp == low_imp > 0.0
+
+    def test_seed_path_diminishes_at_high_importance(self, decay_eng):
+        """for_seed=True（_calc_seed_score 的专属调用路径）保留设计定稿
+        种子条款明写的"activity 仍可小幅正向增益（受高 importance 递减）"，
+        与 test_v3_seed_commit_a.py 的
+        test_calculate_score_seed_bonus_diminishes_at_high_importance 呼应。"""
+        now = datetime.now()
+        base = {"type": "dynamic", "last_meaningful_at": now.isoformat()}
+        low_imp = decay_eng.activity_bonus({**base, "importance": 1}, now, for_seed=True)
+        high_imp = decay_eng.activity_bonus({**base, "importance": 10}, now, for_seed=True)
+        assert high_imp == 0.0, "宪法推论一 × 种子条款：种子 importance=10 时递减到 0"
         assert low_imp > high_imp
 
     def test_is_not_a_monotonic_counter(self, decay_eng):
