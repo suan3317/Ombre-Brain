@@ -44,6 +44,11 @@ except ImportError:  # pragma: no cover
         parse_bool as _parse_bool,
     )
 
+try:
+    from dehydrator import chat_completion_token_limit  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..dehydrator import chat_completion_token_limit  # type: ignore
+
 logger = sh.logger
 _MAX_PROVIDER_KEY_CHARS = 8192
 _MAX_PROVIDER_URL_CHARS = 2048
@@ -679,7 +684,11 @@ def register(mcp) -> None:
         try:
             import httpx as _httpx
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                **chat_completion_token_limit(model, 5),
+            }
             async with _httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
             if r.status_code in (200, 201):

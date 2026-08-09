@@ -113,6 +113,26 @@ _IMPORTANCE_MAX = 10
 _DEFAULT_IMPORTANCE = 5
 
 
+def chat_completion_token_limit(model: str, limit: int) -> dict[str, int]:
+    """按 Chat Completions 模型族选输出 token 参数名。
+
+    GPT-5.x 系列废弃了 max_tokens，改用 max_completion_tokens；旧模型仍只认
+    max_tokens。传错参数名对方直接 400，所以按 model 前缀分流，而不是全局改名。
+    """
+    model_id = (
+        (model or "")
+        .strip()
+        .lower()
+        .removeprefix("models/")
+        .rsplit("/", 1)[-1]
+    )
+    uses_completion_tokens = model_id == "gpt-5" or model_id.startswith(
+        ("gpt-5-", "gpt-5.")
+    )
+    key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
+    return {key: limit}
+
+
 # --- Dehydration prompt: instructs cheap LLM to compress information ---
 # --- 脱水提示词：指导廉价 LLM 压缩信息 ---
 # --- Perspective rule (shared) ---
@@ -473,8 +493,11 @@ class Dehydrator:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
             temperature=temperature if temperature is not None else self.temperature,
+            **chat_completion_token_limit(
+                model if model else self.model,
+                max_tokens if max_tokens is not None else self.max_tokens,
+            ),
         )
         if not response.choices:
             return ""
