@@ -158,6 +158,12 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     # 显式检索(breath_search / breath_advanced 的 query 与 full_text 路径)
     # 不经过这个池子,不受此限——想找的东西低权重也照样能找到,只是不会
     # 自己冒出来。K 实测:阈值设 4 会误伤 7 月末的日常桶档,默认给 2.5。
+    # TODO(归档链路迁移到 retention 时一并评估，独立后续项，非本期范围)：
+    # v3 Commit C 架构裁定（F，2026-08-09）：这里的准入门槛判定继续用
+    # calculate_score()，不切到 retention()/activity_bonus()——它跟归档
+    # 阈值判定同属"够不够格"的判定，不是排序，retention 的 band_floor
+    # 偏移量级（成百上千）跟这里 2.5 这种小尺度阈值直接对不上，尺度换轴
+    # 会失配。等归档链路那次迁移评估时一并处理，不能单独在这里改。
     min_weight = float(surfacing_cfg.get("min_weight", _DEFAULT_SURFACING_MIN_WEIGHT))
     unresolved = [
         b for b in all_buckets_non_anchor_non_seed
