@@ -218,6 +218,13 @@ def register(mcp) -> None:
             f.write(body)
         return JSONResponse({"ok": True, "name": name, "size": len(body)})
 
+    # v3 Commit D（F 裁定 2026-08-09）：这个端点是 Dashboard 的独立文件查看器
+    # ——纯字节流下发，没有任何 HTML 包装层可以注入 derived_freshness 陈旧
+    # 警示（浏览器直接把 Content-Disposition: inline 的响应体渲染成纯文本，
+    # 不经过 Dashboard 自己的任何模板）。本期跳过，不在这里接 sidecar
+    # 查询——MCP 的 file_read（src/server.py _fz_read）已经覆盖了"读文件"
+    # 这个使用场景的三入口之一，Dashboard 这个查看器是它的浏览器端镜像，
+    # 留空不影响"三入口"这条要求本身的达成。
     @mcp.custom_route("/api/files/download", methods=["GET"])
     async def files_download(request: Request) -> Response:
         err = sh._require_auth(request)

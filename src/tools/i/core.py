@@ -22,6 +22,7 @@ I 是 OB 的自我感知层：AI 把关于自己的观察写下来（本质/规�
 
 from typing import Optional
 
+from bucket_manager import format_staleness_warning
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size
 
@@ -123,6 +124,16 @@ async def _read_i(limit: int) -> str:
         ts = (meta.get("last_active") or "")[:10]
         aspect_label = f"[{aspect_tag}] " if aspect_tag else ""
         text = (b.get("content") or "").strip()
-        lines.append(f"\n{ts} {aspect_label}{b['id']}\n{text}")
+        entry = f"\n{ts} {aspect_label}{b['id']}\n{text}"
+        # v3 Commit D：三入口之一——这条自我认知桶如果被别处的 supersede
+        # 标记为待核实（derived_freshness sidecar），渲染时精确到"哪一次
+        # 引用/哪一行"提示，不做整份模糊警示。
+        try:
+            stale_entries = await rt.bucket_mgr.get_derived_stale(b["id"])
+        except Exception:
+            stale_entries = []
+        if stale_entries:
+            entry += "\n" + format_staleness_warning(stale_entries)
+        lines.append(entry)
 
     return "\n".join(lines)

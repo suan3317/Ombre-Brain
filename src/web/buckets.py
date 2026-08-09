@@ -172,12 +172,20 @@ def register(mcp) -> None:
             triggered_feels = await sh.bucket_mgr.get_triggered_feels(bucket_id)
         except Exception as e:
             logger.warning(f"triggered_feels lookup failed / 反向链查询失败: {e}")
+        # v3 Commit D：三入口之一——derived_freshness sidecar，精确到"哪一次
+        # 引用/哪一行"待核实，不做整份文档级模糊警示；前端 showDetail() 负责渲染。
+        derived_stale = []
+        try:
+            derived_stale = await sh.bucket_mgr.get_derived_stale(bucket_id)
+        except Exception as e:
+            logger.warning(f"derived_freshness lookup failed / 陈旧标记查询失败: {e}")
         return JSONResponse({
             "id": bucket["id"],
             "metadata": meta,
             "content": strip_wikilinks(bucket.get("content", "")),
             "score": sh.decay_engine.calculate_score(meta),
             "triggered_feels": triggered_feels,  # iter 1.9 D
+            "derived_stale": derived_stale,  # v3 Commit D
         })
 
 

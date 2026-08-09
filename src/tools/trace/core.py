@@ -22,7 +22,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      tags, resolved, pinned, digested, content, delete,
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
-                     seed, cited, event_at) → str
+                     seed, cited, event_at,
+                     superseded_by, supersede_type, supersede_effective_at) → str
 ========================================
 """
 
@@ -61,6 +62,9 @@ async def trace_core(
     seed: Optional[int] = -1,
     cited: Optional[str] = "",
     event_at: Optional[str] = "",
+    superseded_by: Optional[str] = "",
+    supersede_type: Optional[str] = "",
+    supersede_effective_at: Optional[str] = "",
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -99,6 +103,15 @@ async def trace_core(
     if event_at is None:
         event_at = ""
     event_at = str(event_at).strip()
+    if superseded_by is None:
+        superseded_by = ""
+    superseded_by = str(superseded_by).strip()
+    if supersede_type is None:
+        supersede_type = ""
+    supersede_type = str(supersede_type).strip().lower()
+    if supersede_effective_at is None:
+        supersede_effective_at = ""
+    supersede_effective_at = str(supersede_effective_at).strip()
     if why_remembered is None:
         why_remembered = ""
     if meaning_append is None:
@@ -199,6 +212,23 @@ async def trace_core(
         return (
             f"记忆桶 {bucket_id} 是 pinned/protected 核心桶，importance 被锁定为 10，"
             "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
+        )
+
+    # --- v3 Commit D：supersede（旧桶正文不改，处置人工，独立操作不跟其它
+    # 字段混在同一批 updates 里——mark_superseded() 自己校验类型+触发
+    # derived_freshness sidecar 传播）---
+    if superseded_by:
+        if not supersede_type:
+            return "标记 superseded_by 必须同时传 supersede_type（contradiction/state_transition/plan_completed/plan_abandoned 之一）。"
+        result = await rt.bucket_mgr.mark_superseded(
+            bucket_id, superseded_by=superseded_by,
+            supersede_type=supersede_type, effective_at=supersede_effective_at,
+        )
+        if not result.get("ok"):
+            return f"标记 superseded_by 失败: {result.get('error', 'unknown_error')}"
+        return (
+            f"已标记记忆桶 {bucket_id} 被 {superseded_by} 取代（{supersede_type}）："
+            f"正文未改，同步标记了 {result.get('marked_stale_count', 0)} 处引用为待核实。"
         )
 
     updates: dict = {}

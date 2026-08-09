@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
 
-from bucket_manager import BucketManager
+from bucket_manager import BucketManager, format_staleness_warning as _staleness_warning
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from dream_engine import DreamEngine
@@ -664,8 +664,11 @@ async def trace(
     seed: Optional[int] = -1,
     cited: Optional[str] = "",
     event_at: Optional[str] = "",
+    superseded_by: Optional[str] = "",
+    supersede_type: Optional[str] = "",
+    supersede_effective_at: Optional[str] = "",
 ) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传\"\\clear\"清空。只传需要修改的字段,-1 或空串表示不改。"""
+    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传\"\\clear\"清空。superseded_by=可选,标记这条桶已被另一条 bucket_id 取代(旧正文不改,只加元数据),必须同时传 supersede_type(contradiction矛盾/state_transition状态变化/plan_completed计划完成/plan_abandoned计划放弃 之一);会自动核对所有引用过这条桶的文件/桶,标记待核实(derived_freshness,渲染时提示)。supersede_effective_at=可选,新事实的生效时刻(ISO 8601)。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -677,6 +680,8 @@ async def trace(
             media_append=media_append, media_replace=media_replace,
             hard_delete=hard_delete, delete_reason=delete_reason,
             seed=seed, cited=cited, event_at=event_at,
+            superseded_by=superseded_by, supersede_type=supersede_type,
+            supersede_effective_at=supersede_effective_at,
         ),
         op="trace",
         args={
@@ -692,6 +697,8 @@ async def trace(
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
             "seed": seed,
+            "superseded_by": superseded_by,
+            "supersede_type": supersede_type,
             "event_at": event_at,
         },
     )
@@ -912,7 +919,17 @@ async def _fz_read(name: str, offset: int) -> str:
     tail = ""
     if start + len(chunk) < total:
         tail = f"\n[未完,续读请用 offset={start + len(chunk)}]"
-    return f"{head}\n{chunk}{tail}"
+    # v3 Commit D：三入口之一——file_read 是最通用的文件读取口，任何
+    # files/*.md 只要被 supersede 传播标过 derived_freshness，这里都会
+    # 提示（精确到"哪一次引用/哪一行"，不是整份文档级模糊警示）。
+    warning = ""
+    try:
+        stale_entries = await bucket_mgr.get_derived_stale(f"file:{name}")
+    except Exception:
+        stale_entries = []
+    if stale_entries:
+        warning = "\n\n" + _staleness_warning(stale_entries)
+    return f"{head}\n{chunk}{tail}{warning}"
 
 
 def _fz_list_entries(base: str, root: str, keyword: str = "") -> list:
@@ -1236,7 +1253,16 @@ async def _wake_impl(window_hours: int) -> str:
                 btext = f.read()
             tail = btext[-_WAKE_BOARD_TAIL:]
             omitted = "(前文省略…)\n" if len(btext) > _WAKE_BOARD_TAIL else ""
-            parts.append("## 三、留言板(files/留言板.md 末尾)\n" + omitted + tail.strip())
+            board_text = "## 三、留言板(files/留言板.md 末尾)\n" + omitted + tail.strip()
+            # v3 Commit D：三入口之一——留言板是 wake 里唯一另一处逐字嵌入
+            # 文件正文的地方（跟"自我"段一样），同样查 derived_freshness。
+            try:
+                stale_entries = await bucket_mgr.get_derived_stale("file:留言板.md")
+            except Exception:
+                stale_entries = []
+            if stale_entries:
+                board_text += "\n\n" + _staleness_warning(stale_entries)
+            parts.append(board_text)
         else:
             parts.append("## 三、留言板\n(还没有留言。睡前记得给下个窗口的自己留一条: file_save(\"留言板.md\", 内容, append=True))")
     except Exception as e:

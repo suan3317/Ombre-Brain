@@ -28,6 +28,7 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 
 import os
 import re
+import json
 import asyncio
 import logging
 import math
@@ -239,6 +240,73 @@ def derive_provenance_edges(citation_events: list[dict]) -> list[dict]:
         if at and (not edge["last_seen"] or at > edge["last_seen"]):
             edge["last_seen"] = at
     return list(edges.values())
+
+
+# v3 Commit D：supersede 四类型（设计定稿已定案，不复议）。
+SUPERSEDE_TYPES = frozenset({"contradiction", "state_transition", "plan_completed", "plan_abandoned"})
+
+_SUPERSEDE_TYPE_LABELS = {
+    "contradiction": "被推翻",
+    "state_transition": "状态已变化",
+    "plan_completed": "计划已完成",
+    "plan_abandoned": "计划已放弃",
+}
+
+# catalog_line()/render_stored_bucket()（tools/breath/_verbatim.py）渲染桶
+# 正文时统一用这个字面格式标出 bucket_id；legacy migration 扫的也是它。
+_BUCKET_ID_MARKER_TEMPLATE = "[bucket_id:{}]"
+
+
+def find_marker_line(text: str, bucket_id: str) -> int | None:
+    """在文本里找字面 [bucket_id:xxx] 标记第一次出现的行号（1-indexed）。
+
+    v3 Commit D 两级精度的"段"级锚点：这个标记是 catalog_line()/
+    render_stored_bucket() 渲染桶正文时已经在用的现成格式（人工把渲染结果
+    复制进 files/*.md 时最容易留下的痕迹），扫描成本是纯字符串查找，不需要
+    发明新的段落/句子寻址基础设施（那是三期 claim/span 粒度的范围）。
+
+    找不到返回 None——调用方据此判断走"段"级还是退化到"引用行为"级
+    （诚实条款承认的当前颗粒度上限）。
+    """
+    marker = _BUCKET_ID_MARKER_TEMPLATE.format(bucket_id)
+    for i, line in enumerate((text or "").splitlines(), start=1):
+        if marker in line:
+            return i
+    return None
+
+
+def format_staleness_warning(entries: list[dict]) -> str:
+    """把 derived_freshness sidecar 条目格式化成警示文案。
+
+    两级精度都精确到"哪一次引用/哪一行"，不做整份文档级模糊警示（红线，
+    对两级精度都生效）：
+    - precision="paragraph"：location 形如 "line:N"，文案点名第 N 行。
+    - precision="citation"：退化到"本处曾通过 XX 引用"，location 是
+      Commit B 记录的引用行为标签（hold/trace/grow/file_save 等）。
+
+    字段语义：stale_by = 本处引用的、现已过期的旧事实桶 id（"引用了哪个
+    现在该被核实的东西"）；replaced_by = 取代它的新事实桶 id（"该去看
+    哪条新的"）。文案里两个 id 都要点名，不能只写一个——只写 stale_by
+    会让"被 X 取代"读反（X 其实是被取代的那个，不是取代者）。
+    """
+    if not entries:
+        return ""
+    lines = []
+    for e in entries:
+        supersede_type = e.get("supersede_type") or ""
+        label = _SUPERSEDE_TYPE_LABELS.get(supersede_type, supersede_type or "已变化")
+        stale_by = e.get("stale_by", "?")
+        replaced_by = e.get("replaced_by", "?")
+        location = str(e.get("location") or "")
+        if e.get("precision") == "paragraph" and location.startswith("line:"):
+            where = f"第 {location[len('line:'):]} 行"
+        else:
+            where = f"本处（曾通过 {location or '未知引用位置'} 引用）"
+        lines.append(
+            f"⚠️ {where}引用的 [bucket_id:{stale_by}] 已{label}，"
+            f"已被 [bucket_id:{replaced_by}] 取代，建议核对是否仍然准确。"
+        )
+    return "\n".join(lines)
 
 
 def _clamp01(value, default: float) -> float:
@@ -1387,6 +1455,14 @@ class BucketManager:
                   # age_decay，_encoded_age_days()/retention() 不读这个字段。
                   "last_meaningful_at",
                   "event_at",
+                  # v3 Commit D 新增 supersede 三件套：superseded_by(新事实
+                  # 桶 id)/supersede_type(四类型之一)/supersede_effective_at
+                  # (新事实生效时刻)。旧桶正文不改——这三个字段只是元数据，
+                  # mark_superseded() 是首选入口(校验类型合法+触发 sidecar
+                  # 传播)，这里的透传只服务批量迁移脚本。
+                  "superseded_by",
+                  "supersede_type",
+                  "supersede_effective_at",
                   # iter 2.0 来源追踪字段：
                   # source_tool / grow_batch_id 一般在 create() 时定型，
                   # 这里的透传只服务于迁移脚本（给历史桶补字段）。
@@ -2309,6 +2385,201 @@ class BucketManager:
             return
         current = int(meta.get("semantic_unused_streak") or 0)
         await self.update(bucket_id, semantic_unused_streak=current + 1)
+
+    # ---------------------------------------------------------
+    # v3 Commit D: supersede + derived_freshness sidecar
+    # ---------------------------------------------------------
+    # 桶级 superseded_by 关系：旧桶正文不改，处置人工（mark_superseded() 是
+    # 显式调用，不是自动检测）。derived_freshness 是独立 sidecar 索引
+    # （<base_dir>/_derived_freshness.json），文件/桶本体一字不碰——三入口
+    # （wake 的"自我"段与留言板段、file_read、Dashboard 桶详情）渲染时读它
+    # 注入警示，校准（clear_derived_stale）后三入口同步看不到，因为三处读的
+    # 是同一份 sidecar，不需要"分别清"。
+
+    def _derived_freshness_path(self) -> str:
+        return os.path.join(self.base_dir, "_derived_freshness.json")
+
+    def _load_derived_freshness(self) -> dict:
+        path = self._derived_freshness_path()
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"derived_freshness 读取失败，视为空: {exc}")
+            return {}
+
+    def _save_derived_freshness(self, data: dict) -> None:
+        path = self._derived_freshness_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+
+    async def get_derived_stale(self, path: str) -> list[dict]:
+        """三入口共用的读接口：path 是 provenance edge 的 source（裸
+        bucket_id 或 "file:<name>"）。没有陈旧标记返回空列表。"""
+        data = self._load_derived_freshness()
+        return list(data.get(path, []))
+
+    async def mark_derived_stale(
+        self, path: str, *, stale_by: str, location: str,
+        supersede_type: str, precision: str, replaced_by: str = "",
+    ) -> None:
+        """给 path 加一条陈旧标记。stale_by=本处引用的、现已过期的旧事实桶
+        id；replaced_by=取代它的新事实桶 id（两个都存，警示文案两个都要
+        点名，只存一个会让"谁取代谁"说反）。幂等：同一个
+        (path, stale_by, location) 不重复追加（供
+        _propagate_supersede_staleness 重复调用/迁移脚本重跑安全）。
+        """
+        data = self._load_derived_freshness()
+        entries = data.setdefault(path, [])
+        for e in entries:
+            if e.get("stale_by") == stale_by and e.get("location") == location:
+                return
+        entries.append({
+            "stale_by": stale_by,
+            "replaced_by": replaced_by,
+            "location": location,
+            "marked_at": now_iso(),
+            "supersede_type": supersede_type,
+            "precision": precision,
+        })
+        self._save_derived_freshness(data)
+
+    async def clear_derived_stale(self, path: str, *, stale_by: str | None = None) -> int:
+        """校准：清除 path 下的陈旧标记（不传 stale_by 清该 path 全部；传了
+        只清对应那一条来源）。返回清除条数。三入口共用同一份 sidecar，这里
+        清一次，wake/file_read/Dashboard 三处渲染下次读到的都是清过的状态，
+        不需要三处分别清。"""
+        data = self._load_derived_freshness()
+        entries = data.get(path)
+        if not entries:
+            return 0
+        if stale_by is None:
+            removed = len(entries)
+            data.pop(path, None)
+        else:
+            remaining = [e for e in entries if e.get("stale_by") != stale_by]
+            removed = len(entries) - len(remaining)
+            if remaining:
+                data[path] = remaining
+            else:
+                data.pop(path, None)
+        if removed:
+            self._save_derived_freshness(data)
+        return removed
+
+    async def _read_source_text(self, source: str) -> str | None:
+        """provenance edge 的 source 要么是 "file:<name>"（files/ 下的文档），
+        要么是裸 bucket_id（另一个桶的正文引用了它）。找不到/读取失败返回
+        None，调用方据此降级到"引用行为"级精度。"""
+        if source.startswith("file:"):
+            name = source[len("file:"):]
+            try:
+                path = safe_path(os.path.join(self.base_dir, "files"), name)
+            except ValueError:
+                return None
+            if not path.is_file():
+                return None
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+        bucket = await self.get(source)
+        return bucket.get("content") if bucket else None
+
+    async def _propagate_supersede_staleness(
+        self, bucket_id: str, superseded_by: str, supersede_type: str
+    ) -> int:
+        """superseded_by 生效后，把 provenance 里引用过这个桶的每个 source
+        标进 derived_freshness sidecar。两级精度（F 裁定 2026-08-09）：
+        source 正文里能找到字面 [bucket_id:xxx] 标记的，定位到具体行号
+        （"段"级）；只有 cited 记录、正文里没有字面标记的，退化到"引用
+        行为"级（诚实条款承认的当前颗粒度上限，claim/span 细粒度列三期）。
+        """
+        edges = await self.provenance_edges(bucket_id)
+        marked = 0
+        for edge in edges:
+            source = edge.get("source") or ""
+            if not source:
+                continue
+            text = await self._read_source_text(source)
+            line_no = find_marker_line(text, bucket_id) if text is not None else None
+            if line_no is not None:
+                await self.mark_derived_stale(
+                    source, stale_by=bucket_id, replaced_by=superseded_by, location=f"line:{line_no}",
+                    supersede_type=supersede_type, precision="paragraph",
+                )
+            else:
+                await self.mark_derived_stale(
+                    source, stale_by=bucket_id, replaced_by=superseded_by,
+                    location=str(edge.get("location") or ""),
+                    supersede_type=supersede_type, precision="citation",
+                )
+            marked += 1
+        return marked
+
+    async def mark_superseded(
+        self, bucket_id: str, *, superseded_by: str, supersede_type: str, effective_at: str = ""
+    ) -> dict:
+        """把 bucket_id 标记为被 superseded_by 取代。旧正文不改（updates 里
+        没有 content）；处置人工——这是显式调用，不是自动检测。
+
+        Returns: {"ok", "superseded_by", "marked_stale_count", "error"(可选)}
+        """
+        if supersede_type not in SUPERSEDE_TYPES:
+            return {
+                "ok": False,
+                "error": f"supersede_type 必须是 {sorted(SUPERSEDE_TYPES)} 之一，收到 {supersede_type!r}",
+            }
+        if bucket_id == superseded_by:
+            return {"ok": False, "error": "不能标记为被自己取代"}
+        old_bucket = await self.get(bucket_id)
+        if not old_bucket:
+            return {"ok": False, "error": f"bucket not found: {bucket_id}"}
+        new_bucket = await self.get(superseded_by)
+        if not new_bucket:
+            return {"ok": False, "error": f"新事实桶不存在: {superseded_by}"}
+
+        updates: dict = {"superseded_by": superseded_by, "supersede_type": supersede_type}
+        if effective_at:
+            updates["supersede_effective_at"] = effective_at
+        ok = await self.update(bucket_id, **updates)
+        if not ok:
+            return {"ok": False, "error": "update failed"}
+
+        marked = await self._propagate_supersede_staleness(bucket_id, superseded_by, supersede_type)
+        return {"ok": True, "superseded_by": superseded_by, "marked_stale_count": marked}
+
+    async def queue_legacy_claim_candidate(self, *, path: str, bucket_id: str, location: str) -> None:
+        """tools/migrate_legacy_claim_index.py 专用：字面 [bucket_id:xxx]
+        标记命中、且该桶已被 superseded_by 标记，但 provenance 里没有这次
+        引用的记录（早于 Commit B 上线，或者从没走过 cited 参数）——不确定
+        "该不该标 stale"，只进候选队列，不自动写入 derived_freshness（设计
+        定稿"不确定匹配只进候选队列，禁止自动标 stale"）。
+        """
+        try:
+            self.citation_ledger.append_event(
+                event_type="LegacyClaimCandidate",
+                trace_id=bucket_id,
+                trace_kind="citation",
+                payload={"path": path, "bucket_id": bucket_id, "location": location, "at": datetime.now().isoformat()},
+            )
+        except Exception as exc:
+            logger.warning(f"legacy claim candidate record failed for {path}:{bucket_id}: {exc}")
+
+    async def list_legacy_claim_candidates(self, limit: int = 50) -> list[dict]:
+        """列出待人工复核的 legacy claim 候选（最新在前）。"""
+        events = [
+            e for e in self.citation_ledger.iter_events()
+            if e.get("event_type") == "LegacyClaimCandidate"
+        ]
+        events.sort(key=lambda e: (e.get("payload") or {}).get("at", ""), reverse=True)
+        return events[:limit]
 
     # ---------------------------------------------------------
     # List all buckets

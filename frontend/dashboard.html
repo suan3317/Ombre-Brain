@@ -4616,6 +4616,24 @@ async function showDetail(id) {
         }).join('') +
         '</ul></div>';
     }
+    // v3 Commit D: derived_freshness sidecar——这条桶被 supersede 传播标为
+    // 待核实。精确到"哪一次引用/哪一行"，不是整份文档级模糊警示；每条
+    // stale entry 独立一行，不合并成一句笼统提示。
+    var derivedStaleHtml = '';
+    if (b.derived_stale && b.derived_stale.length) {
+      derivedStaleHtml = '<div style="margin:14px 0;padding:10px 14px;border-left:3px solid #b85c3c;background:var(--surface-solid);">' +
+        '<div style="font-size:11px;color:#b85c3c;margin-bottom:6px;">⚠️ 待核实（' + b.derived_stale.length + '）：</div>' +
+        '<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.8;">' +
+        b.derived_stale.map(function(e) {
+          var where = (e.precision === 'paragraph' && String(e.location || '').indexOf('line:') === 0)
+            ? ('第 ' + String(e.location).slice(5) + ' 行')
+            : ('引用行为：' + esc(e.location || '未知'));
+          return '<li>' + where + ' 引用的内容已被 <a href="#" data-bucket-id="' + escAttr(e.stale_by) +
+            '" onclick="showDetail(this.dataset.bucketId);return false" style="color:var(--accent);text-decoration:underline;">' +
+            esc(e.stale_by) + '</a> 取代（' + esc(e.supersede_type || '') + '）</li>';
+        }).join('') +
+        '</ul></div>';
+    }
     content.innerHTML =
       '<h2>' + esc(meta.name || id) + firstBadge + '</h2>' +
       whyHtml +
@@ -4640,6 +4658,7 @@ async function showDetail(id) {
         triggerHtml +
       '</div>' +
       triggeredFeelsHtml +
+      derivedStaleHtml +
       '<div class="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketPin(this.dataset.bucketId)" class="icon-btn">' + (meta.pinned ? '<i data-lucide="pin-off"></i> 取消钉选' : '<i data-lucide="pin"></i> 钉选') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketAnchor(this.dataset.bucketId)" class="icon-btn" title="anchor = 坐标系，不主动浮现，上限 ' + _anchorLimitCache + '">' + (meta.anchor ? '<i data-lucide="anchor"></i> 释放 anchor' : '<i data-lucide="anchor"></i> 设为 anchor') + '</button>' +
