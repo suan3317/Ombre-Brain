@@ -28,7 +28,7 @@ tools/hold/core.py — hold 普通存入分支（含自动合并）
 import asyncio
 
 from .. import _runtime as rt
-from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
+from .._common import merge_or_create, check_duplicate_for, check_plan_resolution, resolve_citations
 
 
 async def store_core(
@@ -41,6 +41,7 @@ async def store_core(
     meaning: str = "",
     media: list | None = None,
     test_data: bool = False,
+    cited: str = "",
 ) -> str:
     metadata_fallback = False
     try:
@@ -91,6 +92,15 @@ async def store_core(
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
         asyncio.create_task(check_duplicate_for(result_name, content))
+    else:
+        # v3 Commit B：hold 向既有桶追加是设计定稿"字段白名单"里的强信号
+        # 之一（跟 trace.meaning_append、citation_credit 同级）——只有 hold
+        # 的原文拼接合并算数，grow 的 LLM 压缩合并不算（见 store_core 上面
+        # merge_or_create(raw_merge=True, source_tool="hold") 调用，这个分支
+        # 只会在 hold 走到这里时触发）。
+        asyncio.create_task(rt.bucket_mgr.record_strong_signal(result_name, kind="hold_append"))
+    if cited:
+        asyncio.create_task(resolve_citations(cited, source=result_name, location="hold"))
     result = f"{action}{result_name} {','.join(str(d) for d in domain if d is not None)}"
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"

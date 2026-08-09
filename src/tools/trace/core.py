@@ -32,7 +32,7 @@ from typing import Optional
 from memory_messages import resolved_hint
 from utils import parse_bool
 from .. import _runtime as rt
-from .._common import check_content_size, check_metadata_size, check_pinned_quota
+from .._common import check_content_size, check_metadata_size, check_pinned_quota, resolve_citations
 
 
 async def trace_core(
@@ -59,6 +59,7 @@ async def trace_core(
     hard_delete: Optional[bool] = False,
     delete_reason: Optional[str] = "",
     seed: Optional[int] = -1,
+    cited: Optional[str] = "",
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -91,6 +92,9 @@ async def trace_core(
         dont_surface = -1
     if seed is None:
         seed = -1
+    if cited is None:
+        cited = ""
+    cited = str(cited).strip()
     if why_remembered is None:
         why_remembered = ""
     if meaning_append is None:
@@ -260,6 +264,13 @@ async def trace_core(
         updates["media"] = media_replace
 
     if not updates:
+        # cited 可以是本次 trace() 调用唯一想做的事（"什么都没改，只是想标记
+        # 这条记忆被用到了"）——不该被"没有任何字段需要修改"挡掉。
+        if cited:
+            recorded = await resolve_citations(cited, source=bucket_id, location="trace")
+            if recorded:
+                return f"已记引用: {', '.join(recorded)}"
+            return "没有成功记录任何引用（bucket_id 不存在或记账失败）。"
         return "没有任何字段需要修改。"
 
     # --- plan 桶：status / content 改变时追加 change_log ---
@@ -279,6 +290,17 @@ async def trace_core(
     success = await rt.bucket_mgr.update(bucket_id, **updates)
     if not success:
         return f"修改失败: {bucket_id}"
+
+    # v3 Commit B：trace.meaning_append 是设计定稿"字段白名单"里的强信号之一
+    # （跟 hold 追加、citation_credit 同级）。这里精确判断"这次调用是否真的
+    # 改了 meaning"，不是"trace 这个工具本身"——同一次 trace() 调用如果只改了
+    # resolved/pinned 之类控制面字段，updates 里不会有 meaning_append，不触发。
+    if "meaning_append" in updates:
+        await rt.bucket_mgr.record_strong_signal(bucket_id, kind="meaning_append")
+
+    cited_recorded: list[str] = []
+    if cited:
+        cited_recorded = await resolve_citations(cited, source=bucket_id, location="trace")
 
     # 注意：bucket_mgr.update() 在 "content" in kwargs 时已经内部调用
     # update(content=...) 会投递 embedding outbox（见 bucket_manager.py），这里不需要
@@ -324,4 +346,6 @@ async def trace_core(
             changed += " → 已取消隐藏，重新参与浮现"
     if cascaded:
         changed += f" → 同步把 {len(cascaded)} 个关联事件桶也标为已放下（{', '.join(cascaded)}）"
+    if cited_recorded:
+        changed += (", " if changed else "") + f"cited={','.join(cited_recorded)}"
     return f"已修改记忆桶 {bucket_id}: {changed}"

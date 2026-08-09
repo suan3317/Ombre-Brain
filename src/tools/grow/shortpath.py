@@ -24,10 +24,10 @@ import asyncio
 import uuid
 
 from .. import _runtime as rt
-from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
+from .._common import merge_or_create, check_duplicate_for, check_plan_resolution, resolve_citations
 
 
-async def grow_shortpath(content: str) -> str:
+async def grow_shortpath(content: str, cited: str = "") -> str:
     rt.logger.info(f"grow short-content fast path: {len(content.strip())} chars")
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -55,6 +55,8 @@ async def grow_shortpath(content: str) -> str:
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
         asyncio.create_task(check_duplicate_for(result_name, content.strip()))
+    if cited:
+        asyncio.create_task(resolve_citations(cited, source=result_name, location="grow_shortpath"))
     result = (
         "短内容已按 hold 路径保存为单条记忆，没有拆分。\n"
         f"{action} → {result_name} | "

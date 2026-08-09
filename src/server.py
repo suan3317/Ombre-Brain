@@ -67,6 +67,7 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools._common import resolve_citations as _resolve_citations
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -601,14 +602,15 @@ async def hold(
     meaning: Optional[str] = "",
     media: Optional[list] = None,
     test_data: Optional[bool] = False,
+    cited: Optional[str] = "",
 ) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。meaning=可选,这条记忆为什么值得被想起——不是摘要,是我自己的话,只在真正觉得有重量时才写,不必每次都写。每次传入的是新增的一条,系统自动追加到该桶的 meaning 列表,不会覆盖已有的(同一条记忆可能在不同时刻被反复触动)。media=可选,本次要新增的媒体引用列表,每项至少含 path,如 [{"path": "...", "title": "...", "type": "image", "note": "..."}]；同样是追加,不覆盖已有 media；只存引用,不解析/不存储文件本身。"""
+    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。meaning=可选,这条记忆为什么值得被想起——不是摘要,是我自己的话,只在真正觉得有重量时才写,不必每次都写。每次传入的是新增的一条,系统自动追加到该桶的 meaning 列表,不会覆盖已有的(同一条记忆可能在不同时刻被反复触动)。media=可选,本次要新增的媒体引用列表,每项至少含 path,如 [{"path": "...", "title": "...", "type": "image", "note": "..."}]；同样是追加,不覆盖已有 media；只存引用,不解析/不存储文件本身。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次)；只在真的用上了才传,不要每次都带。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, tags=tags, importance=importance,
             pinned=pinned, feel=feel, source_bucket=source_bucket,
             valence=valence, arousal=arousal, why_remembered=why_remembered,
-            meaning=meaning, media=media, test_data=test_data,
+            meaning=meaning, media=media, test_data=test_data, cited=cited,
         ),
         op="hold",
         args={
@@ -618,19 +620,20 @@ async def hold(
             "why_len": len(why_remembered or ""), "meaning_len": len(meaning or ""),
             "media_count": len(media or []),
             "test_data": bool(test_data),
+            "cited": cited,
         },
     )
 
 
 @mcp.tool(structured_output=False)
-async def grow(content: str = "", items: Optional[list] = None) -> str:
+async def grow(content: str = "", items: Optional[list] = None, cited: Optional[str] = "") -> str:
     """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
 
-    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。"""
+    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次整理输出(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。"""
     return await _with_notice(
-        _t_grow.dispatch(content, items=items),
+        _t_grow.dispatch(content, items=items, cited=cited),
         op="grow",
-        args={"content_len": len(content or ""), "items": len(items or [])},
+        args={"content_len": len(content or ""), "items": len(items or []), "cited": cited},
     )
 
 
@@ -659,8 +662,9 @@ async def trace(
     hard_delete: Optional[bool] = False,
     delete_reason: Optional[str] = "",
     seed: Optional[int] = -1,
+    cited: Optional[str] = "",
 ) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。只传需要修改的字段,-1 或空串表示不改。"""
+    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -671,7 +675,7 @@ async def trace(
             meaning_append=meaning_append, meaning_replace=meaning_replace,
             media_append=media_append, media_replace=media_replace,
             hard_delete=hard_delete, delete_reason=delete_reason,
-            seed=seed,
+            seed=seed, cited=cited,
         ),
         op="trace",
         args={
@@ -682,6 +686,7 @@ async def trace(
             "weight": weight, "dont_surface": dont_surface,
             "why_len": len(why_remembered or ""),
             "meaning_append_len": len(meaning_append or ""),
+            "cited": cited,
             "meaning_replace_count": len(meaning_replace or []),
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
@@ -869,7 +874,7 @@ def _fz_safe(name: str) -> str:
     return os.path.join(_fz_root(), *parts)
 
 
-async def _fz_save(name: str, content: str, append: bool) -> str:
+async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> str:
     path = _fz_safe(name)
     data = content or ""
     if len(data.encode("utf-8")) > _FZ_MAX_BYTES:
@@ -882,7 +887,14 @@ async def _fz_save(name: str, content: str, append: bool) -> str:
         f.write(data)
     size = os.path.getsize(path)
     verb = "追加到" if (append and existed) else ("覆盖" if existed else "创建")
-    return f"已{verb} files/{name} (当前 {size} 字节)。"
+    result = f"已{verb} files/{name} (当前 {size} 字节)。"
+    if cited:
+        # v3 Commit B：file_save 没有 bucket_id 可当 source，用文件路径本身
+        # 标识"是这份文件用到了这些记忆"。
+        recorded = await _resolve_citations(cited, source=f"file:{name}", location="file_save")
+        if recorded:
+            result += f" 已记引用: {','.join(recorded)}。"
+    return result
 
 
 async def _fz_read(name: str, offset: int) -> str:
@@ -954,12 +966,13 @@ async def file_save(
     name: str,
     content: str,
     append: Optional[bool] = False,
+    cited: Optional[str] = "",
 ) -> str:
-    """file_save:文件区存文件(save file to file zone)。写入日记 diary、交接文件 handoff、留言板 message board、文档 document。name=文件名,可带一层子文件夹如 diary/20260702.md,建议 .md 后缀(自动随 GitHub 备份)。append=True 在文件末尾追加(留言板用),默认覆盖写。单文件上限 2MB。"""
+    """file_save:文件区存文件(save file to file zone)。写入日记 diary、交接文件 handoff、留言板 message board、文档 document。name=文件名,可带一层子文件夹如 diary/20260702.md,建议 .md 后缀(自动随 GitHub 备份)。append=True 在文件末尾追加(留言板用),默认覆盖写。单文件上限 2MB。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了这份文件的内容(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。"""
     return await _with_notice(
-        _fz_save(name, content, bool(append)),
+        _fz_save(name, content, bool(append), cited or ""),
         op="file_save",
-        args={"name": name, "content_len": len(content or ""), "append": bool(append)},
+        args={"name": name, "content_len": len(content or ""), "append": bool(append), "cited": cited},
     )
 
 

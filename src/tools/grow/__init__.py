@@ -27,8 +27,9 @@ from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
 
 
-async def dispatch(content: str = "", items: Optional[list] = None) -> str:
+async def dispatch(content: str = "", items: Optional[list] = None, cited: Optional[str] = "") -> str:
     await rt.decay_engine.ensure_started()
+    cited = "" if cited is None else str(cited).strip()
 
     # 预拆分模式：上层 AI 已拆好 N 条最终正文 → 逐字入库，跳过 digest 的二次改写。
     # 传了 items（非空列表）即走此路；不传则行为与旧版完全一致（向后兼容）。
@@ -36,7 +37,7 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         err = check_grow_items_payload(items)
         if err:
             return err
-        return await grow_items(items)
+        return await grow_items(items, cited=cited)
 
     if not content or not content.strip():
         return "内容为空，无法整理。"
@@ -46,5 +47,5 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
         return err
 
     if len(content.strip()) < 30:
-        return await grow_shortpath(content)
-    return await grow_core(content)
+        return await grow_shortpath(content, cited=cited)
+    return await grow_core(content, cited=cited)

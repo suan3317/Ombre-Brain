@@ -34,10 +34,11 @@ from .._common import (
     check_grow_items_payload,
     check_duplicate_for,
     check_plan_resolution,
+    resolve_citations,
 )
 
 
-async def grow_core(content: str) -> str:
+async def grow_core(content: str, cited: str = "") -> str:
     try:
         items = await rt.dehydrator.digest(content)
     except Exception as e:
@@ -98,13 +99,18 @@ async def grow_core(content: str) -> str:
             results.append(f"⚠️{item.get('name', '?')}")
 
     asyncio.create_task(check_plan_resolution(content))
+    if cited:
+        # v3 Commit B：一次 grow() 调用可能拆成多条桶，cited 是"这整次输出
+        # 用到了哪些既有记忆"，不属于批次里某一条具体的桶——用 batch_id
+        # 当 source，不挑某个 result_name 代表整批。
+        asyncio.create_task(resolve_citations(cited, source=f"grow_batch:{batch_id}", location="grow"))
     summary = f"{len(items)}条|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
     return summary
 
 
-async def grow_items(items: list) -> str:
+async def grow_items(items: list, cited: str = "") -> str:
     """预拆分模式：上层 AI 已把长文拆成 N 条最终正文，直接逐字入库。
 
     与 grow_core 的关键差别（issue 的诉求）：
@@ -184,6 +190,8 @@ async def grow_items(items: list) -> str:
             results.append("⚠️")
 
     asyncio.create_task(check_plan_resolution("\n".join(clean)))
+    if cited:
+        asyncio.create_task(resolve_citations(cited, source=f"grow_batch:{batch_id}", location="grow"))
     summary = f"{len(clean)}条(预拆分·逐字)|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"

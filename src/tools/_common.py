@@ -667,6 +667,26 @@ async def _merge_or_create_inner(
             except Exception as e:
                 rt.logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
+    # v3 Commit B：反向匹配。走到这里说明没有合并（分数不够 / 目标桶
+    # pinned/protected / 合并本身失败）——如果 search() 确实找到过一个有
+    # 一定相关性的候选，按分数分两档记账，永不直接加权、永不阻断新建：
+    #   >= near_verbatim_min（默认60，低于 merge_threshold 但足够"近逐字"）
+    #     → 标记候选桶 used_inferred，清零其 semantic_unused_streak。
+    #   >= fuzzy_review_min（默认40）→ 只进人工队列，不碰候选桶任何字段。
+    if not test_data and existing:
+        try:
+            candidate = existing[0]
+            candidate_score = candidate.get("score", 0) or 0
+            mgr = rt.bucket_mgr
+            if candidate_score >= mgr.reverse_match_near_verbatim_min:
+                await mgr.mark_used_inferred(candidate["id"])
+            elif candidate_score >= mgr.reverse_match_fuzzy_review_min:
+                await mgr.queue_fuzzy_review_candidate(
+                    candidate["id"], score=candidate_score, preview=content,
+                )
+        except Exception as e:
+            rt.logger.warning(f"反向匹配记账失败(不影响新建): {e}")
+
     bucket_id = await rt.bucket_mgr.create(
         content=content,
         tags=tags,
@@ -717,6 +737,42 @@ async def _merge_or_create_inner(
         f"embedding_state={embedding_state}"
     )
     return bucket_id, False, embed_warn
+
+
+async def resolve_citations(cited, *, source: str, location: str = "") -> list[str]:
+    """v3 Commit B：把 hold/trace/file_save/grow 的可选 ``cited`` 参数解析成
+    一组 record_citation() 调用。设计定稿把"该记忆实质改变了本次输出"这个
+    语义门槛交给调用方（模型）判断——传了 cited 就是在断言这一点，这里不
+    做二次校验。
+
+    "同轮至多一次"：本次调用内对同一 target 先用 dict.fromkeys 去重（保序）
+    再各调一次 record_citation()；跨调用的重复由 record_citation() 自己的
+    48h 滚动窗口节流。
+
+    cited 可以是逗号分隔字符串（跟 tags/domain 同款入参风格）或字符串列表。
+    不存在的 bucket_id / 记账失败静默跳过，不阻断调用方的主流程——引用
+    记账是旁路（citation_event/citation_credit），不是硬依赖。
+
+    Returns: 实际记成功的 target bucket_id 列表（调用方可选用于响应文案）。
+    """
+    if not cited:
+        return []
+    if isinstance(cited, str):
+        ids = [c.strip() for c in cited.split(",") if c.strip()]
+    elif isinstance(cited, (list, tuple)):
+        ids = [str(c).strip() for c in cited if str(c).strip()]
+    else:
+        return []
+
+    recorded: list[str] = []
+    for bucket_id in dict.fromkeys(ids):
+        try:
+            result = await rt.bucket_mgr.record_citation(bucket_id, source=source, location=location)
+            if result.get("ok"):
+                recorded.append(bucket_id)
+        except Exception as e:
+            rt.logger.warning(f"引用记账失败(不影响主流程) source={source} target={bucket_id}: {e}")
+    return recorded
 
 
 async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: float = _DUP_DEFAULT_THRESHOLD) -> None:

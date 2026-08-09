@@ -25,9 +25,11 @@ tools/hold/feel.py — hold(feel=True) 分支
 ========================================
 """
 
+import asyncio
 from datetime import datetime
 
 from .. import _runtime as rt
+from .._common import resolve_citations
 
 
 def _build_feel_id(valence: float) -> str:
@@ -50,6 +52,7 @@ async def store_feel(
     why_remembered: str,
     meaning: str = "",
     media: list | None = None,
+    cited: str = "",
 ) -> str:
     feel_valence = valence if 0 <= valence <= 1 else 0.5
     feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
@@ -79,4 +82,6 @@ async def store_feel(
             await rt.bucket_mgr.update(source_bucket.strip(), **update_kwargs)
         except Exception as e:
             rt.logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
+    if cited:
+        asyncio.create_task(resolve_citations(cited, source=bucket_id, location="hold_feel"))
     return f"🫧feel→{bucket_id}"

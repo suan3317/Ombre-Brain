@@ -34,7 +34,7 @@ import math
 import shutil
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -135,6 +135,22 @@ ANCHOR_LIMIT_DEFAULT = 24         # 返修单一号改动五：anchor 上限默�
 # 是户主逐条圈定的独立上限。
 SEED_LIMIT_DEFAULT = 30
 
+# v3 Commit B：信号体系。
+# citation_credit 同桶滚动窗口——设计定稿已定案的数字（"K 的窗口跨度"），
+# 不是待回放的未定参数，故不做 config 项，跟 decay 模块里 _SHORT_TERM_DAYS
+# 一类"已拍板的设计常数"同等对待。
+_CITATION_CREDIT_WINDOW_HOURS = 48.0
+# 反向匹配（近逐字 / 模糊语义候选）两条分界线：设计文档只给了"近逐字"和
+# "模糊语义"两个定性描述，没给数字——这两个是本次施工需要落地才能跑起来的
+# 未定参数，做成 config.reverse_match.* 可调项，不写死。初值理由：
+#   near_verbatim_min=60——比 merge_threshold(75)低但不会离太远，只圈"确实
+#     很像但没到该合并"的候选，不会把普通话题重叠也算进来。
+#   fuzzy_review_min=40——低于这个基本认为不相关，不值得进人工队列。
+_DEFAULT_REVERSE_MATCH_NEAR_VERBATIM_MIN = 60.0
+_DEFAULT_REVERSE_MATCH_FUZZY_REVIEW_MIN = 40.0
+# 负反馈 streak 适用范围：importance<6 且非 pinned/protected/permanent/anchor/seed。
+_NEGATIVE_FEEDBACK_IMPORTANCE_MAX = 6
+
 # --- 字段截断长度（避免 frontmatter 肨胀）---
 _SOURCE_TOOL_MAX = 32
 _GROW_BATCH_ID_MAX = 64
@@ -188,6 +204,41 @@ _LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文�
 
 # topic/emotion/time/touch 四个评分维度的纯函数 + 权重常量已拆到
 # bucket_scoring.py（search() 和 _calc_*_score 兼容 wrapper 都从那边导入）。
+
+
+def derive_provenance_edges(citation_events: list[dict]) -> list[dict]:
+    """把 citation_event 流聚合成 (source,target,location) 幂等边。
+
+    v3 Commit B：provenance edge 不单独持久化——同一个 (source,target,
+    location) 出现 N 次，聚合结果就是 event_count=N 的一条边，first_seen/
+    last_seen 取最早/最晚——纯函数，天然幂等，不会跟事件日志本身漂移。
+    ISO 8601 时间戳按字符串比较等价于按时间比较，不需要先解析。
+
+    不做什么：不判定这条边"该不该"存在（citation_event 已经决定了），
+    不做任何 I/O。
+    """
+    edges: dict[tuple, dict] = {}
+    for event in citation_events:
+        payload = event.get("payload") or {}
+        key = (
+            str(payload.get("source", "")),
+            str(payload.get("target", "")),
+            str(payload.get("location", "")),
+        )
+        at = str(payload.get("at") or "")
+        edge = edges.get(key)
+        if edge is None:
+            edges[key] = {
+                "source": key[0], "target": key[1], "location": key[2],
+                "first_seen": at, "last_seen": at, "event_count": 1,
+            }
+            continue
+        edge["event_count"] += 1
+        if at and (not edge["first_seen"] or at < edge["first_seen"]):
+            edge["first_seen"] = at
+        if at and (not edge["last_seen"] or at > edge["last_seen"]):
+            edge["last_seen"] = at
+    return list(edges.values())
 
 
 def _clamp01(value, default: float) -> float:
@@ -281,6 +332,22 @@ class BucketManager:
             self.base_dir, "_ledger", "events.jsonl"
         )
         self.ledger_mirror = LedgerMirror(ledger_path)
+        # v3 Commit B：citation_event / citation_credit / StrongSignal /
+        # FuzzyReviewQueued 独立于桶变更 ledger 的一份 append-only 日志——
+        # 语义不同（"哪条记忆影响了这次输出"，不是"哪个字段被改了"），混进
+        # events.jsonl 会让两种查询互相污染。provenance edge 不单独持久化，
+        # 是 derive_provenance_edges() 对这份日志的只读聚合。
+        citation_ledger_path = config.get("citation_ledger_path") or os.path.join(
+            self.base_dir, "_ledger", "citations.jsonl"
+        )
+        self.citation_ledger = LedgerMirror(citation_ledger_path)
+        reverse_match_cfg = config.get("reverse_match", {})
+        self.reverse_match_near_verbatim_min = reverse_match_cfg.get(
+            "near_verbatim_min", _DEFAULT_REVERSE_MATCH_NEAR_VERBATIM_MIN
+        )
+        self.reverse_match_fuzzy_review_min = reverse_match_cfg.get(
+            "fuzzy_review_min", _DEFAULT_REVERSE_MATCH_FUZZY_REVIEW_MIN
+        )
 
         # BM25 稀疏索引（写操作后脏标记，search() 时懒重建）
         self._bm25: "_BM25Index | None" = _BM25Index() if _BM25Index is not None else None
@@ -1181,6 +1248,7 @@ class BucketManager:
             "first_of_kind",
             "anchor",
             "seed",
+            "used_inferred",
         ):
             if field in kwargs:
                 kwargs[field] = parse_bool(kwargs[field])
@@ -1301,6 +1369,15 @@ class BucketManager:
                   # 上限校验在下面 seed 分支里做，与 anchor 同一套写法；
                   # set_seed() 是首选入口，这里同样只是兜底。
                   "seed",
+                  # v3 Commit B 新增两个信号体系字段：
+                  # used_inferred——反向匹配自动层标记"被隐式用到"，bool，
+                  # 无上限校验，直接透传（False 时同样直接写 False，不像
+                  # anchor/seed 那样删字段——这里保留显式 False 有意义，
+                  # 表示"检查过，确实没被隐式用到"，不是"从没被检查过"）。
+                  # semantic_unused_streak——负反馈计数器，int，下面单独
+                  # elif 分支做安全转换（不能走 bool 归一化）。
+                  "used_inferred",
+                  "semantic_unused_streak",
                   # iter 2.0 来源追踪字段：
                   # source_tool / grow_batch_id 一般在 create() 时定型，
                   # 这里的透传只服务于迁移脚本（给历史桶补字段）。
@@ -1356,6 +1433,11 @@ class BucketManager:
                         post["seed"] = True
                     else:
                         post.metadata.pop("seed", None)
+                elif k == "semantic_unused_streak":
+                    try:
+                        post["semantic_unused_streak"] = max(0, int(kwargs[k]))
+                    except (TypeError, ValueError):
+                        pass  # 坏值不写，保留原值，不让脏输入把计数器炸出异常
                 else:
                     if kwargs[k] is None:
                         # None = 明确删除该 frontmatter 字段（用于 anchor release 清理临时字段）
@@ -2037,6 +2119,183 @@ class BucketManager:
         seeds = [b for b in all_b if b.get("metadata", {}).get("seed")]
         seeds.sort(key=lambda b: b.get("metadata", {}).get("created", ""))
         return seeds
+
+    # ---------------------------------------------------------
+    # v3 Commit B: 信号体系（citation / 强信号 / 反向匹配 / 负反馈记账）
+    # ---------------------------------------------------------
+    # 字段白名单（设计定稿"字段白名单(G)"）：强信号仅三类，彼此同级——
+    # hold 向既有桶追加(hold/core.py 调 record_strong_signal)、
+    # trace.meaning_append(trace/core.py 调 record_strong_signal)、
+    # citation_credit(record_citation() 内部触发)。一切控制面操作
+    # （resolved/digested/pinned/dont_surface/delete/status/weight/name/
+    # domain/tags/importance/content 纠错）零正向信号——本节任何方法都
+    # 不会被那些路径调用，状态维护和记忆使用彻底分家。
+    #
+    # 本期不做的事（留给 Commit C）：这里只记录"发生过强信号/负反馈事件"，
+    # 不把它们接进 decay_engine 的打分公式——last_meaningful_at 字段与
+    # activity_bonus/retention 双轴是 Commit C 的施工范围，本节只产出
+    # Commit C 要读的事件流与计数器。
+    async def record_citation(self, target_bucket_id: str, *, source: str, location: str = "") -> dict:
+        """记一次引用：target 桶在 source 语境下被引用，且实质改变了本次输出。
+
+        citation_event 永不封顶，每次调用都追加一条；citation_credit 有节流：
+        同一 target 桶滚动 48h 至多一次（K 的窗口跨度，设计定稿已定案，不是
+        待回放参数）。"同轮至多一次"由调用方保证——同一次工具调用内对同一
+        target 去重后再调本方法（见 tools/_common.py resolve_citations）。
+
+        provenance edge（source,target,location 幂等关系，挂 first_seen/
+        last_seen/event_count）不单独持久化，是 derive_provenance_edges() 对
+        citation_event 日志的只读聚合——天然幂等，不会跟事件日志本身漂移。
+
+        Returns: {"ok", "target", "credited", "error"(可选)}
+        """
+        bucket = await self.get(target_bucket_id)
+        if not bucket:
+            return {"ok": False, "error": "bucket not found", "target": target_bucket_id, "credited": False}
+
+        now = datetime.now()
+        payload = {"source": source, "target": target_bucket_id, "location": location or ""}
+        self._record_citation_ledger_event("CitationEvent", target_bucket_id, payload, now)
+
+        credited = not self._citation_credited_within_window(target_bucket_id, now)
+        if credited:
+            self._record_citation_ledger_event("CitationCredit", target_bucket_id, payload, now)
+            await self.record_strong_signal(target_bucket_id, kind="citation_credit")
+
+        return {"ok": True, "target": target_bucket_id, "credited": credited}
+
+    def _record_citation_ledger_event(
+        self, event_type: str, bucket_id: str, payload: dict, at: datetime
+    ) -> None:
+        try:
+            self.citation_ledger.append_event(
+                event_type=event_type,
+                trace_id=bucket_id,
+                trace_kind="citation",
+                payload={**payload, "at": at.isoformat()},
+            )
+        except Exception as exc:
+            logger.warning(f"citation ledger record failed for {event_type}:{bucket_id}: {exc}")
+
+    def _citation_credited_within_window(
+        self, bucket_id: str, now: datetime, hours: float = _CITATION_CREDIT_WINDOW_HOURS
+    ) -> bool:
+        cutoff = now - timedelta(hours=hours)
+        for event in self.citation_ledger.iter_events():
+            if event.get("event_type") != "CitationCredit" or event.get("trace_id") != bucket_id:
+                continue
+            try:
+                at = parse_iso_datetime((event.get("payload") or {}).get("at"))
+            except (ValueError, TypeError):
+                continue
+            if at >= cutoff:
+                return True
+        return False
+
+    async def list_citation_events(self, target_bucket_id: str | None = None) -> list[dict]:
+        """列出 citation_event 审计日志（只读，供 provenance 聚合/人工核对用）。"""
+        events = [
+            e for e in self.citation_ledger.iter_events()
+            if e.get("event_type") == "CitationEvent"
+        ]
+        if target_bucket_id:
+            events = [e for e in events if e.get("trace_id") == target_bucket_id]
+        return events
+
+    async def provenance_edges(self, target_bucket_id: str | None = None) -> list[dict]:
+        """target 桶的 provenance edge 聚合视图（幂等，见 derive_provenance_edges）。"""
+        events = await self.list_citation_events(target_bucket_id)
+        return derive_provenance_edges(events)
+
+    async def record_strong_signal(self, bucket_id: str, *, kind: str) -> None:
+        """强信号发生（hold_append / meaning_append / citation_credit，三者
+        同级）：清零该桶的 semantic_unused_streak。不 touch、不
+        bump_active、不直接加权——这是 Commit C 落地正式 activity_bonus 前，
+        负反馈系统"强信号清零"这一条规则的独立实现。
+        """
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return
+        meta = bucket.get("metadata", {})
+        if int(meta.get("semantic_unused_streak") or 0) != 0:
+            await self.update(bucket_id, semantic_unused_streak=0)
+        try:
+            self.citation_ledger.append_event(
+                event_type="StrongSignal",
+                trace_id=bucket_id,
+                trace_kind="citation",
+                payload={"kind": kind, "at": datetime.now().isoformat()},
+            )
+        except Exception as exc:
+            logger.warning(f"citation ledger strong-signal record failed for {bucket_id}: {exc}")
+
+    async def mark_used_inferred(self, bucket_id: str) -> bool:
+        """反向匹配自动层：近逐字但未达合并阈值的候选——标记该桶"被隐式
+        用到"，清零 semantic_unused_streak。不加权、不 touch、不算三种强
+        信号之一（设计原话"强信号或 used_inferred 清零"并列陈述两条独立
+        清零路径，故这里不调用 record_strong_signal）。
+        """
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return False
+        updates: dict = {"used_inferred": True}
+        meta = bucket.get("metadata", {})
+        if int(meta.get("semantic_unused_streak") or 0) != 0:
+            updates["semantic_unused_streak"] = 0
+        return await self.update(bucket_id, **updates)
+
+    async def queue_fuzzy_review_candidate(
+        self, bucket_id: str, *, score: float, preview: str
+    ) -> None:
+        """模糊语义候选（近逐字阈值以下、仍有相关性）——只进人工队列，
+        不自动处理、不碰桶本身任何字段。"""
+        try:
+            self.citation_ledger.append_event(
+                event_type="FuzzyReviewQueued",
+                trace_id=bucket_id,
+                trace_kind="citation",
+                payload={"score": score, "preview": (preview or "")[:200], "at": datetime.now().isoformat()},
+            )
+        except Exception as exc:
+            logger.warning(f"fuzzy review queue record failed for {bucket_id}: {exc}")
+
+    async def list_fuzzy_review_queue(self, limit: int = 50) -> list[dict]:
+        """列出待人工复核的模糊语义候选（最新在前）。"""
+        events = [
+            e for e in self.citation_ledger.iter_events()
+            if e.get("event_type") == "FuzzyReviewQueued"
+        ]
+        events.sort(key=lambda e: (e.get("payload") or {}).get("at", ""), reverse=True)
+        return events[:limit]
+
+    async def record_semantic_recall_without_use(self, bucket_id: str) -> None:
+        """负反馈记账：一次纯语义召回（vector_match，非关键词/BM25 命中）
+        对"还没被用上"的桶记一次 streak。适用范围 importance<6 且非
+        pinned/protected/permanent/anchor/seed——重要的、已被保护的桶不该被
+        这套"没用上就扣分"的逻辑碰（设计定稿"适用范围"条款）。
+
+        只计数，不改变检索排序——breath_search 的可达性不受影响；streak
+        接进衰减打分是 Commit C 的事。
+        """
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return
+        meta = bucket.get("metadata", {})
+        try:
+            importance = int(meta.get("importance") or _DEFAULT_IMPORTANCE)
+        except (TypeError, ValueError):
+            importance = _DEFAULT_IMPORTANCE
+        if (
+            importance >= _NEGATIVE_FEEDBACK_IMPORTANCE_MAX
+            or meta.get("pinned")
+            or meta.get("protected")
+            or meta.get("type") == "permanent"
+            or parse_bool(meta.get("anchor"), default=False)
+            or parse_bool(meta.get("seed"), default=False)
+        ):
+            return
+        current = int(meta.get("semantic_unused_streak") or 0)
+        await self.update(bucket_id, semantic_unused_streak=current + 1)
 
     # ---------------------------------------------------------
     # List all buckets

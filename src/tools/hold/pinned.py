@@ -22,8 +22,10 @@ permanent 目录，不衰减、不会被合并掉。
 ========================================
 """
 
+import asyncio
+
 from .. import _runtime as rt
-from .._common import check_pinned_quota
+from .._common import check_pinned_quota, resolve_citations
 
 
 async def store_pinned(
@@ -34,6 +36,7 @@ async def store_pinned(
     why_remembered: str,
     meaning: str = "",
     media: list | None = None,
+    cited: str = "",
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -75,4 +78,6 @@ async def store_pinned(
         meaning=meaning,
         media=media,
     )
+    if cited:
+        asyncio.create_task(resolve_citations(cited, source=bucket_id, location="hold_pinned"))
     return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"

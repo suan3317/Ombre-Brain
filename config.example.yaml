@@ -214,6 +214,15 @@ seed:
                                    # 高权重桶不需要更多分）。约 10 次额外真实激活能让低 importance 种子
                                    # 的分数从 floor 翻一倍左右
 
+# 记忆动力学二期 Commit B：反向匹配两条分界线。设计文档只给了"近逐字"和
+# "模糊语义候选"两个定性描述，没给数字——保守初值，未定稿前不写死。
+# 注：citation_credit 的 48 小时滚动窗口是设计定稿已拍板的数字（不是待
+# 回放参数），代码里按硬编码常量处理，不在这里开 config 项。
+reverse_match:
+  near_verbatim_min: 60           # 分数(0-100，跟 merge_threshold 同量纲)达到此线、但未达 merge_threshold
+                                   # (默认75)——判定"近逐字"，自动标记候选桶 used_inferred，不加权
+  fuzzy_review_min: 40            # 达到此线、未达 near_verbatim_min——判定"模糊语义候选"，只进人工队列
+
 # --- Limits / 边界限制（iter 1.6 §5）---
 # Single-bucket size cap and pinned bucket quota. Exceeding either is
 # rejected at hold/grow/trace boundaries with a Chinese hint string.

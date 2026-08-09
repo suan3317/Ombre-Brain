@@ -63,6 +63,15 @@ def _can_surface_search(bucket: dict) -> bool:
     return _SURFACE_POLICY.evaluate_bucket(bucket, mode="search").allowed
 
 
+async def _record_semantic_recall_streaks(bucket_ids: list) -> None:
+    """v3 Commit B：后台记负反馈 streak，逐条失败不影响其他/不影响响应。"""
+    for bucket_id in bucket_ids:
+        try:
+            await rt.bucket_mgr.record_semantic_recall_without_use(bucket_id)
+        except Exception as e:
+            rt.logger.warning(f"负反馈 streak 记录失败(不影响浮现) bucket={bucket_id}: {e}")
+
+
 async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
     """Run the vector query once and return scores plus an optional notice."""
     engine = rt.embedding_engine
@@ -167,6 +176,7 @@ async def surface_search(
     budget_blocked = False
     budget_blocked_count = 0
     touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
+    semantic_recall_ids: list = []  # v3 Commit B：纯语义命中(vector_match)才计负反馈 streak
     for i, bucket in enumerate(matches):
         meta = bucket["metadata"]
         bucket_id = bucket["id"]
@@ -185,11 +195,19 @@ async def surface_search(
         results.append(rendered)
         token_used += entry_tokens
         touched_ids.append(bucket_id)
+        if bucket.get("vector_match"):
+            semantic_recall_ids.append(bucket_id)
 
     # 性能 P2：把 touch 移出响应路径 —— 浮现完的桶在后台一次性更新激活，
     # ripple=False 跳过读全库的时间涟漪。响应不再等这些写盘/涟漪。
     if touched_ids:
         asyncio.create_task(rt.bucket_mgr.touch_many(touched_ids, ripple=False))
+    # v3 Commit B：负反馈只计 semantic 召回(vector_match)，random/rotation/
+    # 关键词命中不算——这里只对纯语义命中的子集记 streak，不影响上面的
+    # touch_many（那个是"最近活跃"时间戳，跟负反馈计数是两件事）。只加计数，
+    # 不改排序/不影响 breath_search 本身的可达性。
+    if semantic_recall_ids:
+        asyncio.create_task(_record_semantic_recall_streaks(semantic_recall_ids))
 
     # --- 检索结果 < 3 时 40% 概率随机浮现 ---
     if not budget_blocked and len(matches) < min(3, max_results) and random.random() < 0.4:
