@@ -663,8 +663,9 @@ async def trace(
     delete_reason: Optional[str] = "",
     seed: Optional[int] = -1,
     cited: Optional[str] = "",
+    event_at: Optional[str] = "",
 ) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。只传需要修改的字段,-1 或空串表示不改。"""
+    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传\"\\clear\"清空。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -675,7 +676,7 @@ async def trace(
             meaning_append=meaning_append, meaning_replace=meaning_replace,
             media_append=media_append, media_replace=media_replace,
             hard_delete=hard_delete, delete_reason=delete_reason,
-            seed=seed, cited=cited,
+            seed=seed, cited=cited, event_at=event_at,
         ),
         op="trace",
         args={
@@ -691,6 +692,7 @@ async def trace(
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
             "seed": seed,
+            "event_at": event_at,
         },
     )
 

@@ -22,7 +22,7 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      tags, resolved, pinned, digested, content, delete,
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
-                     seed) → str
+                     seed, cited, event_at) → str
 ========================================
 """
 
@@ -30,7 +30,7 @@ import math
 from typing import Optional
 
 from memory_messages import resolved_hint
-from utils import parse_bool
+from utils import parse_bool, parse_iso_datetime
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size, check_pinned_quota, resolve_citations
 
@@ -60,6 +60,7 @@ async def trace_core(
     delete_reason: Optional[str] = "",
     seed: Optional[int] = -1,
     cited: Optional[str] = "",
+    event_at: Optional[str] = "",
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -95,6 +96,9 @@ async def trace_core(
     if cited is None:
         cited = ""
     cited = str(cited).strip()
+    if event_at is None:
+        event_at = ""
+    event_at = str(event_at).strip()
     if why_remembered is None:
         why_remembered = ""
     if meaning_append is None:
@@ -247,6 +251,18 @@ async def trace_core(
                     "请先 trace(bucket_id, seed=0) 释放一条再设新的。"
                 )
         updates["seed"] = bool(seed)
+    if event_at:
+        # v3 Commit C：event_at = 事情发生的时刻，跟 created(记录进入系统
+        # 的时刻)是两回事；只做格式校验，不进 age_decay。\clear 清空该字段
+        # （同 why_remembered 的 \clear 约定）。
+        if event_at == "\\clear":
+            updates["event_at"] = None
+        else:
+            try:
+                parse_iso_datetime(event_at)
+            except (ValueError, TypeError):
+                return f"event_at 不是合法的 ISO 8601 时间：{event_at!r}"
+            updates["event_at"] = event_at
     why_remembered = str(why_remembered).strip()
     if why_remembered == "\\clear":
         updates["why_remembered"] = ""

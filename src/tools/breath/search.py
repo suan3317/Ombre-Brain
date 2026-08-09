@@ -31,10 +31,28 @@ import random
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
+from decay_engine import band_of
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
 _VECTOR_QUERY_TOPK = 50
+
+# v3 Commit C：band 优先级，仅用于"检索排序相邻 band 不可越界"这条定稿
+# 不变量——跟 decay_engine.py 的 band_floor() 是同一个高低顺序，但检索这里
+# 不需要 band_floor() 的绝对分数区间（不重新计算 within-band 分数，只用
+# 稳定排序保序），所以就地定义一个轻量的整数优先级，不依赖 DecayEngine 实例。
+_BAND_PRIORITY = {"high": 2, "mid": 1, "low": 0}
+
+
+def _enforce_band_order(matches: list) -> list:
+    """检索排序相邻 band 不可越界：高 band 结果永远排在中/低 band 之前，
+    band 内部保留 bucket_mgr.search() 自身给出的相关度顺序（稳定排序）。
+    """
+    return sorted(
+        matches,
+        key=lambda b: _BAND_PRIORITY.get(band_of((b.get("metadata") or {}).get("importance")), 0),
+        reverse=True,
+    )
 
 _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
 # 返修单一号改动六:病句清理——"未被截断或摘要"是双重否定式的费解表述，
@@ -169,6 +187,11 @@ async def surface_search(
         and b["metadata"].get("type") not in ("feel", "plan", "letter")
     ]
     matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
+    # v3 Commit C 定稿不变量："检索排序相邻 band 不可越界"——高 band 的结果
+    # 永远排在中/低 band 之前，band 内部保留 bucket_mgr.search() 自身的
+    # 相关度排序（稳定排序，不重新计算 within-band 分数；band 之间不比较
+    # 相关度强弱，只比较 band 高低）。
+    matches = _enforce_band_order(matches)
     matches = matches[:max_results]
 
     results = []

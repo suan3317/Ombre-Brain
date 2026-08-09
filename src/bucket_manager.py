@@ -1378,6 +1378,15 @@ class BucketManager:
                   # elif 分支做安全转换（不能走 bool 归一化）。
                   "used_inferred",
                   "semantic_unused_streak",
+                  # v3 Commit C 新增两个时间语义字段：
+                  # last_meaningful_at——只有 record_strong_signal() 一处
+                  # 写它（这里的透传只服务批量迁移脚本，日常路径不该走这里
+                  # 直接改）。event_at——事情发生的时刻，跟 created(记录进入
+                  # 系统的时刻)是两回事；仅三用途(supersede 时序判断、
+                  # "当时/后来"语义、未来事件新鲜度独立因子)，不进通用
+                  # age_decay，_encoded_age_days()/retention() 不读这个字段。
+                  "last_meaningful_at",
+                  "event_at",
                   # iter 2.0 来源追踪字段：
                   # source_tool / grow_batch_id 一般在 create() 时定型，
                   # 这里的透传只服务于迁移脚本（给历史桶补字段）。
@@ -2209,16 +2218,20 @@ class BucketManager:
 
     async def record_strong_signal(self, bucket_id: str, *, kind: str) -> None:
         """强信号发生（hold_append / meaning_append / citation_credit，三者
-        同级）：清零该桶的 semantic_unused_streak。不 touch、不
-        bump_active、不直接加权——这是 Commit C 落地正式 activity_bonus 前，
-        负反馈系统"强信号清零"这一条规则的独立实现。
+        同级）：清零该桶的 semantic_unused_streak，并推进 last_meaningful_at
+        （v3 Commit C：last_meaningful_at 新建字段，维护操作与 surfaced 均
+        不得触碰它——全仓库唯一写它的地方就是这里）。不 touch、不
+        bump_active、不直接加权，只把"这条记忆刚刚真的被用上了"这件事记下来，
+        供 activity_bonus() 读取。
         """
         bucket = await self.get(bucket_id)
         if not bucket:
             return
         meta = bucket.get("metadata", {})
+        updates: dict = {"last_meaningful_at": now_iso()}
         if int(meta.get("semantic_unused_streak") or 0) != 0:
-            await self.update(bucket_id, semantic_unused_streak=0)
+            updates["semantic_unused_streak"] = 0
+        await self.update(bucket_id, **updates)
         try:
             self.citation_ledger.append_event(
                 event_type="StrongSignal",

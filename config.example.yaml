@@ -203,16 +203,15 @@ surfacing:
 anchor:
   max_count: 24                   # anchor(坐标系桶)数量上限，默认 24；超限时 set_anchor()/update(anchor=True) 拒绝并给出清晰报错
 
-# 记忆动力学二期 Commit A：seed（种子）配置。三个数值均为保守初值，
-# 未定稿前不写死在代码里——按需在这里调，重启生效。
+# 记忆动力学二期 Commit A：seed（种子）配置。保守初值，未定稿前不写死在
+# 代码里——按需在这里调，重启生效。
 seed:
   max_count: 30                   # seed 桶数量上限。施工单定案：K/F/G 三家本期同用 ≤30
-  floor: 3.0                      # calculate_score() 对 seed 桶的硬下限。比归档阈值(decay.threshold
+  floor: 3.0                      # retention() 对 seed 桶的硬下限。比归档阈值(decay.threshold
                                    # 默认 0.3)高一个数量级，但远低于 feel/plan/letter 的固定分 50——
                                    # 不会被误判成快归档的桶，也不会在排序里假装成同等活跃的桶
-  activity_bonus_scale: 0.3       # seed 桶活动信号的小幅加成系数（受 importance 递减约束，宪法推论一：
-                                   # 高权重桶不需要更多分）。约 10 次额外真实激活能让低 importance 种子
-                                   # 的分数从 floor 翻一倍左右
+                                   # （v3 Commit C 起：seed 的 activity_bonus 部分改用下面通用的
+                                   # activity_bonus.* 配置，不再单独有 seed.activity_bonus_scale）
 
 # 记忆动力学二期 Commit B：反向匹配两条分界线。设计文档只给了"近逐字"和
 # "模糊语义候选"两个定性描述，没给数字——保守初值，未定稿前不写死。
@@ -222,6 +221,35 @@ reverse_match:
   near_verbatim_min: 60           # 分数(0-100，跟 merge_threshold 同量纲)达到此线、但未达 merge_threshold
                                    # (默认75)——判定"近逐字"，自动标记候选桶 used_inferred，不加权
   fuzzy_review_min: 40            # 达到此线、未达 near_verbatim_min——判定"模糊语义候选"，只进人工队列
+
+# 记忆动力学二期 Commit C：排序结构（retention + activity_bonus 双轴）。
+# 只服务"排序面"——band 配额浮现、breath 默认浮现排序、检索排序的 band
+# 不可越界约束；归档阈值判定与 Dashboard 活跃度分显示继续用老的
+# decay.*（calculate_score()），本期不切（见 decay_engine.py 顶部说明）。
+band_quota:
+  high: 4                         # importance 8-10。施工单定案 4/4/2，回放数据支持，不是待定参数
+  mid: 4                          # importance 6-7（K 家验收指标：中档当月新桶是否可见）
+  low: 2                          # importance 1-5
+
+retention:
+  grace_lambda_discount: 0.5      # "止衰宽限"——设计定稿只给了"连续5次未使用→取消止衰"这句结论，
+                                   # 没给机制；CC 实现为衰减率打折，触发负反馈前生效。0.5=打对折，
+                                   # 明显更慢但仍在衰减，不是彻底止住（宪法推论三：任何富者愈富闭环
+                                   # 设计都是错的，不能做成事实上的免死金牌）。未定参数，可调
+  import_cohort_windows: []       # 各家自己的批量导入窗口，实例数据不进默认值。格式示例（K 家）：
+                                   #   import_cohort_windows:
+                                   #     - start: "2026-07-06T02:08:37"
+                                   #       end: "2026-07-06T02:33:32"
+                                   #       exempt: ["2026-07-06T03:15:00", "2026-07-06T03:34:00",
+                                   #                "2026-07-06T03:36:00", "2026-07-02T07:47:46"]
+                                   # 窗口内桶的 retention 年龄基准改按窗口结束时刻算，不按各自(可能
+                                   # 是聚集导入产物、不可信)的 created 算；之后仍正常衰减
+
+activity_bonus:
+  half_life_hours: 72.0           # 比 decay.emotion_weights 那套"新鲜度加成"的 36h 半衰期更慢——
+                                   # activity_bonus 承载"最近一次真正被用上"的分量，不该跟"最近浮现
+                                   # 过"一样快消退。未定参数，可调
+  scale: 2.0                      # 配合 importance 递减（宪法推论一）后，量级跟 retention 轴大致可比
 
 # --- Limits / 边界限制（iter 1.6 §5）---
 # Single-bucket size cap and pinned bucket quota. Exceeding either is

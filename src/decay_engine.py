@@ -57,19 +57,119 @@ _SCORE_FEEL = 50.0       # feel / plan / letter 桶固定中分（生命周期�
 # --- v3 Commit A：seed 打分 —— floor 不是冻结（设计定稿推论四）---
 # seed 待遇跟 pinned/permanent 那种"恒 999"的冻结不一样：floor 是硬下限，
 # 不是天花板，活动信号仍能往上加一点（但受 importance 递减约束，宪法推论一
-# "高权重桶不需要更多分"）。这是 Commit C 落地正式 retention/activity_bonus
-# 双轴前的过渡实现——用现有 activation_count 当"活动"代理，超出创建时基线
-# (=1)的部分才算增益。两个数值都是保守初值，不写死：config.seed.floor /
-# config.seed.activity_bonus_scale 可调，未配置时用这里的默认值。
-# 初值理由（PR 说明同步一份）：
-#   floor=3.0——比归档阈值(_DEFAULT_THRESHOLD=0.3)高一个数量级，明确"不会被
-#     误判成快归档的桶"，但远低于 _SCORE_FEEL(50)，不会在排序里假装成"跟
-#     feel/plan/letter 一个量级的活跃桶"。
-#   activity_bonus_scale=0.3——约 10 次额外真实激活能让低 importance 种子的
-#     分数从 floor 翻一倍左右，"小幅"但看得见；importance=10 时递减系数
-#     趋近 0，几乎不再加成。
+# "高权重桶不需要更多分"）。floor 是保守初值，不写死：config.seed.floor
+# 可调，未配置时用这里的默认值。
+# 初值理由：floor=3.0——比归档阈值(_DEFAULT_THRESHOLD=0.3)高一个数量级，
+# 明确"不会被误判成快归档的桶"，但远低于 _SCORE_FEEL(50)，不会在排序里
+# 假装成"跟 feel/plan/letter 一个量级的活跃桶"。
+# v3 Commit C 更新：activity_bonus 部分已改用正式的 activity_bonus()（见
+# 下方"排序结构"小节），不再是 activation_count 代理；
+# config.seed.activity_bonus_scale 这个专属 seed 的旧配置项已退役，改用
+# 通用的 config.activity_bonus.scale（所有桶共用同一套 activity_bonus 曲线，
+# seed 不该有自己单独一份——两正交轴设计的整个意义就是让 seed 和普通桶
+# 用同一套 activity_bonus 语言，只是 retention 轴待遇不同）。
 _DEFAULT_SEED_FLOOR = 3.0
-_DEFAULT_SEED_ACTIVITY_BONUS_SCALE = 0.3
+
+# ============================================================
+# v3 Commit C：排序结构（retention + activity_bonus 双轴）
+# ------------------------------------------------------------
+# 架构裁定（F，2026-08-09）：双轴只接管"排序面"——band 配额浮现(4/4/2)、
+# breath 默认浮现排序、检索排序的 band 不可越界约束（这条是定稿不变量，
+# 本期必须落地）。archiving 阈值判定与 Dashboard"活跃度分"显示继续走
+# 老 calculate_score() 不动，本期不切：归档是有数据后果的动作，公式一夜
+# 切换可能造成批量误归档；归档链路迁移到 retention 是独立后续项，届时
+# 先出 dry-run 对比报告再切（见 run_decay_cycle() 里对应 TODO）。
+# ============================================================
+
+# band 划分：施工单定案，回放定案（K/F 两家 importance>=8 沉底桶近半、
+# 5/3/2 下中档当月新桶漏出严重），不复议。
+_BAND_HIGH_MIN = 8
+_BAND_MID_MIN = 6
+_BAND_ORDER = ("low", "mid", "high")  # 低→高，用于分配不重叠的分数区间
+_BAND_SCORE_RANGE = 1000.0  # 每个 band 独占的分数宽度——"检索排序最终分不得
+                             # 越band"这条不变量，靠区间物理不重叠保证，不
+                             # 是靠排序逻辑"尽量不越界"。
+
+# 浮现配额：施工单定案 4/4/2（高/中/低），回放数据支持，config.band_quota.*
+# 可覆盖（万一后续再调，不用改代码）。
+DEFAULT_BAND_QUOTA = {"high": 4, "mid": 4, "low": 2}
+
+# 负反馈两段式：设计定稿已拍板的数字（不是待回放参数）。适用范围
+# importance<6 且非 pinned/protected/permanent/anchor/seed——同一条边界线
+# bucket_manager.py 的 record_semantic_recall_without_use() 独立定义了一份
+# （避免跨模块硬耦合导入），两处必须保持一致，改一处记得改另一处。
+_NEG_FEEDBACK_STREAK_GRACE_ENDS = 5     # 连续 5 次未使用 → 取消止衰
+_NEG_FEEDBACK_STREAK_EXTRA_DECAY = 10   # 连续 10 次未使用 → 额外衰减
+_NEG_FEEDBACK_EXTRA_DECAY_FRACTION = 0.125  # 1/8
+_NEG_FEEDBACK_IMPORTANCE_MAX = 6
+
+# "止衰"的具体实现（CC 设计，设计定稿只给了"连续5次未使用→取消止衰"这句
+# 结论，没给机制）：触发负反馈前，适用范围内的桶衰减率打折（宽限期，给
+# "边缘记忆"一点容错，呼应宪法"分数优先奖励边缘记忆"）；触发后打折取消，
+# 回到全额衰减率。未定参数，config.retention.grace_lambda_discount 可调。
+# 初值理由：0.5——打对折是"明显更慢但仍在衰减"，不是止住不动（宪法推论三：
+# 任何富者愈富闭环设计都是错的，止衰不能做成事实上的免死金牌）。
+_DEFAULT_RETENTION_GRACE_LAMBDA_DISCOUNT = 0.5
+
+# activity_bonus 衰减曲线：未定参数，config.activity_bonus.* 可调。
+# 初值理由：half_life=72h——比 decay 模块自身"新鲜度加成"的半衰期(36h，
+# 见下方 _FRESHNESS_HALF_LIFE_HRS)更慢，因为 activity_bonus 承载的是"最近
+# 一次真正被用上"这件事的分量，不该跟"最近浮现过"一样快消退；scale=2.0，
+# 配合 importance 递减（宪法推论一）后，量级跟 retention 轴大致可比，不会
+# 单方面压过/被压过对方。
+_DEFAULT_ACTIVITY_BONUS_HALF_LIFE_HRS = 72.0
+_DEFAULT_ACTIVITY_BONUS_SCALE = 2.0
+
+
+def band_of(importance) -> str:
+    """importance 决定 band：高 8-10 / 中 6-7 / 低 1-5。
+
+    这条边界线跟 bucket_manager.py 的 seed 阈值(importance>=8 不自动成为
+    种子)、负反馈阈值(importance<6 才适用)共用同一组数字不是巧合——"中档"
+    本来就是从这两条既有边界之间切出来的。
+    """
+    try:
+        imp = int(importance)
+    except (TypeError, ValueError):
+        imp = _DEFAULT_IMPORTANCE
+    if imp >= _BAND_HIGH_MIN:
+        return "high"
+    if imp >= _BAND_MID_MIN:
+        return "mid"
+    return "low"
+
+
+def band_floor(band: str) -> float:
+    """band 的分数区间下限。不同 band 的最终分数永远落在各自独占的
+    [floor, floor+_BAND_SCORE_RANGE) 区间——band 内怎么排都不会跨到别的
+    band 头上，物理上不重叠，不依赖排序逻辑"尽量不越界"。
+    """
+    try:
+        idx = _BAND_ORDER.index(band)
+    except ValueError:
+        idx = 0
+    return idx * _BAND_SCORE_RANGE
+
+
+def apply_band_quota(ranked_buckets: list, quota: dict) -> list:
+    """按配额截取 DecayEngine.band_ranked() 的输出。
+
+    quota 例：{"high": 4, "mid": 4, "low": 2}。band 内已经排好序，这里只是
+    分段截断——"各配额 band 均有代表"这条不变量，只要该 band 池非空、
+    配额>=1 就自然满足，不需要额外"至少一条"特判。
+
+    返回顺序：high 段 → mid 段 → low 段（按 band 优先级摆放，不是把三个
+    band 的分数交叉在一起排——band 之间的相对次序由"重要度"这个更高层的
+    语义决定，不是由 band_floor 的数值大小顺便决定的实现细节）。
+    """
+    by_band: dict[str, list] = {"high": [], "mid": [], "low": []}
+    for b in ranked_buckets:
+        by_band.setdefault(b.get("_band", "low"), []).append(b)
+    result: list = []
+    for band in ("high", "mid", "low"):
+        n = max(0, int(quota.get(band, 0)))
+        result.extend(by_band.get(band, [])[:n])
+    return result
 
 # --- 周期自愈：每轮衰减最多补多少条缺失向量（防一次性打爆 embedding API）---
 # 活跃桶落盘了但 embeddings.db 没它的向量 → breath 向量通道会漏掉它（permanent
@@ -162,9 +262,33 @@ class DecayEngine:
         # --- v3 Commit A: seed floor + activity bonus（config.seed.* 可调，见上方常量注释）---
         seed_cfg = config.get("seed", {})
         self.seed_floor = seed_cfg.get("floor", _DEFAULT_SEED_FLOOR)
-        self.seed_activity_bonus_scale = seed_cfg.get(
-            "activity_bonus_scale", _DEFAULT_SEED_ACTIVITY_BONUS_SCALE
+
+        # --- v3 Commit C: retention 的"止衰宽限" + import cohort 中性化窗口 ---
+        retention_cfg = config.get("retention", {})
+        self.retention_grace_lambda_discount = retention_cfg.get(
+            "grace_lambda_discount", _DEFAULT_RETENTION_GRACE_LAMBDA_DISCOUNT
         )
+        # import_cohort_windows: [{"start": iso, "end": iso, "exempt": [iso, ...]}, ...]
+        # 各家自己的批量导入窗口是实例数据，不进代码默认值——config.yaml 里配，
+        # config.example.yaml 只给注释示例（K 家窗口）。
+        self.import_cohort_windows = retention_cfg.get("import_cohort_windows", [])
+
+        # --- v3 Commit C: activity_bonus 衰减曲线（config.activity_bonus.* 可调）---
+        activity_bonus_cfg = config.get("activity_bonus", {})
+        self.activity_bonus_half_life_hrs = activity_bonus_cfg.get(
+            "half_life_hours", _DEFAULT_ACTIVITY_BONUS_HALF_LIFE_HRS
+        )
+        self.activity_bonus_scale = activity_bonus_cfg.get(
+            "scale", _DEFAULT_ACTIVITY_BONUS_SCALE
+        )
+
+        # --- v3 Commit C: 浮现配额（config.band_quota.* 可调，施工单定案 4/4/2）---
+        band_quota_cfg = config.get("band_quota", {})
+        self.band_quota = {
+            "high": int(band_quota_cfg.get("high", DEFAULT_BAND_QUOTA["high"])),
+            "mid": int(band_quota_cfg.get("mid", DEFAULT_BAND_QUOTA["mid"])),
+            "low": int(band_quota_cfg.get("low", DEFAULT_BAND_QUOTA["low"])),
+        }
 
         self.bucket_mgr = bucket_mgr
 
@@ -303,29 +427,174 @@ class DecayEngine:
 
     def _calc_seed_score(self, metadata: dict) -> float:
         """
-        seed 桶打分：floor + 受 importance 递减约束的小幅 activity bonus。
-        不受 age_decay（不看 days_since），不受负反馈（resolved_factor/
-        urgency_boost 均不适用——这两个只在上面普通路径里算）。
+        seed 桶打分：floor + activity_bonus。不受 age_decay、不受负反馈
+        （resolved_factor/urgency_boost 均不适用——这两个只在上面普通路径
+        里算）。
 
-        过渡实现（Commit C 落地正式 retention/activity_bonus 双轴前）：
-        activation_count 是当前唯一能代表"真实活动"的既有字段，超出创建时
-        基线（=1）的部分才算增益，避免"从未被检索过"的新种子凭空多出分数
-        （对应验收 4a："从未检索"→ 停在 floor）。
+        v3 Commit C：Commit A 里那条"按访问次数凑活动感"的过渡代理路径已
+        整体移除（原实现见 git 历史 30a4bc1..d1d3aa7 一带 v3 Commit A 提交），
+        现在直接调用正式的 activity_bonus()：last_meaningful_at 从未设置
+        （从未有过强信号）时返回 0，对应验收 4a"从未检索"→ 停在 floor；
+        有强信号时按新鲜度曲线给分，同样受 importance 递减约束（宪法
+        推论一），语义与过渡实现一致，只是数据来源换成了正式的
+        last_meaningful_at 强信号时间戳。
         """
+        return round(self.seed_floor + self.activity_bonus(metadata), 4)
+
+    def _encoded_age_days(self, metadata: dict, now: datetime) -> float:
+        """v3 Commit C：retention() 的年龄输入。年龄基准是 created（"神圣不可
+        改写"），不是 last_active——那是给 activity_bonus 算新鲜度用的。
+
+        import cohort 中性化：metadata["created"] 落在
+        self.import_cohort_windows 任一窗口内（且不在该窗口的 exempt 名单
+        里）→ 年龄改按"窗口结束时刻"算，不按各自(可能是聚集导入产物、不
+        可信)的 created 算——同一批导入的桶不因为不可考的真实创建时间产生
+        档内差异；窗口外正常走 created。之后仍随时间正常衰减，这不是
+        永久覆盖，只是给这批桶一个统一、不编造的起点。
+        """
+        created_raw = str(metadata.get("created") or "")
+        try:
+            created = parse_iso_datetime(created_raw)
+        except (ValueError, TypeError):
+            return float(_DEFAULT_DAYS_FALLBACK)
+
+        base = created
+        for window in self.import_cohort_windows:
+            if created_raw in (window.get("exempt") or []):
+                continue
+            try:
+                start = parse_iso_datetime(window.get("start"))
+                end = parse_iso_datetime(window.get("end"))
+            except (ValueError, TypeError):
+                continue
+            if start <= created <= end:
+                base = end
+                break
+
+        return max(0.0, (now - base).total_seconds() / _SECONDS_PER_DAY)
+
+    def retention(self, metadata: dict, now: datetime | None = None) -> float:
+        """v3 Commit C：排序结构第一根轴。可降，承载 age_decay/负反馈/遗忘
+        语义。只服务"排序面"（band 配额浮现 / breath 默认浮现排序 / 检索
+        排序）——archiving 阈值判定继续用 calculate_score()，本函数不参与
+        （见文件顶部"排序结构"说明块，F 2026-08-09 架构裁定）。
+
+        seed：retention = self.seed_floor（不参与年龄/负反馈——"不受
+        age_decay、不受一切负反馈"是 Commit A 定的规矩，原样沿用）。
+        pinned/protected/permanent/feel/plan/letter/anchor：这些桶各自有
+        自己的展示通道，不进 band 配额候选池，这里仍给出对应的锁分值，
+        避免误用本函数时把年龄偏见带进来。
+
+        负反馈两段式（设计定稿已拍板的数字，适用范围 importance<6 且非
+        pinned/protected/permanent/anchor/seed）：连续 5 次未使用 → 取消
+        "止衰宽限"（衰减率打折的宽限期结束，回到全额衰减率）；连续 10 次
+        → 额外 1/8 衰减，直接乘在结果上。
+        """
+        if not isinstance(metadata, dict):
+            return 0.0
+        now = now or datetime.now()
+
+        if parse_bool(metadata.get("seed"), default=False):
+            return self.seed_floor
+        if metadata.get("pinned") or metadata.get("protected") or metadata.get("type") == "permanent":
+            return _SCORE_PINNED
+        if metadata.get("type") in ("feel", "plan", "letter"):
+            return _SCORE_FEEL
+        if parse_bool(metadata.get("anchor"), default=False):
+            return _SCORE_FEEL
+
         try:
             importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
         except (TypeError, ValueError):
             importance = _DEFAULT_IMPORTANCE
+
+        age_days = self._encoded_age_days(metadata, now)
+
+        streak = int(metadata.get("semantic_unused_streak") or 0)
+        applies_negative_feedback = importance < _NEG_FEEDBACK_IMPORTANCE_MAX
+        effective_lambda = self.decay_lambda
+        if applies_negative_feedback and streak < _NEG_FEEDBACK_STREAK_GRACE_ENDS:
+            effective_lambda *= self.retention_grace_lambda_discount
+
+        value = importance * math.exp(-effective_lambda * age_days)
+
+        if applies_negative_feedback and streak >= _NEG_FEEDBACK_STREAK_EXTRA_DECAY:
+            value *= (1.0 - _NEG_FEEDBACK_EXTRA_DECAY_FRACTION)
+
+        return round(value, 4)
+
+    def activity_bonus(self, metadata: dict, now: datetime | None = None) -> float:
+        """v3 Commit C：排序结构第二根轴。≥0，非负贡献，不承担惩罚；数值
+        随 last_meaningful_at 新鲜度衰减回 0；强信号不构成永久累积优势——
+        不是 monotonic counter，纯粹是"上次强信号多久以前"的衰减函数，
+        时间一过就回落，不会因为强信号发生过越多次就越高。
+
+        last_meaningful_at 从未设置（从未有过 hold 追加 / meaning_append /
+        citation_credit 强信号，见 bucket_manager.record_strong_signal）
+        → 0.0。
+        """
+        if not isinstance(metadata, dict):
+            return 0.0
+        now = now or datetime.now()
+        raw = metadata.get("last_meaningful_at")
+        if not raw:
+            return 0.0
         try:
-            activation_count = max(1.0, float(metadata.get("activation_count") or 1))
+            last = parse_iso_datetime(raw)
+        except (ValueError, TypeError):
+            return 0.0
+
+        try:
+            importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
         except (TypeError, ValueError):
-            activation_count = 1.0
-        activation_delta = max(0.0, activation_count - 1.0)
-        # 宪法推论一：高权重桶不需要更多分。importance=10 时递减系数为 0，
-        # importance=1 时不递减（=1.0）。
+            importance = _DEFAULT_IMPORTANCE
+        # 宪法推论一：高权重桶不需要更多分。importance=10 时递减到 0。
         diminish = max(0.0, (10 - importance) / 9.0)
-        activity_bonus = self.seed_activity_bonus_scale * diminish * activation_delta
-        return round(self.seed_floor + activity_bonus, 4)
+
+        hours = max(0.0, (now - last).total_seconds() / _SECONDS_PER_HOUR)
+        if self.activity_bonus_half_life_hrs <= 0:
+            decay = 0.0
+        else:
+            decay = math.exp(-hours / self.activity_bonus_half_life_hrs)
+        return round(self.activity_bonus_scale * diminish * decay, 4)
+
+    def band_ranked(self, buckets: list, now: datetime | None = None) -> list:
+        """v3 Commit C：band 内先归一化（min-max）再排序，band 之间用不
+        重叠的分数区间（band_floor）隔开——检索排序最终分不得越band。
+
+        buckets: [{"id":..., "metadata": {...}}, ...]（跟 bucket_mgr 各处
+        返回的形状一致）。就地给每个 dict 加 "_rank_score" / "_band" 两个
+        键，按 _rank_score 降序返回同一批对象（不拷贝，调用方本来就是拿
+        list_all() 现造的临时列表，原地加字段没有副作用风险）。
+
+        tie-breaker：bucket_id 字典序——"仅稳定排序不入年龄"，不用任何跟
+        created/last_active 相关的字段打破平局，避免把年龄偏见从后门带回来。
+        """
+        now = now or datetime.now()
+        by_band: dict[str, list] = {"high": [], "mid": [], "low": []}
+        for b in buckets:
+            band = band_of((b.get("metadata") or {}).get("importance"))
+            by_band[band].append(b)
+
+        ranked: list = []
+        for band, group in by_band.items():
+            if not group:
+                continue
+            raw = [
+                self.retention(b["metadata"], now) + self.activity_bonus(b["metadata"], now)
+                for b in group
+            ]
+            lo, hi = min(raw), max(raw)
+            span = (hi - lo) or 1.0
+            floor = band_floor(band)
+            for b, value in zip(group, raw):
+                normalized = (value - lo) / span  # [0, 1]
+                b["_rank_score"] = floor + normalized * (_BAND_SCORE_RANGE - 1.0)
+                b["_band"] = band
+            ranked.extend(group)
+
+        ranked.sort(key=lambda b: (b["_rank_score"], str(b.get("id") or "")), reverse=True)
+        return ranked
 
     # ---------------------------------------------------------
     # Execute one decay cycle
@@ -395,6 +664,13 @@ class DecayEngine:
                         logger.warning(f"Auto-resolve failed / 自动结案失败: {e}")
 
             try:
+                # TODO(归档链路迁移到 retention，独立后续项，非本期范围)：
+                # v3 Commit C 架构裁定（F，2026-08-09）：归档阈值判定继续用
+                # calculate_score()，暂不切到 retention()——归档是有数据
+                # 后果的动作（低于阈值就搬 archive），公式一夜切换可能造成
+                # 批量误归档。等要切的时候，先跑 dry-run 对比新旧公式在
+                # 全量数据上的归档判定差异出报告，人工过一遍再切，不能
+                # 直接改这一行了事。
                 score = self.calculate_score(meta)
             except Exception as e:
                 logger.warning(

@@ -33,6 +33,7 @@ from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from utils import parse_bool, parse_iso_datetime
 from utils import count_tokens_approx
+from decay_engine import apply_band_quota
 from ._verbatim import (
     render_stored_bucket, catalog_line,
     render_meaning_plus_first_paragraph, LONG_ENTRY_CHARS, STORED_DATA_NOTICE,
@@ -175,16 +176,32 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
         f"{len(pinned_buckets)} pinned, {len(unresolved)} unresolved"
     )
 
+    # v3 Commit C：band 配额浮现——真实 DecayEngine 用 band_ranked() 就地给
+    # 每个候选加 _rank_score/_band（band 内先归一化，band 之间分数区间不
+    # 重叠）。测试里常见的极简 decay_engine 替身（只实现 calculate_score，
+    # 见 test_stage4_full_text.py/test_surface_weight_order_regression.py
+    # 等）没有这个方法——它们测的是 token 预算/full_text/min_weight 这些
+    # 跟"具体用哪根轴排序"无关的性质，不强迫它们也实现新接口，下面
+    # _effective_rank 自动退化为旧的 calculate_score 排序。生产环境的真实
+    # DecayEngine 一定支持新接口，"排序面双轴接管"对生产行为是完全生效的。
+    using_band_quota = hasattr(rt.decay_engine, "band_ranked")
+    if using_band_quota:
+        rt.decay_engine.band_ranked(unresolved)
+
+    def _effective_rank(b: dict) -> float:
+        if "_rank_score" in b:
+            return b["_rank_score"]
+        return rt.decay_engine.calculate_score(b["metadata"])
 
     def _sort_key(b: dict):
         """F-05: 二级排序 key，消除同分时浮现随机抖动。
-        主键：decay_score（降序）
+        主键：rank_score（band 配额浮现的双轴分，或退化为 decay_score）（降序）
         次键：last_active 时间戳（越新越高）
         三键：arousal × valence（情感强度，越高越先浮现）
         四键：importance
         """
         meta = b["metadata"]
-        score = rt.decay_engine.calculate_score(meta)
+        score = _effective_rank(b)
         try:
             last_ts = parse_iso_datetime(
                 meta.get("last_active") or meta.get("created", "")
@@ -197,8 +214,14 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
 
     scored = sorted(unresolved, key=_sort_key, reverse=True)
 
+    if using_band_quota:
+        # 施工单定案 4/4/2（config.band_quota.* 可覆盖）。band 内已经排好序
+        # （上面按 _rank_score 整体排序，band_floor 保证不重叠，天然就是
+        # high 段→mid 段→low 段的顺序），这里只是分段截断。
+        scored = apply_band_quota(scored, rt.decay_engine.band_quota)
+
     if scored:
-        top_scores = [(b["metadata"].get("name", b["id"]), rt.decay_engine.calculate_score(b["metadata"])) for b in scored[:5]]
+        top_scores = [(b["metadata"].get("name", b["id"]), _effective_rank(b)) for b in scored[:5]]
         rt.logger.info(f"Top unresolved scores: {top_scores}")
 
     # --- 冷启动检测 ---
@@ -225,7 +248,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
         pool = non_cold[:max(top_k, sample_k)]
         try:
             weights = [
-                max(0.0001, rt.decay_engine.calculate_score(b["metadata"])) ** (1.0 / temperature)
+                max(0.0001, _effective_rank(b)) ** (1.0 / temperature)
                 for b in pool
             ]
             picked = []
@@ -268,12 +291,12 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     # 渲染前必须按权重重新降序排列，否则低权重条目排在前面先吃掉 token_budget，
     # 导致真正的高权重条目被挤到尾部截断（F 窗口实测：2.42/3.30 排在 10.16 之前）。
     # 保证截断只发生在候选集里权重最低的一端。
-    candidates.sort(key=lambda b: rt.decay_engine.calculate_score(b["metadata"]), reverse=True)
+    candidates.sort(key=_effective_rank, reverse=True)
 
     dynamic_results = []
     for i, b in enumerate(candidates if not budget_blocked else []):
         try:
-            score = rt.decay_engine.calculate_score(b["metadata"])
+            score = _effective_rank(b)
             header = f"[权重:{score:.2f}] [bucket_id:{b['id']}]"
             # stage4: 默认(full_text=False)超过 LONG_ENTRY_CHARS 字的条目只给
             # meaning+正文首段，不做生成式摘要；full_text=True 恢复逐字全文。

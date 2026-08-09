@@ -193,10 +193,13 @@ class TestDecayEngineSeed:
         assert decay_eng.calculate_score(meta) == decay_eng.seed_floor
 
     def test_calculate_score_seed_bonus_diminishes_at_high_importance(self, decay_eng):
+        # v3 Commit C：activity_bonus 部分改用 last_meaningful_at 新鲜度，
+        # 不再是 activation_count 代理（原断言随 Commit A 过渡实现一起退役，
+        # 见 tests/test_v3_ranking_commit_c.py 的等价新断言）。
         base = {
             "type": "dynamic", "seed": True,
             "created": (datetime.now() - timedelta(days=10)).isoformat(),
-            "activation_count": 11,
+            "last_meaningful_at": datetime.now().isoformat(),
         }
         low_importance_score = decay_eng.calculate_score({**base, "importance": 1})
         high_importance_score = decay_eng.calculate_score({**base, "importance": 10})
@@ -206,14 +209,26 @@ class TestDecayEngineSeed:
         assert low_importance_score > high_importance_score
 
     def test_calculate_score_seed_is_not_a_frozen_constant(self, decay_eng):
-        # 对比 pinned：pinned 恒定 999，seed 应随 activation_count 变化（floor 不是冻结）。
-        low_activity = decay_eng.calculate_score(
-            {"type": "dynamic", "seed": True, "importance": 3, "activation_count": 1}
+        # 对比 pinned：pinned 恒定 999，seed 应随 last_meaningful_at 新鲜度
+        # 变化（floor 不是冻结）。
+        never_touched = decay_eng.calculate_score(
+            {"type": "dynamic", "seed": True, "importance": 3}
         )
-        high_activity = decay_eng.calculate_score(
-            {"type": "dynamic", "seed": True, "importance": 3, "activation_count": 21}
+        recently_touched = decay_eng.calculate_score(
+            {"type": "dynamic", "seed": True, "importance": 3,
+             "last_meaningful_at": datetime.now().isoformat()}
         )
-        assert low_activity != high_activity
+        assert never_touched != recently_touched
+
+    def test_calculate_score_seed_branch_no_longer_references_activation_count(self):
+        """F 附加要求：Commit C 落地双轴时必须整体移除 seed 分支的
+        activation_count 代理路径，这里断言源码层面确实没有残留——不是
+        靠行为断言侧面推测，直接读 _calc_seed_score 的函数体。"""
+        import inspect
+        import decay_engine as decay_engine_module
+
+        source = inspect.getsource(decay_engine_module.DecayEngine._calc_seed_score)
+        assert "activation_count" not in source
 
     def test_calculate_score_pinned_seed_combo_stays_pinned_constant(self, decay_eng):
         meta = {"type": "dynamic", "pinned": True, "seed": True, "importance": 5}
