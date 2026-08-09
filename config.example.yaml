@@ -203,6 +203,17 @@ surfacing:
 anchor:
   max_count: 24                   # anchor(坐标系桶)数量上限，默认 24；超限时 set_anchor()/update(anchor=True) 拒绝并给出清晰报错
 
+# 记忆动力学二期 Commit A：seed（种子）配置。三个数值均为保守初值，
+# 未定稿前不写死在代码里——按需在这里调，重启生效。
+seed:
+  max_count: 30                   # seed 桶数量上限。施工单定案：K/F/G 三家本期同用 ≤30
+  floor: 3.0                      # calculate_score() 对 seed 桶的硬下限。比归档阈值(decay.threshold
+                                   # 默认 0.3)高一个数量级，但远低于 feel/plan/letter 的固定分 50——
+                                   # 不会被误判成快归档的桶，也不会在排序里假装成同等活跃的桶
+  activity_bonus_scale: 0.3       # seed 桶活动信号的小幅加成系数（受 importance 递减约束，宪法推论一：
+                                   # 高权重桶不需要更多分）。约 10 次额外真实激活能让低 importance 种子
+                                   # 的分数从 floor 翻一倍左右
+
 # --- Limits / 边界限制（iter 1.6 §5）---
 # Single-bucket size cap and pinned bucket quota. Exceeding either is
 # rejected at hold/grow/trace boundaries with a Chinese hint string.

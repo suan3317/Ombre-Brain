@@ -21,7 +21,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
 对外暴露：trace_core(bucket_id, name, domain, valence, arousal, importance,
                      tags, resolved, pinned, digested, content, delete,
                      status, weight, dont_surface, why_remembered,
-                     meaning_append, meaning_replace, media_append, media_replace) → str
+                     meaning_append, meaning_replace, media_append, media_replace,
+                     seed) → str
 ========================================
 """
 
@@ -57,6 +58,7 @@ async def trace_core(
     media_replace: Optional[list] = None,
     hard_delete: Optional[bool] = False,
     delete_reason: Optional[str] = "",
+    seed: Optional[int] = -1,
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -87,6 +89,8 @@ async def trace_core(
         weight = -1
     if dont_surface is None:
         dont_surface = -1
+    if seed is None:
+        seed = -1
     if why_remembered is None:
         why_remembered = ""
     if meaning_append is None:
@@ -125,6 +129,7 @@ async def trace_core(
     pinned = _safe_int(pinned, -1)
     digested = _safe_int(digested, -1)
     dont_surface = _safe_int(dont_surface, -1)
+    seed = _safe_int(seed, -1)
 
     metadata_err = check_metadata_size(
         bucket_id=bucket_id,
@@ -156,6 +161,7 @@ async def trace_core(
         "weight": weight,
         "dont_surface": dont_surface,
         "why_remembered_length": len(why_remembered or ""),
+        "seed": seed,
     })
 
     if not bucket_id or not bucket_id.strip():
@@ -225,6 +231,18 @@ async def trace_core(
         updates["weight"] = float(weight)
     if dont_surface in (0, 1):
         updates["dont_surface"] = bool(dont_surface)
+    if seed in (0, 1):
+        # v3 Commit A：seed 上限校验前置在这里做（同 pinned 的
+        # check_pinned_quota() 写法），给一句人话错误，而不是让它悄悄落进
+        # 下面 bucket_mgr.update() 里那道兜底校验、只换来一句"修改失败"。
+        if seed == 1 and not bucket.get("metadata", {}).get("seed"):
+            current = await rt.bucket_mgr.count_seeds()
+            if current >= rt.bucket_mgr.SEED_LIMIT:
+                return (
+                    f"seed 已达上限 {rt.bucket_mgr.SEED_LIMIT}。"
+                    "请先 trace(bucket_id, seed=0) 释放一条再设新的。"
+                )
+        updates["seed"] = bool(seed)
     why_remembered = str(why_remembered).strip()
     if why_remembered == "\\clear":
         updates["why_remembered"] = ""

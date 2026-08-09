@@ -47,6 +47,7 @@ class LegacyCompatibilityContract:
                 "domain",
                 "pinned",
                 "anchor",
+                "seed",
             ),
             protected_surfaces=(
                 "config",

@@ -54,6 +54,23 @@ _DEFAULT_AROUSAL_BOOST = 0.8      # arousal 每 +1 → 情感权重 +0.8
 _SCORE_PINNED = 999.0    # pinned / protected / permanent 桶恒高分（永不归档）
 _SCORE_FEEL = 50.0       # feel / plan / letter 桶固定中分（生命周期由 status 控制）
 
+# --- v3 Commit A：seed 打分 —— floor 不是冻结（设计定稿推论四）---
+# seed 待遇跟 pinned/permanent 那种"恒 999"的冻结不一样：floor 是硬下限，
+# 不是天花板，活动信号仍能往上加一点（但受 importance 递减约束，宪法推论一
+# "高权重桶不需要更多分"）。这是 Commit C 落地正式 retention/activity_bonus
+# 双轴前的过渡实现——用现有 activation_count 当"活动"代理，超出创建时基线
+# (=1)的部分才算增益。两个数值都是保守初值，不写死：config.seed.floor /
+# config.seed.activity_bonus_scale 可调，未配置时用这里的默认值。
+# 初值理由（PR 说明同步一份）：
+#   floor=3.0——比归档阈值(_DEFAULT_THRESHOLD=0.3)高一个数量级，明确"不会被
+#     误判成快归档的桶"，但远低于 _SCORE_FEEL(50)，不会在排序里假装成"跟
+#     feel/plan/letter 一个量级的活跃桶"。
+#   activity_bonus_scale=0.3——约 10 次额外真实激活能让低 importance 种子的
+#     分数从 floor 翻一倍左右，"小幅"但看得见；importance=10 时递减系数
+#     趋近 0，几乎不再加成。
+_DEFAULT_SEED_FLOOR = 3.0
+_DEFAULT_SEED_ACTIVITY_BONUS_SCALE = 0.3
+
 # --- 周期自愈：每轮衰减最多补多少条缺失向量（防一次性打爆 embedding API）---
 # 活跃桶落盘了但 embeddings.db 没它的向量 → breath 向量通道会漏掉它（permanent
 # 尤其常见，见 #6）。剩余的下一轮继续补。
@@ -142,6 +159,13 @@ class DecayEngine:
         self.emotion_base = emotion_cfg.get("base", _DEFAULT_EMOTION_BASE)
         self.arousal_boost = emotion_cfg.get("arousal_boost", _DEFAULT_AROUSAL_BOOST)
 
+        # --- v3 Commit A: seed floor + activity bonus（config.seed.* 可调，见上方常量注释）---
+        seed_cfg = config.get("seed", {})
+        self.seed_floor = seed_cfg.get("floor", _DEFAULT_SEED_FLOOR)
+        self.seed_activity_bonus_scale = seed_cfg.get(
+            "activity_bonus_scale", _DEFAULT_SEED_ACTIVITY_BONUS_SCALE
+        )
+
         self.bucket_mgr = bucket_mgr
 
         # --- Background task control / 后台任务控制 ---
@@ -209,6 +233,12 @@ class DecayEngine:
         if metadata.get("type") in ("plan", "letter"):
             return _SCORE_FEEL
 
+        # --- Seed buckets: floor not frozen（放在 pinned/permanent/feel 之后——
+        # 若一个桶同时是 pinned/permanent/feel 又是 seed，前面那几种"冻结"
+        # 待遇优先，seed 的 floor 只管非冻结的普通 dynamic 桶）---
+        if parse_bool(metadata.get("seed"), default=False):
+            return self._calc_seed_score(metadata)
+
         try:
             importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
         except (TypeError, ValueError):
@@ -271,6 +301,32 @@ class DecayEngine:
 
         return round(base_score * resolved_factor * urgency_boost, 4)
 
+    def _calc_seed_score(self, metadata: dict) -> float:
+        """
+        seed 桶打分：floor + 受 importance 递减约束的小幅 activity bonus。
+        不受 age_decay（不看 days_since），不受负反馈（resolved_factor/
+        urgency_boost 均不适用——这两个只在上面普通路径里算）。
+
+        过渡实现（Commit C 落地正式 retention/activity_bonus 双轴前）：
+        activation_count 是当前唯一能代表"真实活动"的既有字段，超出创建时
+        基线（=1）的部分才算增益，避免"从未被检索过"的新种子凭空多出分数
+        （对应验收 4a："从未检索"→ 停在 floor）。
+        """
+        try:
+            importance = max(1, min(10, int(metadata.get("importance", _DEFAULT_IMPORTANCE))))
+        except (TypeError, ValueError):
+            importance = _DEFAULT_IMPORTANCE
+        try:
+            activation_count = max(1.0, float(metadata.get("activation_count") or 1))
+        except (TypeError, ValueError):
+            activation_count = 1.0
+        activation_delta = max(0.0, activation_count - 1.0)
+        # 宪法推论一：高权重桶不需要更多分。importance=10 时递减系数为 0，
+        # importance=1 时不递减（=1.0）。
+        diminish = max(0.0, (10 - importance) / 9.0)
+        activity_bonus = self.seed_activity_bonus_scale * diminish * activation_delta
+        return round(self.seed_floor + activity_bonus, 4)
+
     # ---------------------------------------------------------
     # Execute one decay cycle
     # 执行一轮衰减周期
@@ -300,15 +356,18 @@ class DecayEngine:
         for bucket in buckets:
             meta = bucket.get("metadata", {})
 
-            # Skip anchor / permanent / pinned / protected / feel / i buckets
-            # 跳过 anchor、固化桶、钉选/保护桶、feel 桶和 i（自我认知）桶
+            # Skip anchor / seed / permanent / pinned / protected / feel / i buckets
+            # 跳过 anchor、seed、固化桶、钉选/保护桶、feel 桶和 i（自我认知）桶
             # i 桶承诺永不衰减（tools/i/core.py 注释）——必须在此显式排除
             # anchor 是 dynamic 桶上的 bool 标记，不锁高 importance，必须显式排除
+            # v3 Commit A：seed 同样是 dynamic 桶上的 bool 标记，不受一切负
+            # 反馈（含这里的自动归档 *和* 下面的自动结案），必须显式排除。
             if (
                 meta.get("type") in ("permanent", "feel", "i")
                 or meta.get("pinned")
                 or meta.get("protected")
                 or parse_bool(meta.get("anchor"), default=False)
+                or parse_bool(meta.get("seed"), default=False)
             ):
                 continue
 

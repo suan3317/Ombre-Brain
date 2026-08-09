@@ -658,8 +658,9 @@ async def trace(
     media_replace: Optional[list] = None,
     hard_delete: Optional[bool] = False,
     delete_reason: Optional[str] = "",
+    seed: Optional[int] = -1,
 ) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。只传需要修改的字段,-1 或空串表示不改。"""
+    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -670,6 +671,7 @@ async def trace(
             meaning_append=meaning_append, meaning_replace=meaning_replace,
             media_append=media_append, media_replace=media_replace,
             hard_delete=hard_delete, delete_reason=delete_reason,
+            seed=seed,
         ),
         op="trace",
         args={
@@ -683,6 +685,7 @@ async def trace(
             "meaning_replace_count": len(meaning_replace or []),
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
+            "seed": seed,
         },
     )
 
@@ -1132,11 +1135,15 @@ _WAKE_CORE_LIMIT = 8              # 核心记忆目录条数上限,与既有 "�
 _WAKE_CORE_BUDGET_TOKENS = 1200
 _WAKE_CONTINUITY_BUDGET_TOKENS = 2000
 _WAKE_FILE_ZONE_TOP_N = 10
+# v3 Commit A：继承区(seed)预算。种子上限(config.seed.max_count,默认30)
+# 比核心记忆的 8 条上限宽松,预算跟着放宽到与最近连续性段同一量级。
+_WAKE_SEED_BUDGET_TOKENS = 2000
 
 from tools.breath.importance import select_core_memory_buckets as _wk_select_core
 from tools.dream.candidates import collect_candidates as _wk_collect_candidates
 from tools._wake_render import render_catalog_segment as _wk_render_catalog
 from tools._wake_render import render_file_zone_summary as _wk_render_files
+from tools._wake_seed import select_seed_buckets as _wk_select_seed
 
 
 async def _wake_impl(window_hours: int) -> str:
@@ -1148,6 +1155,16 @@ async def _wake_impl(window_hours: int) -> str:
     except Exception as e:
         all_buckets = []
         logger.warning(f"wake: list_all 失败,各段按空数据降级: {e}")
+
+    # 0) 继承区选取(v3 Commit A,seed:true,不受 importance 阈值限制)——
+    # 先选出来,下面二/四两段据此去重(取数口径:seed 进继承区即不占浮现
+    # 配额,不重复占位),渲染放最后一段(六)。
+    try:
+        seed_buckets = _wk_select_seed(all_buckets)
+    except Exception as e:
+        seed_buckets = []
+        logger.warning(f"wake: 继承区选取失败,按空数据降级: {e}")
+    seed_ids = {b["id"] for b in seed_buckets}
 
     # 1) 自我 —— 我是谁
     try:
@@ -1161,11 +1178,17 @@ async def _wake_impl(window_hours: int) -> str:
     # 用 breath_search(query=...) 或 breath_advanced(importance_min=8) 拉取。
     try:
         core_buckets = _wk_select_core(all_buckets, _WAKE_CORE_IMPORTANCE_MIN, limit=_WAKE_CORE_LIMIT)
+        # v3 Commit A：与继承区重叠的桶不在这里重复列(已经在下方"六、继承区"
+        # 整条列过)——select_core_memory_buckets 本身不知道 seed,过滤放调用侧。
+        seed_overlap_core = len({b["id"] for b in core_buckets} & seed_ids)
+        core_buckets = [b for b in core_buckets if b["id"] not in seed_ids]
         core_ids = {b["id"] for b in core_buckets}
         core_lines = _wk_render_catalog(
             core_buckets, _WAKE_CORE_BUDGET_TOKENS,
             overflow_hint="完整列表用 breath_advanced(importance_min=8) 查看。",
         )
+        if seed_overlap_core:
+            core_lines.append(f"（另有 {seed_overlap_core} 桶已作为 seed 列入下方「继承区」，不重复。）")
         core_text = "\n".join(core_lines) if core_lines else "(暂无高重要度记忆)"
         # 梦投递段(红线1:一个字不改,原格式原样保留,只挪调用位置——过去经
         # _t_breath.dispatch() 顺路带出,现在核心记忆段改走数据直拼,自己补上
@@ -1212,15 +1235,18 @@ async def _wake_impl(window_hours: int) -> str:
     try:
         candidates = _wk_collect_candidates(all_buckets, window_hours)
         overlap = len({b["id"] for b in candidates} & core_ids)
+        seed_overlap_cont = len({b["id"] for b in candidates} & seed_ids)
         continuity_lines = _wk_render_catalog(
             candidates, _WAKE_CONTINUITY_BUDGET_TOKENS,
             overflow_hint=f"完整内容用 dream(window_hours={window_hours}) 查看。",
-            exclude_ids=core_ids,
+            exclude_ids=core_ids | seed_ids,
         )
         if overlap:
             # 死配额规则:被跳过不能是"消失",数量必须显式留痕——这些桶不是没有
             # 展示,是已经在上面"核心记忆"段整条列过了,这里不重复列。
             continuity_lines.append(f"（另有 {overlap} 桶已在上方核心记忆段列出，不重复。）")
+        if seed_overlap_cont:
+            continuity_lines.append(f"（另有 {seed_overlap_cont} 桶已作为 seed 列入下方「继承区」，不重复。）")
         continuity_text = "\n".join(continuity_lines) if continuity_lines else "(窗口内没有变动)"
         parts.append(
             f"## 四、最近 {window_hours} 小时的连续性(目录,共 {len(candidates)} 桶)\n"
@@ -1238,9 +1264,25 @@ async def _wake_impl(window_hours: int) -> str:
     except Exception as e:
         parts.append(f"## 五、文件区目录\n(读取失败: {e})")
 
+    # 6) 继承区(v3 Commit A)—— seed:true 的桶,不受 importance 阈值限制。
+    # 给下一个空白实例的入场券,跟上面"当前实例工作记忆"的浮现段是两回事
+    # (取数口径,设计定稿 2026-08-07)。修改用 trace(bucket_id, seed=0/1)。
+    try:
+        seed_lines = _wk_render_catalog(
+            seed_buckets, _WAKE_SEED_BUDGET_TOKENS,
+            overflow_hint="完整清单请 file_read 抄引账本或直接核对 seed 桶列表。",
+        )
+        seed_text = "\n".join(seed_lines) if seed_lines else "(还没有 seed 桶——户主逐条圈定后会出现在这里)"
+        parts.append(
+            f"## 六、继承区(seed,共 {len(seed_buckets)} 条,不占浮现配额)\n"
+            "修改用 trace(bucket_id, seed=0/1)。\n" + seed_text
+        )
+    except Exception as e:
+        parts.append(f"## 六、继承区\n(读取失败: {e})")
+
     header = (
         "# 醒来简报\n"
-        "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪。\n"
+        "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪 → 继承给下一个我的种子。\n"
         "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n"
     )
     return header + "\n\n" + "\n\n".join(parts)
@@ -1250,7 +1292,7 @@ async def _wake_impl(window_hours: int) -> str:
 async def wake(
     window_hours: Optional[int] = 48,
 ) -> str:
-    """wake:醒来/睁眼/新窗口 handoff 简报(wake up briefing for new session)。新窗口第一件事调用,一次返回五部分:①自我认知(I) ②核心记忆(importance>=8) ③留言板末尾 ④最近 window_hours 小时连续性(默认48) ⑤文件区目录含交接文件提示。替代逐个调用 breath/dream/file_read 的醒来流程。"""
+    """wake:醒来/睁眼/新窗口 handoff 简报(wake up briefing for new session)。新窗口第一件事调用,一次返回六部分:①自我认知(I) ②核心记忆(importance>=8) ③留言板末尾 ④最近 window_hours 小时连续性(默认48) ⑤文件区目录含交接文件提示 ⑥继承区(seed:true,不受 importance 阈值限制,不占浮现配额)。替代逐个调用 breath/dream/file_read 的醒来流程。"""
     return await _with_notice(
         _wake_impl(int(window_hours or 48)),
         op="wake",

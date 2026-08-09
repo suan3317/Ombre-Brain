@@ -130,6 +130,10 @@ _DEFAULT_IMPORTANCE = 5
 _PINNED_IMPORTANCE = 10           # pinned/protected 桶 importance 锁定值
 _DEFAULT_DOMAIN_NAME = "未分类"     # 未提供 domain 时的占位
 ANCHOR_LIMIT_DEFAULT = 24         # 返修单一号改动五：anchor 上限默认值，config anchor.max_count 可覆盖
+# v3 Commit A：seed 上限默认值，config seed.max_count 可覆盖。施工单已定案
+# K/F/G 三家本期同用 ≤30（K 家原话）；不是 importance/pinned 的自动延伸，
+# 是户主逐条圈定的独立上限。
+SEED_LIMIT_DEFAULT = 30
 
 # --- 字段截断长度（避免 frontmatter 肨胀）---
 _SOURCE_TOOL_MAX = 32
@@ -232,6 +236,8 @@ class BucketManager:
         # 返修单一号改动五：anchor 上限从硬编码改为可配置。实例属性覆盖下面
         # 类属性 ANCHOR_LIMIT 的默认值 24；config 没配就还是 24，行为不变。
         self.ANCHOR_LIMIT = int(config.get("anchor", {}).get("max_count", ANCHOR_LIMIT_DEFAULT))
+        # v3 Commit A：seed 上限，同一套 config.<field>.max_count 约定。
+        self.SEED_LIMIT = int(config.get("seed", {}).get("max_count", SEED_LIMIT_DEFAULT))
 
         # --- Wikilink config / 双链配置 ---
         wikilink_cfg = config.get("wikilink", {})
@@ -1174,6 +1180,7 @@ class BucketManager:
             "dont_surface",
             "first_of_kind",
             "anchor",
+            "seed",
         ):
             if field in kwargs:
                 kwargs[field] = parse_bool(kwargs[field])
@@ -1289,6 +1296,11 @@ class BucketManager:
                   # 上限校验在下面 anchor 分支里做（False→True 切换时计数），
                   # set_anchor() 仍是首选入口，update() 只是兜底兼容批量迁移脚本。
                   "anchor",
+                  # v3 Commit A 新增 seed。bool 字段，不锁 importance、不与
+                  # pinned/anchor 互斥（同一桶可以又是核心准则又是种子）。
+                  # 上限校验在下面 seed 分支里做，与 anchor 同一套写法；
+                  # set_seed() 是首选入口，这里同样只是兜底。
+                  "seed",
                   # iter 2.0 来源追踪字段：
                   # source_tool / grow_batch_id 一般在 create() 时定型，
                   # 这里的透传只服务于迁移脚本（给历史桶补字段）。
@@ -1326,6 +1338,24 @@ class BucketManager:
                         post["anchor"] = True
                     else:
                         post.metadata.pop("anchor", None)
+                elif k == "seed":
+                    # v3 Commit A：seed 布尔字段，写法与上面 anchor 分支同构——
+                    # False 时删字段保持 frontmatter 干净；True 时只在
+                    # False→True 切换时计数校验上限，已是 seed 的桶重复设置
+                    # 不重复计数。
+                    if kwargs[k]:
+                        already_seed = parse_bool(post.get("seed", False), default=False)
+                        if not already_seed:
+                            current = await self.count_seeds()
+                            if current >= self.SEED_LIMIT:
+                                logger.warning(
+                                    f"update() 拒绝 seed=True：已达上限 "
+                                    f"{self.SEED_LIMIT}（当前 {current}）。bucket={bucket_id}"
+                                )
+                                return False
+                        post["seed"] = True
+                    else:
+                        post.metadata.pop("seed", None)
                 else:
                     if kwargs[k] is None:
                         # None = 明确删除该 frontmatter 字段（用于 anchor release 清理临时字段）
@@ -1953,6 +1983,60 @@ class BucketManager:
         anchors = [b for b in all_b if b.get("metadata", {}).get("anchor")]
         anchors.sort(key=lambda b: b.get("metadata", {}).get("created", ""))
         return anchors
+
+    # ---------------------------------------------------------
+    # v3 Commit A: seed 系统（种子桶，上限默认 30，同 anchor 一套写法）
+    # seed system — inheritance-zone buckets for the next blank instance
+    # 设计定稿推论四：种子的价值不在被使用，在被继承；资格由 seed:true
+    # 显式声明，importance/pinned/anchor 都不自动构成 seed。
+    # ---------------------------------------------------------
+    SEED_LIMIT = SEED_LIMIT_DEFAULT
+
+    async def count_seeds(self) -> int:
+        """Return current count of buckets with seed=True."""
+        all_b = await self.list_all(include_archive=False)
+        return sum(1 for b in all_b if b.get("metadata", {}).get("seed"))
+
+    async def set_seed(self, bucket_id: str, value: bool) -> dict:
+        """
+        Toggle the seed flag on a bucket. Hard-rejects if cap reached.
+        切换桶的 seed 标记。设为 True 且当前已满 self.SEED_LIMIT 时拒绝。
+
+        与 anchor 不同：seed 不与 pinned/protected/anchor 互斥（这四者是
+        正交的承诺——同一桶完全可以既是核心准则又是要继承给下个实例的
+        种子），因此这里没有 anchor 那套「pinned 冲突拒绝」分支。
+
+        Returns: {"ok": bool, "seed": bool, "count": int, "limit": int, "error": Optional[str]}
+        """
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return {"ok": False, "error": "bucket not found", "count": 0, "limit": self.SEED_LIMIT}
+        current_value = parse_bool(bucket["metadata"].get("seed", False), default=False)
+        target = parse_bool(value)
+        if current_value == target:
+            count = await self.count_seeds()
+            return {"ok": True, "seed": target, "count": count, "limit": self.SEED_LIMIT, "noop": True}
+        if target is True:
+            count = await self.count_seeds()
+            if count >= self.SEED_LIMIT:
+                return {
+                    "ok": False,
+                    "error": f"seed 已达上限 {self.SEED_LIMIT}。请先 trace(bucket_id, seed=0) 释放一条再设新的。",
+                    "count": count,
+                    "limit": self.SEED_LIMIT,
+                }
+        ok = await self.update(bucket_id, seed=target)
+        if not ok:
+            return {"ok": False, "error": "update failed", "count": 0, "limit": self.SEED_LIMIT}
+        new_count = await self.count_seeds()
+        return {"ok": True, "seed": target, "count": new_count, "limit": self.SEED_LIMIT}
+
+    async def list_seeds(self) -> list[dict]:
+        """Return all buckets with seed=True, sorted by created ascending."""
+        all_b = await self.list_all(include_archive=False)
+        seeds = [b for b in all_b if b.get("metadata", {}).get("seed")]
+        seeds.sort(key=lambda b: b.get("metadata", {}).get("created", ""))
+        return seeds
 
     # ---------------------------------------------------------
     # List all buckets

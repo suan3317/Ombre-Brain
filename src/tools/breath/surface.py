@@ -8,6 +8,8 @@ tools/breath/surface.py — 无 query 浮现模式
 
 关键行为：
 - 排除 anchor 桶（anchor 是坐标系，不主动出现）
+- 排除 seed 桶（seed 进 wake 的继承区，不占这里的浮现配额；不影响 pinned
+  核心准则段——pinned+seed 桶仍会在核心准则段正常出现）
 - pinned/protected 桶始终作为「核心准则」置顶（letter 桶即使 importance=10 也不置顶）
 - 未解决桶按 calculate_score 排序；冷启动桶（从未访问且 importance>=8）插队前 2
 - 配置开关 surfacing.sampling.enabled 启用后做加权无放回采样，否则
@@ -139,7 +141,15 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
 
     # --- iter 2.0: anchor 桶在默认浮现模式的 *未解决池* 不出现（anchor 是坐标系不是浮现对象）---
     # anchor 过滤仅作用于 unresolved 候选，不影响 pinned 提取（上方已完成）。
-    all_buckets_non_anchor = [b for b in all_buckets if not b["metadata"].get("anchor", False)]
+    # v3 Commit A: seed 同样只从这里（配额受限的"浮现"候选池）排除——不动
+    # pinned 提取，pinned+seed 的桶该出现在"核心准则"段时仍然出现（design 取数
+    # 口径："seed 进继承区即不占浮现配额"，跟 anchor 那种"永不主动浮现"不是
+    # 一回事，所以不像 anchor 一样也从 pinned_buckets 里排除）。
+    all_buckets_non_anchor_non_seed = [
+        b for b in all_buckets
+        if not b["metadata"].get("anchor", False)
+        and not parse_bool(b["metadata"].get("seed"), default=False)
+    ]
 
     # --- 未解决桶 ---
     # 返修单一号改动三:浮现权重下限,低于 surfacing.min_weight 的桶不进默认
@@ -149,7 +159,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     # 自己冒出来。K 实测:阈值设 4 会误伤 7 月末的日常桶档,默认给 2.5。
     min_weight = float(surfacing_cfg.get("min_weight", _DEFAULT_SURFACING_MIN_WEIGHT))
     unresolved = [
-        b for b in all_buckets_non_anchor
+        b for b in all_buckets_non_anchor_non_seed
         if _can_surface(b)
         and not b["metadata"].get("resolved", False)
         and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "self", "i")
