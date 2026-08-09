@@ -3269,6 +3269,38 @@ function showAuthError(msg) {
   el.style.display = 'block';
 }
 
+async function readAuthFailure(resp, fallback) {
+  try {
+    const data = await resp.json();
+    const error = data && typeof data.error === 'string' ? data.error : '';
+    return error || fallback || ('登录请求失败（HTTP ' + resp.status + '）');
+  } catch (_) {
+    return '登录请求失败（HTTP ' + resp.status + '）：反向代理未返回 OB 的 JSON 响应，请检查是否完整转发 /auth/*。';
+  }
+}
+
+// 反向代理可能吞掉 Set-Cookie（Host/X-Forwarded-Proto 转发不全）导致后端已登录成功、
+// 浏览器却没有会话 cookie——此时不能只看 resp.ok 就关掉登录遮罩，必须回读一次
+// /auth/status 确认会话真的建立了，否则用户会看到"登录成功"但接下来全是 401。
+async function verifyDashboardSessionEstablished() {
+  let sessionReady = false;
+  try {
+    const resp = await fetch('/auth/status', { cache: 'no-store', credentials: 'same-origin' });
+    if (resp.ok) {
+      const data = await resp.json();
+      sessionReady = data.authenticated === true;
+    }
+  } catch (_) { /* 统一在下方显示可操作的会话错误 */ }
+  if (!sessionReady) {
+    document.getElementById('auth-overlay').style.display = 'flex';
+    showAuthError('验证已通过，但浏览器未建立登录会话。请检查反向代理的 Host、X-Forwarded-Proto 与 Set-Cookie 转发。');
+    return false;
+  }
+  document.getElementById('auth-error').style.display = 'none';
+  document.getElementById('auth-overlay').style.display = 'none';
+  return true;
+}
+
 async function doSetup() {
   const p1 = document.getElementById('auth-setup-pwd').value;
   const p2 = document.getElementById('auth-setup-pwd2').value;
@@ -3276,16 +3308,17 @@ async function doSetup() {
   if (p1 !== p2) return showAuthError('两次密码不一致');
   const resp = await fetch('/auth/setup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: p1}) });
   if (!resp.ok) {
-    const d = await resp.json().catch(() => ({}));
-    return showAuthError(d.error || '设置失败');
+    return showAuthError(await readAuthFailure(resp, '设置失败'));
   }
   // 可选：同时保存安全问题
   const q = (document.getElementById('auth-setup-q')?.value || '').trim();
   const a = (document.getElementById('auth-setup-a')?.value || '').trim();
   if (q && a) {
-    await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+    try {
+      await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+    } catch (_) { /* 会话已经建立；可选安全问题保存失败不应卡住 Dashboard */ }
   }
-  document.getElementById('auth-overlay').style.display = 'none';
+  return await verifyDashboardSessionEstablished();
 }
 
 function showLogin() {
@@ -3312,21 +3345,32 @@ async function doRecover() {
   if (newPwd.length < 6) return showAuthError('新密码至少6位');
   const resp = await fetch('/auth/recover', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({answer, new_password: newPwd}) });
   if (resp.ok) {
-    document.getElementById('auth-overlay').style.display = 'none';
+    return await verifyDashboardSessionEstablished();
   } else {
-    const d = await resp.json().catch(() => ({}));
-    showAuthError(d.error || '验证失败');
+    showAuthError(await readAuthFailure(resp, '验证失败'));
+    return false;
   }
 }
 
 async function doLogin() {
   const pwd = document.getElementById('auth-login-pwd').value;
-  const resp = await fetch('/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: pwd}) });
+  let resp;
+  try {
+    resp = await fetch('/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({password: pwd})
+    });
+  } catch (_) {
+    return showAuthError('登录请求未到达 OB，请检查网络以及反向代理是否完整转发 /auth/*。');
+  }
   if (resp.ok) {
-    document.getElementById('auth-overlay').style.display = 'none';
+    return await verifyDashboardSessionEstablished();
   } else {
-    const d = await resp.json().catch(() => ({}));
-    showAuthError(d.detail || '密码错误');
+    showAuthError(await readAuthFailure(resp, '密码错误'));
+    return false;
   }
 }
 

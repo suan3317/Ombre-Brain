@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from web import _shared as shared_web
 from web import auth as auth_web
 
 
@@ -103,3 +104,41 @@ async def test_recover_does_not_clear_failures_for_invalid_new_password(
     assert response.status_code == 400
     assert successes == []
     assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_environment_password_login_succeeds_from_trusted_docker_gateway(
+    monkeypatch, tmp_path
+):
+    """Docker 网关（如 172.17.0.1）转发的登录请求要能正确识别为可信代理，
+    并在 X-Forwarded-Proto: https 下签发 Secure cookie——回归 8904f47 覆盖的
+    反代场景：可信网关本身不应被当成不可信来源而拒绝或漏发 Secure 标记。"""
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "proxy-secret")
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "172.17.0.1/32")
+    monkeypatch.setitem(shared_web.config, "buckets_dir", str(tmp_path))
+    shared_web._sessions.clear()
+    shared_web._login_failures.clear()
+    shared_web._login_locked_until.clear()
+    mcp = FakeMCP()
+    auth_web.register(mcp)
+    request = JsonRequest({"password": "proxy-secret"})
+    request.headers = {
+        "host": "ombre.example:18080",
+        "x-forwarded-for": "198.51.100.23",
+        "x-forwarded-host": "ombre.example:18080",
+        "x-forwarded-proto": "https",
+    }
+    request.client = type("Client", (), {"host": "172.17.0.1"})()
+
+    try:
+        response = await mcp.routes[("POST", "/auth/login")](request)
+    finally:
+        shared_web._sessions.clear()
+        shared_web._login_failures.clear()
+        shared_web._login_locked_until.clear()
+
+    assert response.status_code == 200
+    assert _payload(response) == {"ok": True}
+    cookie = response.headers["set-cookie"]
+    assert "ombre_session=" in cookie
+    assert "Secure" in cookie
