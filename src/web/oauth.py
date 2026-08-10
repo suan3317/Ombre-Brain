@@ -48,7 +48,7 @@ _mcp_token_resources: dict[str, str] = {}  # token -> canonical MCP resource
 _mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id, resource}
 
 _OAUTH_CODE_TTL = 300               # 5 min
-_MCP_TOKEN_TTL = 86400 * 30         # 30 天；避免 100 年秒数溢出部分客户端的 32-bit duration
+_MCP_TOKEN_TTL = 86400 * 24000       # 约65.7年，家用永久语义，同时不溢出32位duration（2^31-1）；尊重c02f60a的溢出边界但不采纳其30天值，见抄引账本
 _MCP_REFRESH_TOKEN_TTL = 86400 * 365
 _MCP_SCOPE = "mcp"
 _OAUTH_CLIENT_TTL = 86400 * 365
