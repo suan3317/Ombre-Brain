@@ -186,7 +186,7 @@ def effective_configuration_report(
             "transport": effective_transport,
             "mcp_require_auth": effective_auth,
             "buckets_dir": str(runtime_config.get("buckets_dir") or ""),
-            "bind_host": str(env.get("OMBRE_BIND_HOST", "") or "0.0.0.0"),
+            "bind_host": str(env.get("OMBRE_BIND_HOST", "") or "0.0.0.0"),  # nosec B104 - containers intentionally bind all interfaces; OMBRE_BIND_HOST overrides
         },
         "overrides": overrides,
         "environment_sources": environment_sources,

@@ -44,6 +44,7 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta, date as _date
+from pathlib import Path
 
 try:
     from zoneinfo import ZoneInfo
@@ -430,6 +431,7 @@ def _tzinfo(tz_name: str):
 # ================================================================
 
 _DREAM_BOOK_DIRNAME = "dream_book"
+_DREAM_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def dream_book_dir(buckets_dir: str) -> str:
@@ -440,7 +442,24 @@ def dream_book_dir(buckets_dir: str) -> str:
 
 def dream_book_path(buckets_dir: str, day) -> str:
     date_str = day if isinstance(day, str) else day.isoformat()
-    return os.path.join(dream_book_dir(buckets_dir), f"{date_str}.md")
+    if not _DREAM_DATE_PATTERN.fullmatch(date_str):
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+    try:
+        parsed = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期") from exc
+    if parsed.strftime("%Y-%m-%d") != date_str:
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+
+    root = Path(dream_book_dir(buckets_dir)).resolve()
+    path = (root / f"{date_str}.md").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("dream 路径越出 dream_book 根目录") from exc
+    if path.parent != root:
+        raise ValueError("dream 路径越出 dream_book 根目录")
+    return str(path)
 
 
 def dream_book_id(date_str: str) -> str:
@@ -481,8 +500,11 @@ def list_dream_book_entries(buckets_dir: str) -> list[dict]:
 def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None) -> dict:
     """把某晚的梦标记 kept，永久保留。已经 burned 的没法再 keep——正文
     已经被占位句替换掉，keep 也留不回原文，如实拒绝而不是假装成功。"""
-    date_str = (date_str or "").strip()
-    path = dream_book_path(buckets_dir, date_str)
+    date_str = "" if date_str is None else str(date_str)
+    try:
+        path = dream_book_path(buckets_dir, date_str)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if not os.path.isfile(path):
         return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
     try:
@@ -508,8 +530,11 @@ def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None
 def dream_book_delete(buckets_dir: str, date_str: str) -> dict:
     """Dashboard 手动删除：物理删该条。burned 的骨架永久保留，不给删——
     骨架本身就是"那晚做过梦"的唯一痕迹，删了这个日期就彻底没了记录。"""
-    date_str = (date_str or "").strip()
-    path = dream_book_path(buckets_dir, date_str)
+    date_str = "" if date_str is None else str(date_str)
+    try:
+        path = dream_book_path(buckets_dir, date_str)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if not os.path.isfile(path):
         return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
     try:
@@ -530,15 +555,18 @@ def burn_expired_dreams(buckets_dir: str, expire_hours: float, tz=None) -> int:
     expire_hours 的，正文替换成占位句，keep_status 置 burned。日期骨架
     永久保留。返回本次烧毁的条数。跟"投递没投递"(read_status)无关——
     没 keep 就烧，是梦境书的默认生命周期，不是"没看到就算了"。"""
-    root = dream_book_dir(buckets_dir)
-    if not os.path.isdir(root):
+    root = Path(dream_book_dir(buckets_dir)).resolve()
+    if not root.is_dir():
         return 0
     now = datetime.now(tz) if tz else datetime.now()
     burned = 0
     for fn in os.listdir(root):
         if not fn.endswith(".md"):
             continue
-        path = os.path.join(root, fn)
+        path = (root / fn).resolve()
+        if path.parent != root:
+            logger.warning(f"dream_book: 烧毁检查拒绝越界路径 {fn}")
+            continue
         try:
             post = fm.load(path)
         except Exception as e:

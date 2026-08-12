@@ -10,6 +10,7 @@
 import os
 import random
 import datetime as dt
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1382,6 +1383,59 @@ def test_dream_book_keep_missing_date_reports_error(tmp_path):
     engine = make_engine(tmp_path)  # noqa: F841 - 只为触发 buckets_dir 创建
     result = dream_book_keep(str(tmp_path), "2026-01-01")
     assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "invalid_date",
+    [
+        "../../etc/x",
+        "2026-08-11/../../x",
+        "....//",
+        "/tmp/absolute",
+        "",
+        "2026-13-45",
+        " 2026-08-11",
+        "2026-08-11 ",
+    ],
+)
+@pytest.mark.parametrize("operation", [dream_book_keep, dream_book_delete])
+def test_dream_book_mutations_reject_invalid_dates(tmp_path, invalid_date, operation):
+    result = operation(str(tmp_path), invalid_date)
+
+    assert result["ok"] is False
+    assert result["error"] == "date 必须是有效的 YYYY-MM-DD 日期"
+
+
+def test_dream_book_path_rejects_resolved_escape(tmp_path, monkeypatch):
+    root = Path(dream_book_dir(str(tmp_path))).resolve()
+    outside = (tmp_path / "outside" / "2026-08-11.md").resolve()
+    original_resolve = Path.resolve
+
+    def resolve_outside(candidate, *args, **kwargs):
+        if candidate.parent == root and candidate.name == "2026-08-11.md":
+            return outside
+        return original_resolve(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_outside)
+
+    result = dream_book_keep(str(tmp_path), "2026-08-11")
+
+    assert result == {
+        "ok": False,
+        "error": "dream 路径越出 dream_book 根目录",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_date", [" 2026-08-11", "2026-08-11 "])
+async def test_mcp_dream_keep_rejects_whitespace_date(tmp_path, monkeypatch, invalid_date):
+    import server as srv
+
+    monkeypatch.setattr(srv, "config", {**srv.config, "buckets_dir": str(tmp_path)})
+
+    result = await srv._dream_keep_impl(invalid_date)
+
+    assert result == "没留成:date 必须是有效的 YYYY-MM-DD 日期"
 
 
 def test_burn_expired_dreams_replaces_only_fresh_past_48h(tmp_path):

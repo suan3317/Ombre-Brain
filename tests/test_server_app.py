@@ -1,10 +1,13 @@
 import asyncio
 import json
+import warnings
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
 
 from server_app import (
     DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
@@ -211,7 +214,8 @@ async def test_ngrok_header_middleware_ignores_non_http_scopes():
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url():
+@pytest.mark.parametrize("path", ["/mcp", "/sse", "/messages/"])
+async def test_auth_middleware_rejects_missing_token_on_all_mcp_transports(path):
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
@@ -222,7 +226,7 @@ async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url
     scope = {
         "type": "http",
         "scheme": "http",
-        "path": "/mcp",
+        "path": path,
         "headers": [
             (b"host", b"internal:8000"),
             (b"x-forwarded-proto", b"https, http"),
@@ -241,14 +245,12 @@ async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
+async def test_auth_middleware_denies_unrecognized_paths_by_default():
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
         auth_required=True,
-        token_validator=lambda *_args, **_kwargs: pytest.fail(
-            "retired routes must reach the router without OAuth validation"
-        ),
+        token_validator=lambda *_args, **_kwargs: False,
     )
     messages = []
     scope = {
@@ -260,8 +262,82 @@ async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
 
     await middleware(scope, _empty_receive, _collect_into(messages))
 
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/health",
+        "/static/app.js",
+        "/api/status",
+        "/auth/login",
+        "/oauth/token",
+        "/.well-known/oauth-authorization-server",
+        "/dashboard",
+        "/onboarding",
+        "/files",
+        "/letters",
+        "/portrait",
+        "/breath-hook",
+        "/favicon.ico",
+    ],
+)
+async def test_auth_middleware_allows_only_explicit_exempt_route_groups(path):
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "explicitly exempt routes must use their own access controls"
+        ),
+    )
+    scope = {"type": "http", "path": path, "headers": []}
+
+    await middleware(scope, _empty_receive, _discard_send)
+
     assert downstream.scopes == [scope]
-    assert messages[0]["status"] == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mcp",
+        "/mcp/",
+        "/sse",
+        "/sse/connection",
+        "/messages/",
+        "/messages/session-1",
+    ],
+)
+async def test_auth_middleware_accepts_valid_token_on_all_mcp_transports(path):
+    downstream = RecordingASGIApp()
+
+    def validator(token, *, resource):
+        return token == "correct-token" and resource == "https://ombre.example/mcp"
+
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=validator,
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": path,
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer correct-token"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
 
 
 @pytest.mark.asyncio
@@ -481,6 +557,49 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
     }
     assert app.state.ombre_http_settings is settings
     assert app.state.ombre_runtime_lifecycle is lifecycle
+
+
+def test_build_http_app_allows_sse_cors_preflight_without_dispatching():
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Using `httpx` with `starlette.testclient` is deprecated",
+        )
+        from starlette.testclient import TestClient
+
+    dispatched = []
+
+    async def sse_endpoint(request):
+        dispatched.append(request.method)
+        return Response(status_code=500)
+
+    class FakeMCP:
+        def sse_app(self):
+            return Starlette(routes=[Route("/sse", sse_endpoint, methods=["OPTIONS"])])
+
+    app = build_http_app(
+        FakeMCP(),
+        "sse",
+        settings=HTTPRuntimeSettings(auth_required=True, max_request_bytes=2048),
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "CORS preflight must not require an MCP bearer token"
+        ),
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+    )
+
+    with TestClient(app) as client:
+        response = client.options(
+            "/sse",
+            headers={
+                "Origin": "https://client.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "GET" in response.headers["access-control-allow-methods"]
+    assert dispatched == []
 
 
 def test_build_http_app_rejects_stdio_transport():

@@ -10,10 +10,50 @@ _Receive = Callable[[], Awaitable[dict]]
 _Send = Callable[[dict], Awaitable[None]]
 _REJECTION_DRAIN_MULTIPLIER = 2
 
+_MCP_ENDPOINT_ROOTS = ("/mcp", "/sse", "/messages")
+
+# These routes belong to the Dashboard, its session-auth flow, or the OAuth
+# bootstrap protocol. They must reach their own route-level access controls;
+# every other HTTP path is treated as an MCP transport path by the outer auth
+# middleware so a newly introduced SDK endpoint cannot silently become public.
+_MCP_AUTH_EXEMPT_EXACT_PATHS = {
+    "/",
+    "/breath-hook",
+    "/dashboard",
+    "/favicon.ico",
+    "/files",
+    "/health",
+    "/letters",
+    "/onboarding",
+    "/portrait",
+}
+_MCP_AUTH_EXEMPT_PREFIXES = (
+    "/.well-known/",
+    "/api/",
+    "/auth/",
+    "/oauth/",
+    "/static/",
+)
+
 
 def is_mcp_endpoint_path(path: object) -> bool:
-    """Match the one public MCP endpoint without accepting prefix lookalikes."""
-    return str(path or "").rstrip("/") == "/mcp"
+    """Match every SDK MCP transport endpoint, including nested forms."""
+    normalized = str(path or "").rstrip("/") or "/"
+    return any(
+        normalized == root or normalized.startswith(f"{root}/")
+        for root in _MCP_ENDPOINT_ROOTS
+    )
+
+
+def is_mcp_auth_exempt_path(path: object) -> bool:
+    """Return whether a path may bypass the outer MCP bearer-token gate."""
+    normalized = str(path or "").rstrip("/") or "/"
+    if normalized in _MCP_AUTH_EXEMPT_EXACT_PATHS:
+        return True
+    return any(
+        normalized == prefix.rstrip("/") or normalized.startswith(prefix)
+        for prefix in _MCP_AUTH_EXEMPT_PREFIXES
+    )
 
 
 class MCPRequestBodyLimitMiddleware:
