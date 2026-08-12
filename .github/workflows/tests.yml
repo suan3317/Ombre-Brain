@@ -110,9 +110,15 @@ jobs:
       - name: Run Docker Web management integration suite
         env:
           OMBRE_DOCKER_WEB_BASE_URL: http://127.0.0.1:18084
-        run: >-
-          python -m pytest tests/test_web_api_docker_integration.py -q
-          --timeout=120
+        run: |
+          bootstrap_secret="$(docker exec ob-ci-app sh -c 'if [ -s /app/buckets/.bootstrap_secret ]; then cat /app/buckets/.bootstrap_secret; fi')"
+          if [ -z "$bootstrap_secret" ]; then
+            echo "::error::Docker bootstrap secret is missing or empty" >&2
+            exit 1
+          fi
+          export OMBRE_DOCKER_WEB_BOOTSTRAP_SECRET="$bootstrap_secret"
+          python -m pytest tests/test_web_api_docker_integration.py -q \
+            --timeout=120
 
       - name: Clean Docker MCP stack
         if: always()

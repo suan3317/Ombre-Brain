@@ -30,6 +30,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_desktop_management_api_first_run_and_authenticated_flow():
+    bootstrap_secret = os.environ.get(
+        "OMBRE_DOCKER_WEB_BOOTSTRAP_SECRET", ""
+    ).strip()
+    if not bootstrap_secret:
+        pytest.fail("OMBRE_DOCKER_WEB_BOOTSTRAP_SECRET is missing or empty")
+
     with httpx.Client(base_url=BASE_URL, timeout=60.0, trust_env=False) as client:
         health = client.get("/health")
         assert health.status_code == 200
@@ -51,12 +57,18 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         protected_before = client.get("/api/config")
         assert protected_before.status_code == 401
 
-        weak_password = client.post("/auth/setup", json={"password": "123"})
+        weak_password = client.post(
+            "/auth/setup",
+            json={"password": "123", "bootstrap_secret": bootstrap_secret},
+        )
         assert weak_password.status_code == 400
 
         setup = client.post(
             "/auth/setup",
-            json={"password": "docker-audit-password"},
+            json={
+                "password": "docker-audit-password",
+                "bootstrap_secret": bootstrap_secret,
+            },
         )
         assert setup.status_code == 200
         assert setup.json()["ok"] is True
