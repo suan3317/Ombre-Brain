@@ -142,12 +142,22 @@ class MCPAuthMiddleware:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
+        headers = (
+            {key.lower(): value for key, value in scope.get("headers", [])}
+            if scope.get("type") == "http"
+            else {}
+        )
+        is_cors_preflight = (
+            str(scope.get("method", "")).upper() == "OPTIONS"
+            and b"origin" in headers
+            and b"access-control-request-method" in headers
+        )
         if (
             scope.get("type") == "http"
             and self.auth_required
+            and not is_cors_preflight
             and not is_mcp_auth_exempt_path(path)
         ):
-            headers = {key.lower(): value for key, value in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode("latin-1")
             resource, base = _request_resource(scope, headers)
             valid = auth.startswith("Bearer ") and self.token_validator(

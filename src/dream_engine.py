@@ -500,7 +500,7 @@ def list_dream_book_entries(buckets_dir: str) -> list[dict]:
 def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None) -> dict:
     """把某晚的梦标记 kept，永久保留。已经 burned 的没法再 keep——正文
     已经被占位句替换掉，keep 也留不回原文，如实拒绝而不是假装成功。"""
-    date_str = (date_str or "").strip()
+    date_str = "" if date_str is None else str(date_str)
     try:
         path = dream_book_path(buckets_dir, date_str)
     except ValueError as exc:
@@ -530,7 +530,7 @@ def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None
 def dream_book_delete(buckets_dir: str, date_str: str) -> dict:
     """Dashboard 手动删除：物理删该条。burned 的骨架永久保留，不给删——
     骨架本身就是"那晚做过梦"的唯一痕迹，删了这个日期就彻底没了记录。"""
-    date_str = (date_str or "").strip()
+    date_str = "" if date_str is None else str(date_str)
     try:
         path = dream_book_path(buckets_dir, date_str)
     except ValueError as exc:

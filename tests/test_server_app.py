@@ -1,10 +1,13 @@
 import asyncio
 import json
+import warnings
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
 
 from server_app import (
     DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
@@ -554,6 +557,49 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
     }
     assert app.state.ombre_http_settings is settings
     assert app.state.ombre_runtime_lifecycle is lifecycle
+
+
+def test_build_http_app_allows_sse_cors_preflight_without_dispatching():
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Using `httpx` with `starlette.testclient` is deprecated",
+        )
+        from starlette.testclient import TestClient
+
+    dispatched = []
+
+    async def sse_endpoint(request):
+        dispatched.append(request.method)
+        return Response(status_code=500)
+
+    class FakeMCP:
+        def sse_app(self):
+            return Starlette(routes=[Route("/sse", sse_endpoint, methods=["OPTIONS"])])
+
+    app = build_http_app(
+        FakeMCP(),
+        "sse",
+        settings=HTTPRuntimeSettings(auth_required=True, max_request_bytes=2048),
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "CORS preflight must not require an MCP bearer token"
+        ),
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+    )
+
+    with TestClient(app) as client:
+        response = client.options(
+            "/sse",
+            headers={
+                "Origin": "https://client.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "GET" in response.headers["access-control-allow-methods"]
+    assert dispatched == []
 
 
 def test_build_http_app_rejects_stdio_transport():
