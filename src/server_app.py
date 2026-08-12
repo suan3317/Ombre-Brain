@@ -37,6 +37,34 @@ TokenValidator = Callable[..., bool]
 AsyncCallback = Callable[[], Awaitable[Any]]
 
 
+# Routes hosted on the same FastMCP ASGI app but protected by their own
+# Dashboard/session, hook-token, or OAuth bootstrap controls.  Everything else
+# is treated as an MCP transport route and therefore requires the MCP bearer.
+_MCP_AUTH_EXEMPT_EXACT_PATHS = {
+    "/",
+    "/breath-hook",
+    "/dashboard",
+    "/favicon.ico",
+    "/files",
+    "/health",
+    "/letters",
+}
+_MCP_AUTH_EXEMPT_PATH_PREFIXES = (
+    "/.well-known/",
+    "/api/",
+    "/auth/",
+    "/oauth/",
+    "/static/",
+)
+
+
+def _is_mcp_auth_exempt_path(path: object) -> bool:
+    normalized = str(path or "")
+    return normalized in _MCP_AUTH_EXEMPT_EXACT_PATHS or normalized.startswith(
+        _MCP_AUTH_EXEMPT_PATH_PREFIXES
+    )
+
+
 @dataclass(frozen=True)
 class HTTPRuntimeSettings:
     """Normalized settings used while assembling an HTTP MCP application."""
@@ -123,7 +151,7 @@ def _request_resource(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) 
 
 
 class MCPAuthMiddleware:
-    """Require an OAuth bearer token for the streamable MCP endpoint."""
+    """Require an MCP bearer by default, except for explicit non-MCP routes."""
 
     def __init__(
         self,
@@ -140,14 +168,17 @@ class MCPAuthMiddleware:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
+        method = str(scope.get("method", "GET")).upper()
         if (
             scope.get("type") == "http"
             and self.auth_required
-            and is_mcp_endpoint_path(path)
+            and method != "OPTIONS"
+            and not _is_mcp_auth_exempt_path(path)
         ):
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode("latin-1")
-            resource, base = _request_resource(scope, headers)
+            _request_url, base = _request_resource(scope, headers)
+            resource = f"{base}/mcp"
             valid = auth.startswith("Bearer ") and self.token_validator(
                 auth[7:], resource=resource
             )
@@ -159,16 +190,13 @@ class MCPAuthMiddleware:
                 if alt_token:
                     valid = self.token_validator(alt_token, resource=resource)
             if not valid:
-                endpoint = path.strip("/")
                 if self.auth_mode == "token":
                     # No OAuth server exists in token mode — a resource_metadata
                     # challenge pointing at a 404'd discovery endpoint would mislead.
                     challenge = 'Bearer realm="Ombre Brain"'
                     body = json.dumps({"error": "Unauthorized"}).encode()
                 else:
-                    metadata_url = (
-                        f"{base}/.well-known/oauth-protected-resource/{endpoint}"
-                    )
+                    metadata_url = f"{base}/.well-known/oauth-protected-resource/mcp"
                     challenge = (
                         'Bearer realm="Ombre Brain",'
                         f' resource_metadata="{metadata_url}", scope="mcp"'

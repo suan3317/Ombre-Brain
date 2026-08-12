@@ -833,7 +833,7 @@ async def dream(window_hours: Optional[int] = 48) -> str:
 
 async def _dream_keep_impl(date: str) -> str:
     from dream_engine import dream_book_keep
-    result = dream_book_keep(config.get("buckets_dir", "buckets"), str(date or "").strip())
+    result = dream_book_keep(config.get("buckets_dir", "buckets"), str(date or ""))
     if not result["ok"]:
         return f"没留成:{result['error']}"
     if result.get("already_kept"):

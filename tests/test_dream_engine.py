@@ -18,6 +18,7 @@ import frontmatter as fm
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import dream_engine as dream_engine_module  # noqa: E402
 from dream_engine import (  # noqa: E402
     DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
     dream_book_dir, dream_book_path, dream_book_id, list_dream_book_entries,
@@ -1382,6 +1383,44 @@ def test_dream_book_keep_missing_date_reports_error(tmp_path):
     engine = make_engine(tmp_path)  # noqa: F841 - 只为触发 buckets_dir 创建
     result = dream_book_keep(str(tmp_path), "2026-01-01")
     assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "invalid_date",
+    [
+        "../../etc/x",
+        "2026-08-11/../../x",
+        "....//",
+        "/tmp/absolute",
+        r"C:\absolute\dream",
+        "",
+        "2026-13-45",
+    ],
+)
+@pytest.mark.parametrize("operation", [dream_book_keep, dream_book_delete])
+def test_dream_book_date_operations_reject_invalid_or_escaping_dates(
+    tmp_path, operation, invalid_date
+):
+    result = operation(str(tmp_path), invalid_date)
+
+    assert result["ok"] is False
+    assert result["error"]
+
+
+def test_dream_book_path_rejects_resolved_path_escape(tmp_path, monkeypatch):
+    dream_book_dir(str(tmp_path))
+    outside = tmp_path / "outside.md"
+    real_resolve = dream_engine_module.Path.resolve
+
+    def resolve_outside_for_candidate(path, *args, **kwargs):
+        if path.name == "2026-08-11.md":
+            return outside
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(dream_engine_module.Path, "resolve", resolve_outside_for_candidate)
+
+    with pytest.raises(ValueError, match="dream_book"):
+        dream_book_path(str(tmp_path), "2026-08-11")
 
 
 def test_burn_expired_dreams_replaces_only_fresh_past_48h(tmp_path):

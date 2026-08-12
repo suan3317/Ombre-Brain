@@ -44,6 +44,7 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta, date as _date
+from pathlib import Path
 
 try:
     from zoneinfo import ZoneInfo
@@ -439,8 +440,26 @@ def dream_book_dir(buckets_dir: str) -> str:
 
 
 def dream_book_path(buckets_dir: str, day) -> str:
-    date_str = day if isinstance(day, str) else day.isoformat()
-    return os.path.join(dream_book_dir(buckets_dir), f"{date_str}.md")
+    if isinstance(day, str):
+        date_str = day
+    elif isinstance(day, _date):
+        date_str = day.isoformat()
+    else:
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+    try:
+        _date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期") from exc
+
+    root = Path(dream_book_dir(buckets_dir)).resolve()
+    path = (root / f"{date_str}.md").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("梦境文件路径越出 dream_book 根目录") from exc
+    return str(path)
 
 
 def dream_book_id(date_str: str) -> str:
@@ -481,8 +500,11 @@ def list_dream_book_entries(buckets_dir: str) -> list[dict]:
 def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None) -> dict:
     """把某晚的梦标记 kept，永久保留。已经 burned 的没法再 keep——正文
     已经被占位句替换掉，keep 也留不回原文，如实拒绝而不是假装成功。"""
-    date_str = (date_str or "").strip()
-    path = dream_book_path(buckets_dir, date_str)
+    date_str = date_str or ""
+    try:
+        path = dream_book_path(buckets_dir, date_str)
+    except (TypeError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
     if not os.path.isfile(path):
         return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
     try:
@@ -508,8 +530,11 @@ def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None
 def dream_book_delete(buckets_dir: str, date_str: str) -> dict:
     """Dashboard 手动删除：物理删该条。burned 的骨架永久保留，不给删——
     骨架本身就是"那晚做过梦"的唯一痕迹，删了这个日期就彻底没了记录。"""
-    date_str = (date_str or "").strip()
-    path = dream_book_path(buckets_dir, date_str)
+    date_str = date_str or ""
+    try:
+        path = dream_book_path(buckets_dir, date_str)
+    except (TypeError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
     if not os.path.isfile(path):
         return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
     try:
