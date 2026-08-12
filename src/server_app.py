@@ -23,6 +23,7 @@ from utils import parse_bool
 from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
     ManagementRequestBodyLimitMiddleware,
+    is_mcp_auth_exempt_path,
     is_mcp_endpoint_path,
 )
 
@@ -107,8 +108,7 @@ def _request_resource(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) 
     override = os.environ.get("OMBRE_PUBLIC_BASE_URL", "").strip()
     if override:
         base = override.rstrip("/")
-        path = str(scope.get("path", ""))
-        return f"{base}{path.rstrip('/')}", base
+        return f"{base}/mcp", base
     proto = _first_forwarded_value(
         headers.get(b"x-forwarded-proto", b"").decode("latin-1")
     ) or str(scope.get("scheme", "http"))
@@ -117,13 +117,15 @@ def _request_resource(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) 
             "latin-1"
         )
     )
-    path = str(scope.get("path", ""))
     base = f"{proto}://{host}"
-    return f"{base}{path.rstrip('/')}", base
+    # OAuth tokens are issued for the server's canonical MCP resource. SSE's
+    # /sse and /messages/ routes are alternate transports for that resource,
+    # not independent OAuth resources.
+    return f"{base}/mcp", base
 
 
 class MCPAuthMiddleware:
-    """Require an OAuth bearer token for the streamable MCP endpoint."""
+    """Require a bearer token unless a route is explicitly exempt."""
 
     def __init__(
         self,
@@ -143,7 +145,7 @@ class MCPAuthMiddleware:
         if (
             scope.get("type") == "http"
             and self.auth_required
-            and is_mcp_endpoint_path(path)
+            and not is_mcp_auth_exempt_path(path)
         ):
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode("latin-1")
@@ -159,7 +161,6 @@ class MCPAuthMiddleware:
                 if alt_token:
                     valid = self.token_validator(alt_token, resource=resource)
             if not valid:
-                endpoint = path.strip("/")
                 if self.auth_mode == "token":
                     # No OAuth server exists in token mode — a resource_metadata
                     # challenge pointing at a 404'd discovery endpoint would mislead.
@@ -167,7 +168,7 @@ class MCPAuthMiddleware:
                     body = json.dumps({"error": "Unauthorized"}).encode()
                 else:
                     metadata_url = (
-                        f"{base}/.well-known/oauth-protected-resource/{endpoint}"
+                        f"{base}/.well-known/oauth-protected-resource/mcp"
                     )
                     challenge = (
                         'Bearer realm="Ombre Brain",'

@@ -211,7 +211,8 @@ async def test_ngrok_header_middleware_ignores_non_http_scopes():
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url():
+@pytest.mark.parametrize("path", ["/mcp", "/sse", "/messages/"])
+async def test_auth_middleware_rejects_missing_token_on_all_mcp_transports(path):
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
@@ -222,7 +223,7 @@ async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url
     scope = {
         "type": "http",
         "scheme": "http",
-        "path": "/mcp",
+        "path": path,
         "headers": [
             (b"host", b"internal:8000"),
             (b"x-forwarded-proto", b"https, http"),
@@ -241,14 +242,12 @@ async def test_auth_middleware_rejects_missing_token_with_canonical_metadata_url
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
+async def test_auth_middleware_denies_unrecognized_paths_by_default():
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
         auth_required=True,
-        token_validator=lambda *_args, **_kwargs: pytest.fail(
-            "retired routes must reach the router without OAuth validation"
-        ),
+        token_validator=lambda *_args, **_kwargs: False,
     )
     messages = []
     scope = {
@@ -260,8 +259,82 @@ async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
 
     await middleware(scope, _empty_receive, _collect_into(messages))
 
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/health",
+        "/static/app.js",
+        "/api/status",
+        "/auth/login",
+        "/oauth/token",
+        "/.well-known/oauth-authorization-server",
+        "/dashboard",
+        "/onboarding",
+        "/files",
+        "/letters",
+        "/portrait",
+        "/breath-hook",
+        "/favicon.ico",
+    ],
+)
+async def test_auth_middleware_allows_only_explicit_exempt_route_groups(path):
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: pytest.fail(
+            "explicitly exempt routes must use their own access controls"
+        ),
+    )
+    scope = {"type": "http", "path": path, "headers": []}
+
+    await middleware(scope, _empty_receive, _discard_send)
+
     assert downstream.scopes == [scope]
-    assert messages[0]["status"] == 204
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mcp",
+        "/mcp/",
+        "/sse",
+        "/sse/connection",
+        "/messages/",
+        "/messages/session-1",
+    ],
+)
+async def test_auth_middleware_accepts_valid_token_on_all_mcp_transports(path):
+    downstream = RecordingASGIApp()
+
+    def validator(token, *, resource):
+        return token == "correct-token" and resource == "https://ombre.example/mcp"
+
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=validator,
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": path,
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer correct-token"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
 
 
 @pytest.mark.asyncio

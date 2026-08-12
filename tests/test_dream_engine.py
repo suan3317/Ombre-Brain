@@ -1384,6 +1384,44 @@ def test_dream_book_keep_missing_date_reports_error(tmp_path):
     assert result["ok"] is False
 
 
+@pytest.mark.parametrize(
+    "invalid_date",
+    [
+        "../../etc/x",
+        "2026-08-11/../../x",
+        "....//",
+        "/tmp/absolute",
+        "",
+        "2026-13-45",
+    ],
+)
+@pytest.mark.parametrize("operation", [dream_book_keep, dream_book_delete])
+def test_dream_book_mutations_reject_invalid_dates(tmp_path, invalid_date, operation):
+    result = operation(str(tmp_path), invalid_date)
+
+    assert result["ok"] is False
+    assert result["error"] == "date 必须是有效的 YYYY-MM-DD 日期"
+
+
+def test_dream_book_path_rejects_symlink_escape(tmp_path):
+    root = dream_book_dir(str(tmp_path))
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    link = os.path.join(root, "2026-08-11.md")
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    result = dream_book_keep(str(tmp_path), "2026-08-11")
+
+    assert result == {
+        "ok": False,
+        "error": "dream 路径越出 dream_book 根目录",
+    }
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
 def test_burn_expired_dreams_replaces_only_fresh_past_48h(tmp_path):
     engine = make_engine(tmp_path)
     fresh_old_day = dt.date(2026, 7, 1)
