@@ -426,6 +426,23 @@ def _trusted_forwarded_value(request: Request, header: str) -> str:
         return ""
 
 
+def _is_loopback_request(request: Request) -> bool:
+    """P0-5 5-A: True if the caller is on loopback (127.0.0.0/8, ::1).
+
+    Same trust model as _client_key/_trusted_forwarded_value: a forwarded
+    header is only honored when the immediate peer is an explicitly trusted
+    proxy (OMBRE_TRUSTED_PROXY_CIDRS), so a direct internet client can't
+    spoof "127.0.0.1" in X-Forwarded-For to pass as loopback.
+    """
+    forwarded = _trusted_forwarded_value(request, "x-forwarded-for")
+    client = getattr(request, "client", None)
+    peer = forwarded or str(getattr(client, "host", "") or "")
+    try:
+        return ipaddress.ip_address(peer.strip()).is_loopback
+    except ValueError:
+        return False
+
+
 def _login_retry_after(request: Request) -> int:
     """>0 = 当前被锁，返回建议等待秒数；0 = 允许尝试。"""
     key = _client_key(request)

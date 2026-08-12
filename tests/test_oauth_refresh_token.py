@@ -200,7 +200,7 @@ async def test_refresh_token_grant_renews_access_without_browser_authorization(o
     first_access_token = initial["access_token"]
     refresh_token = initial["refresh_token"]
 
-    oauth_mod._mcp_tokens[first_access_token] = time.time() - 1
+    oauth_mod._mcp_tokens[oauth_mod._hash_token(first_access_token)] = time.time() - 1
     assert oauth_mod._is_valid_mcp_token(first_access_token) is False
 
     refresh_response = await oauth_routes[("POST", "/oauth/token")](

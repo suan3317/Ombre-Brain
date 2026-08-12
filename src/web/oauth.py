@@ -43,9 +43,21 @@ logger = sh.logger
 
 _oauth_clients: dict[str, dict] = {}
 _oauth_codes: dict[str, dict] = {}    # code -> {client_id, redirect_uri, code_challenge, expires}
-_mcp_tokens: dict[str, float] = {}    # token -> expiry timestamp
-_mcp_token_resources: dict[str, str] = {}  # token -> canonical MCP resource
-_mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id, resource}
+# P0-5 5-C: 这三个字典的 key 从"明文 token 本身"改成"sha256(token) 的 hex
+# digest"。access/refresh token 都是 secrets.token_urlsafe(32) 出来的高熵
+# 随机串，不是人记的低熵密码——不需要慢哈希（PBKDF2），查表本身就是"先哈希
+# 再查"，不是明文逐字节比对。落盘的 .dashboard_mcp_tokens.json 现在也只
+# 写这个哈希，明文 token 只在签发的那一次 HTTP 响应里出现过，之后服务端
+# 任何地方（内存/磁盘/日志）都不会再持有它。
+_mcp_tokens: dict[str, float] = {}    # sha256(token) -> expiry timestamp
+_mcp_token_resources: dict[str, str] = {}  # sha256(token) -> canonical MCP resource
+_mcp_token_family: dict[str, str] = {}  # sha256(token) -> refresh family_id（同一条续期链）
+_mcp_refresh_tokens: dict[str, dict] = {}  # sha256(refresh_token) -> {expires, client_id, resource, family_id}
+# refresh token 使用后立即轮换、旧的失效；这里记一份"曾经合法、已经被
+# 轮换掉"的哈希→family_id，用来在旧 token 被重放时识别出这是同一条链，
+# 而不是随手编的垃圾输入——命中即判定链路可能已泄露，整条 family 连坐吊销。
+_used_refresh_token_families: dict[str, dict] = {}  # sha256(old_refresh_token) -> {family_id, expires}
+_MCP_TOKENS_FORMAT_MARKER = "hashed_v1"
 
 _OAUTH_CODE_TTL = 300               # 5 min
 _MCP_TOKEN_TTL = 86400 * 24000       # 约65.7年，家用永久语义，同时不溢出32位duration（2^31-1）；尊重c02f60a的溢出边界但不采纳其30天值，见抄引账本
@@ -127,9 +139,54 @@ def _cleanup_oauth_state(now: float | None = None) -> None:
         if not isinstance(expiry, (int, float)) or expiry <= current:
             _mcp_tokens.pop(token, None)
             _mcp_token_resources.pop(token, None)
+            _mcp_token_family.pop(token, None)
     for token, data in list(_mcp_refresh_tokens.items()):
         if not isinstance(data, dict) or data.get("expires", 0) <= current:
             _mcp_refresh_tokens.pop(token, None)
+    for token, data in list(_used_refresh_token_families.items()):
+        if not isinstance(data, dict) or data.get("expires", 0) <= current:
+            _used_refresh_token_families.pop(token, None)
+
+
+def _hash_token(token: str) -> str:
+    """P0-5 5-C: 落盘/内存查表键，sha256 足够——token 本身已经是高熵随机串。"""
+    return _hashlib_oauth.sha256(token.encode()).hexdigest()
+
+
+def _revoke_refresh_family(family_id: str) -> int:
+    """撤销同一条续期链(family_id)里所有还有效的 access/refresh token。
+    refresh token 重放检测命中时调用：假定这条链已经泄露，整条连坐吊销，
+    不只是拒绝这一次请求。返回撤销的 token 总数(access+refresh)。"""
+    if not family_id:
+        return 0
+    removed = 0
+    for key in [k for k, fid in _mcp_token_family.items() if fid == family_id]:
+        _mcp_tokens.pop(key, None)
+        _mcp_token_resources.pop(key, None)
+        _mcp_token_family.pop(key, None)
+        removed += 1
+    for key in [
+        k for k, data in _mcp_refresh_tokens.items()
+        if isinstance(data, dict) and data.get("family_id") == family_id
+    ]:
+        _mcp_refresh_tokens.pop(key, None)
+        removed += 1
+    return removed
+
+
+def revoke_all_mcp_tokens() -> int:
+    """P0-5 5-B: 撤销全部已签发的 access/refresh token 和未兑现的授权码。
+    改密、账户恢复成功后调用；也是 /oauth/revoke-all 手动端点的实现。
+    返回撤销的 access token 数量。"""
+    count = len(_mcp_tokens)
+    _mcp_tokens.clear()
+    _mcp_token_resources.clear()
+    _mcp_token_family.clear()
+    _mcp_refresh_tokens.clear()
+    _used_refresh_token_families.clear()
+    _oauth_codes.clear()
+    _save_mcp_tokens()
+    return count
 
 
 def _valid_redirect_uri(value: object) -> bool:
@@ -278,7 +335,13 @@ def _save_oauth_clients() -> None:
 
 
 def _load_mcp_tokens() -> None:
-    global _mcp_tokens, _mcp_token_resources, _mcp_refresh_tokens
+    """启动时恢复持久化 token。P0-5 5-C：老文件（本单之前写的）的 key 是明文
+    token；新文件（写了 _MCP_TOKENS_FORMAT_MARKER）的 key 已经是 sha256 哈希。
+    没有这个标记就当明文处理、读的时候现场哈希一遍写回内存——这样旧会话
+    升级后不用重新走一遍浏览器 OAuth 流程，迁移对使用者无感；处理完之后
+    下一次 _save_mcp_tokens() 落盘的就已经是新格式了。"""
+    global _mcp_tokens, _mcp_token_resources, _mcp_token_family, _mcp_refresh_tokens
+    global _used_refresh_token_families
     try:
         path = _mcp_tokens_file()
         if not os.path.exists(path):
@@ -291,73 +354,111 @@ def _load_mcp_tokens() -> None:
         ):
             access_raw = raw.get("access_tokens", {})
             refresh_raw = raw.get("refresh_tokens", {})
+            used_raw = raw.get("used_refresh_families", {})
+            already_hashed = raw.get("format") == _MCP_TOKENS_FORMAT_MARKER
         else:
             access_raw = raw
             refresh_raw = {}
+            used_raw = {}
+            already_hashed = False
+
+        def _key(raw_key: str) -> str:
+            return raw_key if already_hashed else _hash_token(raw_key)
 
         _mcp_tokens = {}
         _mcp_token_resources = {}
+        _mcp_token_family = {}
         for tok, data in access_raw.items():
             if isinstance(data, (int, float)):
                 exp = data
                 resource = ""
+                family_id = ""
             elif isinstance(data, dict):
                 exp = data.get("expires")
                 resource = str(data.get("resource", ""))
+                family_id = str(data.get("family_id", ""))
             else:
                 continue
             if isinstance(exp, (int, float)) and exp > now:
-                _mcp_tokens[tok] = exp
+                key = _key(tok)
+                _mcp_tokens[key] = exp
                 if resource:
-                    _mcp_token_resources[tok] = resource
+                    _mcp_token_resources[key] = resource
+                if family_id:
+                    _mcp_token_family[key] = family_id
         _mcp_refresh_tokens = {}
         for tok, data in refresh_raw.items():
             if isinstance(data, (int, float)):
                 exp = data
                 client_id = ""
+                resource = ""
+                family_id = ""
             elif isinstance(data, dict):
                 exp = data.get("expires")
                 client_id = str(data.get("client_id", ""))
+                resource = str(data.get("resource", ""))
+                family_id = str(data.get("family_id", ""))
             else:
                 continue
             if isinstance(exp, (int, float)) and exp > now:
-                _mcp_refresh_tokens[tok] = {
+                _mcp_refresh_tokens[_key(tok)] = {
                     "expires": exp,
                     "client_id": client_id,
-                    "resource": str(data.get("resource", "")) if isinstance(data, dict) else "",
+                    "resource": resource,
+                    "family_id": family_id,
                 }
+        _used_refresh_token_families = {}
+        if isinstance(used_raw, dict):
+            for tok, data in used_raw.items():
+                if not isinstance(data, dict):
+                    continue
+                exp = data.get("expires")
+                if isinstance(exp, (int, float)) and exp > now:
+                    _used_refresh_token_families[_key(tok)] = {
+                        "family_id": str(data.get("family_id", "")),
+                        "expires": exp,
+                    }
     except Exception as e:
         logger.warning(f"[oauth] failed to load mcp tokens: {e}")
 
 
 def _save_mcp_tokens() -> None:
-    try:
-        path = _mcp_tokens_file()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        now = _time_mod.time()
-        active = {
-            tok: {
-                "expires": exp,
-                "resource": _mcp_token_resources.get(tok, ""),
-            }
-            for tok, exp in _mcp_tokens.items()
-            if exp > now
+    """P0-5 5-C: 不再吞异常——写盘失败必须让调用方知道并让接口报错，不能
+    悄悄返回"成功"但实际上重启就丢。调用方(签发/撤销 token 的几处)自己
+    决定失败时怎么回应客户端。"""
+    path = _mcp_tokens_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = _time_mod.time()
+    active = {
+        tok: {
+            "expires": exp,
+            "resource": _mcp_token_resources.get(tok, ""),
+            "family_id": _mcp_token_family.get(tok, ""),
         }
-        active_refresh = {
-            tok: data for tok, data in _mcp_refresh_tokens.items()
-            if isinstance(data, dict)
-            and isinstance(data.get("expires"), (int, float))
-            and data["expires"] > now
-        }
-        sh._atomic_write_private_json(
-            path,
-            {
-                "access_tokens": active,
-                "refresh_tokens": active_refresh,
-            },
-        )
-    except Exception as e:
-        logger.warning(f"[oauth] failed to save mcp tokens: {e}")
+        for tok, exp in _mcp_tokens.items()
+        if exp > now
+    }
+    active_refresh = {
+        tok: data for tok, data in _mcp_refresh_tokens.items()
+        if isinstance(data, dict)
+        and isinstance(data.get("expires"), (int, float))
+        and data["expires"] > now
+    }
+    active_used = {
+        tok: data for tok, data in _used_refresh_token_families.items()
+        if isinstance(data, dict)
+        and isinstance(data.get("expires"), (int, float))
+        and data["expires"] > now
+    }
+    sh._atomic_write_private_json(
+        path,
+        {
+            "format": _MCP_TOKENS_FORMAT_MARKER,
+            "access_tokens": active,
+            "refresh_tokens": active_refresh,
+            "used_refresh_families": active_used,
+        },
+    )
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -369,14 +470,16 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 
 
 def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
-    expiry = _mcp_tokens.get(token)
+    key = _hash_token(token)
+    expiry = _mcp_tokens.get(key)
     if expiry is None:
         return False
     if _time_mod.time() > expiry:
-        del _mcp_tokens[token]
-        _mcp_token_resources.pop(token, None)
+        del _mcp_tokens[key]
+        _mcp_token_resources.pop(key, None)
+        _mcp_token_family.pop(key, None)
         return False
-    bound_resource = _mcp_token_resources.get(token, "")
+    bound_resource = _mcp_token_resources.get(key, "")
     if resource and bound_resource:
         return _normalize_resource(resource) == _normalize_resource(bound_resource)
     return True
@@ -401,22 +504,26 @@ def _is_valid_static_mcp_token(token: str, resource: str = "") -> bool:
     return _hmac.compare_digest(token, configured)
 
 
-def _issue_mcp_access_token(resource: str = "") -> str:
+def _issue_mcp_access_token(resource: str = "", family_id: str = "") -> str:
     _cleanup_oauth_state()
     token = secrets.token_urlsafe(32)
-    _mcp_tokens[token] = _time_mod.time() + _MCP_TOKEN_TTL
+    key = _hash_token(token)
+    _mcp_tokens[key] = _time_mod.time() + _MCP_TOKEN_TTL
     if resource:
-        _mcp_token_resources[token] = resource
+        _mcp_token_resources[key] = resource
+    if family_id:
+        _mcp_token_family[key] = family_id
     return token
 
 
-def _issue_mcp_refresh_token(client_id: str, resource: str = "") -> str:
+def _issue_mcp_refresh_token(client_id: str, resource: str = "", family_id: str = "") -> str:
     _cleanup_oauth_state()
     refresh_token = secrets.token_urlsafe(32)
-    _mcp_refresh_tokens[refresh_token] = {
+    _mcp_refresh_tokens[_hash_token(refresh_token)] = {
         "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
         "client_id": client_id,
         "resource": resource,
+        "family_id": family_id,
     }
     return refresh_token
 
@@ -748,13 +855,36 @@ def register(mcp) -> None:
             refresh_token = str(body.get("refresh_token", ""))
             if len(refresh_token) > 256:
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
-            refresh_data = _mcp_refresh_tokens.get(refresh_token)
+            refresh_key = _hash_token(refresh_token)
+            refresh_data = _mcp_refresh_tokens.get(refresh_key)
             now = _time_mod.time()
             if not isinstance(refresh_data, dict):
+                # P0-5 5-C: 不是当前有效的 refresh token——查一下它是不是一个
+                # "已经被轮换掉、理应作废"的旧 token 被重放了。命中即视为链路
+                # 可能已泄露，整条 family 连坐吊销，不只是拒绝这一次请求。
+                tombstone = _used_refresh_token_families.get(refresh_key)
+                if isinstance(tombstone, dict) and tombstone.get("expires", 0) > now:
+                    family_id = str(tombstone.get("family_id", ""))
+                    revoked = _revoke_refresh_family(family_id)
+                    logger.warning(
+                        f"[oauth] refresh token replay detected, revoking family "
+                        f"{family_id!r}: {revoked} token(s) revoked"
+                    )
+                    try:
+                        _save_mcp_tokens()
+                    except Exception as e:
+                        logger.error(f"[oauth] failed to persist family revocation after replay: {e}")
+                    return JSONResponse(
+                        {"error": "invalid_grant", "error_description": "refresh token reuse detected"},
+                        status_code=400,
+                    )
                 return JSONResponse({"error": "invalid_grant", "error_description": "unknown refresh token"}, status_code=400)
             if refresh_data.get("expires", 0) < now:
-                _mcp_refresh_tokens.pop(refresh_token, None)
-                _save_mcp_tokens()
+                _mcp_refresh_tokens.pop(refresh_key, None)
+                try:
+                    _save_mcp_tokens()
+                except Exception as e:
+                    logger.warning(f"[oauth] failed to persist expired-refresh cleanup: {e}")
                 return JSONResponse({"error": "invalid_grant", "error_description": "refresh token expired"}, status_code=400)
             client_id = str(body.get("client_id", ""))
             stored_client_id = str(refresh_data.get("client_id", ""))
@@ -770,10 +900,34 @@ def register(mcp) -> None:
             ):
                 return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch"}, status_code=400)
 
-            token = _issue_mcp_access_token(stored_resource or canonical_resource)
-            _save_mcp_tokens()
+            # P0-5 5-C: 轮换——发新的 access+refresh token 之前，先把这个旧
+            # refresh token 从有效表里摘掉、记成"曾用过"的墓碑（供上面的重放
+            # 检测命中），三者用同一个 family_id 串起来。
+            family_id = str(refresh_data.get("family_id", "")) or secrets.token_urlsafe(16)
+            resource = stored_resource or canonical_resource
+            _mcp_refresh_tokens.pop(refresh_key, None)
+            _used_refresh_token_families[refresh_key] = {
+                "family_id": family_id,
+                "expires": now + _MCP_REFRESH_TOKEN_TTL,
+            }
+            new_token = _issue_mcp_access_token(resource, family_id)
+            new_refresh_token = _issue_mcp_refresh_token(stored_client_id, resource, family_id)
+            try:
+                _save_mcp_tokens()
+            except Exception as e:
+                # 落盘失败：回滚这次轮换，旧 refresh token 恢复有效，不吞异常
+                # 直接告诉客户端失败——总比"看起来成功、实际上没落盘、重启就
+                # 全部失效"要好。
+                logger.error(f"[oauth] failed to persist token rotation: {e}")
+                _mcp_refresh_tokens[refresh_key] = refresh_data
+                _used_refresh_token_families.pop(refresh_key, None)
+                _mcp_tokens.pop(_hash_token(new_token), None)
+                _mcp_token_resources.pop(_hash_token(new_token), None)
+                _mcp_token_family.pop(_hash_token(new_token), None)
+                _mcp_refresh_tokens.pop(_hash_token(new_refresh_token), None)
+                return JSONResponse({"error": "server_error", "error_description": "token persistence failed"}, status_code=500)
             return JSONResponse(
-                _token_response(token, refresh_token=refresh_token),
+                _token_response(new_token, refresh_token=new_refresh_token),
                 headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
             )
 
@@ -809,12 +963,45 @@ def register(mcp) -> None:
 
         _oauth_codes.pop(code, None)
         token_resource = stored_resource or canonical_resource
-        token = _issue_mcp_access_token(token_resource)
+        # P0-5 5-C: 这条链第一次签发——起一个新 family_id，后续每次 refresh
+        # 轮换都沿用同一个，直到重放检测触发连坐吊销。
+        family_id = secrets.token_urlsafe(16)
+        token = _issue_mcp_access_token(token_resource, family_id)
         refresh_token = _issue_mcp_refresh_token(
-            str(code_data.get("client_id", "")), token_resource
+            str(code_data.get("client_id", "")), token_resource, family_id
         )
-        _save_mcp_tokens()
+        try:
+            _save_mcp_tokens()
+        except Exception as e:
+            logger.error(f"[oauth] failed to persist newly issued tokens: {e}")
+            _mcp_tokens.pop(_hash_token(token), None)
+            _mcp_token_resources.pop(_hash_token(token), None)
+            _mcp_token_family.pop(_hash_token(token), None)
+            _mcp_refresh_tokens.pop(_hash_token(refresh_token), None)
+            return JSONResponse({"error": "server_error", "error_description": "token persistence failed"}, status_code=500)
         return JSONResponse(
             _token_response(token, refresh_token=refresh_token),
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )
+
+    @mcp.custom_route("/oauth/revoke-all", methods=["POST"])
+    async def oauth_revoke_all(request: Request) -> Response:
+        """P0-5 5-B: 户主主动一键撤销全部 MCP access/refresh token
+        (Dashboard 里的"断开全部连接器")。改密/账户恢复成功后也会内部调用
+        同一个 revoke_all_mcp_tokens()。"""
+        from starlette.responses import JSONResponse
+        if not oauth_required:
+            return _oauth_not_found()
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            count = revoke_all_mcp_tokens()
+        except Exception as e:
+            logger.error(f"[oauth] revoke-all failed to persist: {e}")
+            return JSONResponse(
+                {"error": "server_error", "error_description": "revocation persistence failed"},
+                status_code=500,
+            )
+        logger.warning(f"[oauth] manual revoke-all via Dashboard: {count} access token(s) revoked")
+        return JSONResponse({"ok": True, "revoked": count})

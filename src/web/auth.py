@@ -10,12 +10,16 @@ web/auth.py — Dashboard 鉴权相关 HTTP 路由
 ========================================
 """
 
+import asyncio
+import hmac
 import os
+import secrets
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 from . import _shared as sh
+from . import oauth
 
 _MAX_PASSWORD_CHARS = 1024
 _MAX_SECURITY_QUESTION_CHARS = 500
@@ -26,8 +30,102 @@ def _json_object(body) -> dict | None:
     return body if isinstance(body, dict) else None
 
 
+# --- P0-5 5-A: 首次初始化加固 ---------------------------------------------
+# /auth/setup 之前无 bootstrap secret、无回环限制,且"是否已初始化"检查发生
+# 在 await request.json() 之前、之后无锁无二次检查——首次启动窗口内可被
+# 远程抢注,并发请求还能产生两个"都成功"的会话。
+#
+# 加固:
+# 1. 非回环地址调用必须带上一次性 bootstrap secret(启动时生成,打日志 +
+#    落盘到 <buckets_dir>/.bootstrap_secret,setup 成功后立即失效并删除)。
+# 2. 整个 setup 处理过程(含解析请求体、二次校验 is_setup_needed、写密码)
+#    都在同一把进程内 asyncio.Lock 里执行,消除并发 TOCTOU 窗口。
+_setup_lock = asyncio.Lock()
+_BOOTSTRAP_SECRET_BYTES = 24
+_bootstrap_secret: str | None = None
+
+
+def _bootstrap_secret_file() -> str | None:
+    """None when buckets_dir isn't configured yet (e.g. tests that register()
+    routes without a full config) — the file is a convenience, not required
+    for the secret itself to work (it's also printed to the log)."""
+    buckets_dir = sh.config.get("buckets_dir") if isinstance(sh.config, dict) else None
+    if not buckets_dir:
+        return None
+    return os.path.join(buckets_dir, ".bootstrap_secret")
+
+
+def _ensure_bootstrap_secret() -> None:
+    """启动时(register() 调用一次)生成一次性初始化密钥。已经设过密码就不生成
+    ——bootstrap secret 只为"还没设密"这个窗口存在。任何一步失败(包括
+    buckets_dir 还没配置好)都不能把 register() 炸掉——这只是给非回环访问
+    多加的一道门，回环访问完全不依赖它，日志里的那份 secret 才是权威来源，
+    落盘只是方便。"""
+    global _bootstrap_secret
+    if _bootstrap_secret is not None:
+        return
+    try:
+        if not sh._is_setup_needed():
+            return
+    except Exception:
+        return
+    secret = secrets.token_urlsafe(_BOOTSTRAP_SECRET_BYTES)
+    _bootstrap_secret = secret
+    sh.logger.warning(
+        "[auth] Dashboard 尚未初始化。非回环地址访问 /auth/setup 需要 "
+        "bootstrap_secret(随 JSON body 一起传),回环地址(127.0.0.1/::1)"
+        f"直接免验证。本次生成的 bootstrap_secret: {secret}"
+    )
+    try:
+        path = _bootstrap_secret_file()
+        if path is None:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(secret)
+        os.chmod(path, 0o600)
+    except Exception as e:
+        sh.logger.warning(f"[auth] failed to write bootstrap secret file: {e}")
+
+
+def _consume_bootstrap_secret() -> None:
+    """setup 成功后一次性密钥立即作废,文件删掉,内存值清空。"""
+    global _bootstrap_secret
+    _bootstrap_secret = None
+    path = _bootstrap_secret_file()
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+# --- P0-5 5-B: 改密/账户恢复撤销全部 OAuth 授权 -----------------------------
+# 抢注者能签发长期 OAuth token（65.7年 TTL），改密与账户恢复此前都不会让
+# 这些 token 失效——接管在改密之后依然存活。这两条路径成功后都必须撤销
+# 当前全部已签发的 access/refresh token。
+#
+# 副作用（必须告知，不许静默上线）：执行后 claude.ai 侧的 Ombre-Fable /
+# Ombre-Kieran 等所有已连接的 MCP 连接器会断连，需要重新走一次 OAuth 授权
+# 页（不需要删除重建连接器本身，client_id 注册没有被清，只是 token 全部
+# 作废，重新点一次授权即可）。
+def _revoke_all_mcp_tokens_safe() -> tuple[int, bool]:
+    """返回 (撤销的 access token 数量, 是否成功落盘)。密码已经改成功了，
+    撤销 token 这一步万一落盘失败也不能让整个改密请求失败——但绝不能装作
+    没发生，失败与否都如实带进响应体里。"""
+    try:
+        count = oauth.revoke_all_mcp_tokens()
+        return count, True
+    except Exception as e:
+        sh.logger.error(f"[auth] failed to persist mcp token revocation: {e}")
+        return 0, False
+
+
 def register(mcp) -> None:
     """把 /auth/* 路由注册到传入的 FastMCP 实例。"""
+
+    _ensure_bootstrap_secret()
 
     @mcp.custom_route("/auth/status", methods=["GET"])
     async def auth_status(request: Request) -> Response:
@@ -44,21 +142,44 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse
         if not sh._is_setup_needed():
             return JSONResponse({"error": "Already configured"}, status_code=400)
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-        body = _json_object(body)
-        if body is None:
-            return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
-        password = body.get("password", "")
-        if not isinstance(password, str):
-            return JSONResponse({"error": "password must be a string"}, status_code=400)
-        password = password.strip()
-        if not 6 <= len(password) <= _MAX_PASSWORD_CHARS:
-            return JSONResponse({"error": "密码长度必须在 6-1024 位之间"}, status_code=400)
-        sh._save_password_hash(password)
-        token = sh._create_session()
+        # P0-5 5-A: 整个临界区(解析请求体、二次校验、写密码)都在这把锁里
+        # 顺序执行——并发的第二个请求会在这里排队,而不是各自跑到
+        # _save_password_hash 互相踩踏,产生两个"都成功"的会话。
+        async with _setup_lock:
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            body = _json_object(body)
+            if body is None:
+                return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+            # 解析请求体之后再查一次——锁本身已经把并发请求串行化了,这道
+            # 检查是防守性的第二层,和铁律要求的"解析之后再校验"字面对齐。
+            if not sh._is_setup_needed():
+                return JSONResponse({"error": "Already configured"}, status_code=400)
+            if not sh._is_loopback_request(request):
+                provided = body.get("bootstrap_secret", "")
+                if (
+                    not isinstance(provided, str)
+                    or _bootstrap_secret is None
+                    or not hmac.compare_digest(provided, _bootstrap_secret)
+                ):
+                    return JSONResponse(
+                        {
+                            "error": "首次初始化仅允许从本机(回环地址)访问，"
+                            "或在请求体里提供正确的 bootstrap_secret（见启动日志）"
+                        },
+                        status_code=403,
+                    )
+            password = body.get("password", "")
+            if not isinstance(password, str):
+                return JSONResponse({"error": "password must be a string"}, status_code=400)
+            password = password.strip()
+            if not 6 <= len(password) <= _MAX_PASSWORD_CHARS:
+                return JSONResponse({"error": "密码长度必须在 6-1024 位之间"}, status_code=400)
+            sh._save_password_hash(password)
+            _consume_bootstrap_secret()
+            token = sh._create_session()
         resp = JSONResponse({"ok": True})
         sh._set_session_cookie(resp, token, request)
         return resp
@@ -137,8 +258,13 @@ def register(mcp) -> None:
         sh._save_password_hash(new_pwd)
         sh._sessions.clear()
         sh._save_sessions()
+        revoked, persisted = _revoke_all_mcp_tokens_safe()
         token = sh._create_session()
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({
+            "ok": True,
+            "revoked_mcp_tokens": revoked,
+            "mcp_revocation_persisted": persisted,
+        })
         sh._set_session_cookie(resp, token, request)
         return resp
 
@@ -190,8 +316,13 @@ def register(mcp) -> None:
         sh._save_password_hash(new_pwd, keep_qa=True)
         sh._sessions.clear()
         sh._save_sessions()
+        revoked, persisted = _revoke_all_mcp_tokens_safe()
         token = sh._create_session()
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({
+            "ok": True,
+            "revoked_mcp_tokens": revoked,
+            "mcp_revocation_persisted": persisted,
+        })
         sh._set_session_cookie(resp, token, request)
         return resp
 

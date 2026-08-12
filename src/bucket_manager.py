@@ -426,6 +426,21 @@ class BucketManager:
         self._active_cache: "list[dict] | None" = None
         self._active_file_state: dict[str, tuple[int, int]] = {}
         self._active_cache_lock = asyncio.Lock()
+
+        # P0-5 5-D: per-bucket update() lock. update() reads a full frontmatter
+        # snapshot, mutates fields in memory across a couple of `await` points
+        # (count_anchors/count_seeds), then writes the whole snapshot back —
+        # two concurrent update() calls on the SAME bucket can interleave in
+        # that window, and whichever writes last silently discards the other's
+        # field changes. Locking per bucket_id (not one global lock) serializes
+        # only same-bucket updates; unrelated buckets still update concurrently.
+        # Deliberately not cleaned up as buckets stop being updated — reclaiming
+        # a per-key asyncio.Lock() safely while a waiter might already be queued
+        # on it is a real correctness hazard, and the growth here is bounded by
+        # "distinct buckets ever updated," not request volume. Single-process
+        # only (see 5-C's multi-worker note) — a multi-worker deployment would
+        # need file-level locking or a real CAS instead.
+        self._update_locks: dict[str, asyncio.Lock] = {}
         storage_cfg = config.get("storage", {}) or {}
         try:
             self.external_change_poll_seconds = max(
@@ -1292,6 +1307,28 @@ class BucketManager:
         bump_active: bool = False,
         **kwargs,
     ) -> bool:
+        """Update bucket content or metadata fields — see _update_locked for
+        the actual behavior. This wrapper only adds the P0-5 5-D per-bucket
+        lock so two concurrent update() calls on the same bucket_id can't
+        interleave their read-modify-write and silently drop one side's
+        field changes; it does not change what a single call does."""
+        lock = self._update_locks.setdefault(bucket_id, asyncio.Lock())
+        async with lock:
+            return await self._update_locked(
+                bucket_id,
+                allow_embedding_fallback=allow_embedding_fallback,
+                bump_active=bump_active,
+                **kwargs,
+            )
+
+    async def _update_locked(
+        self,
+        bucket_id: str,
+        *,
+        allow_embedding_fallback: bool = False,
+        bump_active: bool = False,
+        **kwargs,
+    ) -> bool:
         """
         Update bucket content or metadata fields.
         更新桶的内容或元数据字段。
@@ -1300,6 +1337,9 @@ class BucketManager:
         自动 resolve、导入等）——**不**刷新 last_active，也不动 activation_count。
         bump_active=True：把这次写入视作一次真实激活（如 hold/grow 合并近邻桶），
         同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
+
+        只能通过 update() 这个加锁包装调用，不要直接调 _update_locked——同一
+        bucket_id 并发调用必须互斥,详见 __init__ 里 self._update_locks 的注释。
         """
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
