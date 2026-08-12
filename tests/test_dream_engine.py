@@ -19,6 +19,7 @@ import frontmatter as fm
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import dream_engine as dream_engine_module  # noqa: E402
 from dream_engine import (  # noqa: E402
     DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
     dream_book_dir, dream_book_path, dream_book_id, list_dream_book_entries,
@@ -27,6 +28,22 @@ from dream_engine import (  # noqa: E402
 
 
 PT = ZoneInfo("America/Los_Angeles")
+_CROSS_DATE_UTC_NOW = dt.datetime(2026, 8, 12, 6, 15, tzinfo=dt.timezone.utc)
+
+
+def _freeze_dream_engine_clock(monkeypatch):
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return _CROSS_DATE_UTC_NOW.replace(tzinfo=None)
+            return _CROSS_DATE_UTC_NOW.astimezone(tz)
+
+    now_pt = _CROSS_DATE_UTC_NOW.astimezone(PT)
+    assert _CROSS_DATE_UTC_NOW.date() != now_pt.date()
+    monkeypatch.setattr(dream_engine_module, "datetime", FixedDateTime)
+    return now_pt
+
 
 _IMAGERY_SYSTEM_MARKER = "提取两类内容"
 _GROWTH_SYSTEM_MARKER = "梦境噪音意象"
@@ -117,6 +134,7 @@ def make_engine(tmp_path, dehydrator=None, **cfg_overrides):
 
 @pytest.mark.asyncio
 async def test_forced_run_bypasses_probability_roll(tmp_path, monkeypatch):
+    now_pt = _freeze_dream_engine_clock(monkeypatch)
     engine = make_engine(tmp_path, dream_prob=0.0)  # 正常情况下永远不会有梦
     assert engine.dream_prob == 0.0
 
@@ -125,12 +143,13 @@ async def test_forced_run_bypasses_probability_roll(tmp_path, monkeypatch):
     assert result["dreamed"] is True
     # dream_prob 必须在强制运行后恢复原值，不留副作用
     assert engine.dream_prob == 0.0
-    dream_path = engine._dream_path(dt.date.today() - dt.timedelta(days=1))
+    dream_path = engine._dream_path(now_pt.date() - dt.timedelta(days=1))
     assert os.path.isfile(dream_path)
 
 
 @pytest.mark.asyncio
 async def test_dream_force_env_triggers_immediate_run_on_start(tmp_path, monkeypatch):
+    now_pt = _freeze_dream_engine_clock(monkeypatch)
     monkeypatch.setenv("DREAM_FORCE", "1")
     engine = make_engine(tmp_path, dream_prob=0.0)
     # 让正常的每日调度永远不会在测试期间触发，只观察 DREAM_FORCE 这条强制路径
@@ -140,7 +159,7 @@ async def test_dream_force_env_triggers_immediate_run_on_start(tmp_path, monkeyp
     try:
         for _ in range(50):
             await __import__("asyncio").sleep(0)
-        dream_path = engine._dream_path(dt.date.today() - dt.timedelta(days=1))
+        dream_path = engine._dream_path(now_pt.date() - dt.timedelta(days=1))
         assert os.path.isfile(dream_path), "DREAM_FORCE=1 应在 start() 后立即生成一晚的梦，不受 dream_prob=0 影响"
     finally:
         await engine.stop()
