@@ -640,6 +640,11 @@ class DreamEngine:
 
         self._seed_imagery: list[str] | None = None  # 懒加载缓存
 
+        # D-1R 心跳：nightly_dream() 每次被调用（无论结果）即更新，供
+        # GET /api/dream-book 暴露，用来区分"任务没跑"（长期不动）和
+        # "跑了但骰子没中/无素材"（更新了但当晚 dreamed=False）。
+        self.last_run_at: str | None = None
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -1315,6 +1320,9 @@ class DreamEngine:
         任何 return/log 都不得携带完整原文（R4 即焚）。"""
         now_local = datetime.now(self._tz) if self._tz else datetime.now()
         today = now_local.date()
+        belongs_date = today - timedelta(days=1)
+        # D-1R 心跳：无论本轮最终有没有梦，只要 nightly_dream() 被调用就更新。
+        self.last_run_at = now_local.isoformat(timespec="seconds")
 
         try:
             self.cleanup_expired()
@@ -1327,16 +1335,17 @@ class DreamEngine:
             logger.warning(f"dream: 噪音库自增失败(不影响本轮): {e}")
 
         if not self.enabled:
+            logger.info(f"dream: 静默返回 reason=disabled date={belongs_date}")
             return {"dreamed": False, "reason": "disabled"}
 
         if random.random() > self.dream_prob:
+            logger.info(f"dream: 静默返回 reason=no_dream_roll date={belongs_date}")
             return {"dreamed": False, "reason": "no_dream_roll"}
-
-        belongs_date = today - timedelta(days=1)
 
         try:
             materials = await self.sample_buckets()
             if not materials:
+                logger.info(f"dream: 静默返回 reason=no_material date={belongs_date}")
                 return {"dreamed": False, "reason": "no_material"}
             imagery, named_phrases = await self.extract_imagery(materials)
             noise, noise_tier = self.sample_noise(len(imagery))
@@ -1370,6 +1379,7 @@ class DreamEngine:
             for attempt in range(_MAX_GENERATION_RETRIES + 1):
                 candidate = await self.generate_dream(material_words, effective_named_phrases, tone, level)
                 if not candidate or not candidate.strip():
+                    logger.info(f"dream: 静默返回 reason=empty_generation date={belongs_date}")
                     return {"dreamed": False, "reason": "empty_generation"}
                 fail_reason = self._validate_generation(candidate, materials)
                 if fail_reason is None:

@@ -39,9 +39,10 @@ def register(mcp) -> None:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
         expire_hours = float(sh.config.get("dream", {}).get("expire_hours", 48))
+        last_run_at = getattr(sh.dream_engine, "last_run_at", None)
         return JSONResponse({
             "ok": True, "count": len(entries), "entries": entries,
-            "expire_hours": expire_hours,
+            "expire_hours": expire_hours, "last_run_at": last_run_at,
         })
 
     @mcp.custom_route("/api/dream-book/{date}/keep", methods=["POST"])

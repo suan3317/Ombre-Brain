@@ -1554,3 +1554,80 @@ def test_dream_book_delete_rejects_burned(tmp_path):
 
     assert result["ok"] is False
     assert os.path.isfile(path), "burned 骨架不可删，必须原样保留"
+
+
+# ============================================================
+# 7. D-1R：四条静默路径补日志 + last_run_at 心跳
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_nightly_dream_logs_disabled_silent_path(tmp_path, caplog):
+    engine = make_engine(tmp_path, enabled=False)
+    belongs_date = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result == {"dreamed": False, "reason": "disabled"}
+    assert f"reason=disabled date={belongs_date}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_logs_no_dream_roll_silent_path(tmp_path, caplog):
+    engine = make_engine(tmp_path, dream_prob=0.0)
+    belongs_date = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result == {"dreamed": False, "reason": "no_dream_roll"}
+    assert f"reason=no_dream_roll date={belongs_date}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_logs_no_material_silent_path(tmp_path, caplog):
+    engine = make_engine(tmp_path)
+    engine.bucket_mgr = FakeBucketMgr([])  # 桶全空 → 抽不到素材
+    belongs_date = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result == {"dreamed": False, "reason": "no_material"}
+    assert f"reason=no_material date={belongs_date}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_logs_empty_generation_silent_path(tmp_path, caplog):
+    dehy = make_fake_dehydrator(dream_text="")  # 生成步产出空字符串
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    belongs_date = dt.datetime.now(PT).date() - dt.timedelta(days=1)
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result == {"dreamed": False, "reason": "empty_generation"}
+    assert f"reason=empty_generation date={belongs_date}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_last_run_at_updates_even_on_silent_no_dream_roll(tmp_path, monkeypatch):
+    now_pt = _freeze_dream_engine_clock(monkeypatch)
+    engine = make_engine(tmp_path, dream_prob=0.0)
+    assert engine.last_run_at is None
+
+    result = await engine.nightly_dream()
+
+    assert result["reason"] == "no_dream_roll"
+    assert engine.last_run_at == now_pt.isoformat(timespec="seconds")
+
+
+@pytest.mark.asyncio
+async def test_last_run_at_updates_on_successful_dream(tmp_path, monkeypatch):
+    now_pt = _freeze_dream_engine_clock(monkeypatch)
+    engine = make_engine(tmp_path)
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True
+    assert engine.last_run_at == now_pt.isoformat(timespec="seconds")

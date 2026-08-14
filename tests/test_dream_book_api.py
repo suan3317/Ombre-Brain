@@ -129,3 +129,28 @@ async def test_delete_route_rejects_burned(tmp_path, mcp_and_routes):
     assert response.status_code == 400
     assert body["ok"] is False
     assert os.path.isfile(path)
+
+
+class _FakeEngineWithHeartbeat:
+    def __init__(self, last_run_at):
+        self.last_run_at = last_run_at
+
+
+@pytest.mark.asyncio
+async def test_list_includes_last_run_at_from_dream_engine(tmp_path, mcp_and_routes, monkeypatch):
+    monkeypatch.setattr(dream_book_api.sh, "dream_engine", _FakeEngineWithHeartbeat("2026-08-13T06:00:00-07:00"))
+
+    handler = mcp_and_routes.routes[("GET", "/api/dream-book")]
+    response = await handler(FakeRequest())
+    body = payload(response)
+
+    assert body["last_run_at"] == "2026-08-13T06:00:00-07:00"
+
+
+@pytest.mark.asyncio
+async def test_list_last_run_at_is_none_when_engine_not_wired(tmp_path, mcp_and_routes):
+    handler = mcp_and_routes.routes[("GET", "/api/dream-book")]
+    response = await handler(FakeRequest())
+    body = payload(response)
+
+    assert body["last_run_at"] is None

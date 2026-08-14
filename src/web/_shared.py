@@ -115,6 +115,7 @@ repo_root: str = ""   # 仓库根目录（server.py 注入；用于定位 fronte
 bucket_mgr = None
 dehydrator = None
 decay_engine = None
+dream_engine = None
 embedding_engine = None
 embedding_outbox = None
 import_engine = None

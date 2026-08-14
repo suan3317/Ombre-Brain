@@ -356,6 +356,7 @@ _wsh.init_runtime(
     bucket_mgr=bucket_mgr,
     dehydrator=dehydrator,
     decay_engine=decay_engine,
+    dream_engine=dream_engine,
     embedding_engine=embedding_engine,
     embedding_outbox=embedding_outbox,
     import_engine=import_engine,
