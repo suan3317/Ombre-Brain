@@ -147,7 +147,7 @@ _HIGH_TIER_MAX_TOKENS = 1200              # 仅高档；低档维持 _DEFAULT_MA
 _POV_MIN_FIRST_PERSON_COUNT = 2       # 全文"我"出现次数少于这个数 → 视角违规
 
 # --- 生成结果校验统一走重试（返修单 v3：泄漏/词表/视角三道闸共用）---
-_MAX_GENERATION_RETRIES = 1
+_MAX_GENERATION_RETRIES = 3           # D-3 D.4：1→3（2 发→4 发），2026-08-19 呈批通过
 
 # --- n-gram 防泄漏闸：source 原文比对用的字符上限，防止超大桶内容拖垮
 # 最长公共子串 DP 的耗时（只在真的命中 n-gram 交集时才会跑 DP，平时走
@@ -1057,7 +1057,8 @@ class DreamEngine:
 
     # ---------------------------------------------------------
     # 生成产物三道校验闸（返修单 v3）：泄漏 / 词表形态 / 第一人称。
-    # 命中任一道即整发判废，由 nightly_dream 统一走一次重试，不在这里重试。
+    # 命中任一道即整发判废，由 nightly_dream 统一走重试（D-3 D.4：最多 3 次），
+    # 不在这里重试。
     # ---------------------------------------------------------
     def _detect_source_leak(self, raw: str, materials: list[dict]) -> int:
         """n-gram 防泄漏闸（改动一，最高优先）：raw 与本次全部 source（桶原文 +
@@ -1405,7 +1406,8 @@ class DreamEngine:
                 level, tone = self.roll_memory_level(tone)
 
             # 返修单 v3：泄漏闸/词表判定/第一人称校验命中任一条，整发判废重试
-            # 最多一次；再次判废按无梦处理，不落盘（改动一/三/四共用同一条重试）。
+            # （D-3 D.4：1→3，最多 3 次重试即 4 发）；全部判废按无梦处理，
+            # 不落盘（改动一/三/四共用同一条重试）。
             raw = None
             fail_reason = None
             for attempt in range(_MAX_GENERATION_RETRIES + 1):

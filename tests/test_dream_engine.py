@@ -603,7 +603,7 @@ async def test_nightly_dream_writes_nothing_when_word_list_survives_retry(tmp_pa
     result = await engine.nightly_dream()
 
     assert result["dreamed"] is False
-    assert call_count["n"] == 2, "词表形状要重试一次（最多 2 次生成尝试），不是直接放弃"
+    assert call_count["n"] == 4, "D-3 D.4：重试预算 1→3（最多 4 次生成尝试），不是直接放弃"
     dreams_dir = engine._dreams_dir()
     written = [f for f in os.listdir(dreams_dir) if f.endswith(".md")]
     assert written == [], "生成结果是词表时不允许落盘，重试后仍是词表也不行"
