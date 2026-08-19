@@ -76,7 +76,7 @@ if not _JIEBA_POSSEG_AVAILABLE:
 _DEFAULT_ENABLED = True
 _DEFAULT_GENERATE_AT = "06:00"          # America/Los_Angeles 时刻
 _DEFAULT_TIMEZONE = "America/Los_Angeles"
-_DEFAULT_DREAM_PROB = 1.00              # 临时测试3晚(20260813 Silvia指令),测满即回滚,原值0.30
+_DEFAULT_DREAM_PROB = 0.40              # 2026-08-19 Silvia指令：1.00→0.40，原回滚单(revert c5445ab)作废
 _DEFAULT_MEMORY_LEVELS = [0.10, 0.40, 0.35, 0.15]   # 完全/一半/画面/情绪
 _DEFAULT_EMOTION_NEGATIVE_BIAS = 0.70   # "只剩情绪"档反向加权到焦虑/噩梦的概率
 _DEFAULT_TONE_WEIGHTS = {
