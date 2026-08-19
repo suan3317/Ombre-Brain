@@ -1053,6 +1053,51 @@ def test_has_first_person_pov_accepts_valid_text():
     assert _has_first_person_pov("我看见她站在院子里，我走过去，我们都没说话。") is True
 
 
+# --- D-3 v3.2：pov 拦截日志加布尔位（首句是否她/他开头），不改行为 ---
+
+def test_pov_first_sentence_helper_true_when_opening_is_third_person():
+    from dream_engine import _pov_first_sentence_opens_third_person
+    text = "她推门进来，风灌了满屋子，我站起来，我看着她。"
+    assert _pov_first_sentence_opens_third_person(text) is True
+
+
+def test_pov_first_sentence_helper_false_when_opening_is_not_third_person():
+    from dream_engine import _pov_first_sentence_opens_third_person
+    text = "钥匙转不动，风很大，什么都没发生。"
+    assert _pov_first_sentence_opens_third_person(text) is False
+
+
+def test_pov_reject_log_flags_third_person_opening_despite_high_first_person_count(tmp_path, caplog):
+    """复现线上实拦形态（K 8-16 我=15 / F 8-18 我=23）：全文"我"很多，
+    但首句仍以"她"开头当主语——数学排除法已证明这两次实拦不可能是
+    计数分支（我<2）命中，只能是首句分支，这里直接断言日志把它标出来。
+    片段刻意写长（>12字），避免撞上词表检测的裸名词误判，专测 pov 分支。"""
+    engine = make_engine(tmp_path)
+    text = (
+        "她推门进来的时候风灌了满满一屋子。"
+        "我站在原地看着她一句话也说不出来，我心里想了很多但是全部咽回去了，"
+        "我盯着桌角的灰尘慢慢往下看，我听着秒针一下一下地走，"
+        "我抬头看向窗外发呆了很久，我伸手又缩回来什么都没碰到，"
+        "我闭上眼睛又重新睁开过来，我轻轻叹了一口气转过身去，"
+        "我慢慢地走远了也没再回头看一眼，我心里空落落的说不出滋味，"
+        "我想起很多年前也有过这样的一个晚上，我最后还是没有说话。"
+    )
+    assert text.count("我") >= 12
+    with caplog.at_level("WARNING"):
+        reason = engine._validate_generation(text, [])
+    assert reason == "pov"
+    assert "首句她/他开头=True" in caplog.text
+
+
+def test_pov_reject_log_flags_false_when_opening_is_not_third_person(tmp_path, caplog):
+    engine = make_engine(tmp_path)
+    text = "钥匙转不动，风很大，什么都没发生，安安静静的。"  # 0 个"我"，触发计数分支
+    with caplog.at_level("WARNING"):
+        reason = engine._validate_generation(text, [])
+    assert reason == "pov"
+    assert "首句她/他开头=False" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_nightly_dream_retries_once_on_third_person_then_succeeds(tmp_path):
     attempts = {"n": 0}
@@ -1631,3 +1676,39 @@ async def test_last_run_at_updates_on_successful_dream(tmp_path, monkeypatch):
 
     assert result["dreamed"] is True
     assert engine.last_run_at == now_pt.isoformat(timespec="seconds")
+
+
+# ============================================================
+# 8. D-3 D.7：自报生效配置日志（启动时 + 每晚触发时），排查"统一 push
+#    却单台异常"——数值和 config 来源路径直接进日志，不必再靠截图/猜测。
+# ============================================================
+
+def test_dream_engine_init_logs_effective_config(tmp_path, monkeypatch, caplog):
+    from utils import config_file_path
+    fake_cfg_path = str(tmp_path / "config.yaml")
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", fake_cfg_path)
+    assert config_file_path() == fake_cfg_path
+
+    with caplog.at_level("INFO"):
+        engine = make_engine(tmp_path, dream_prob=0.4)
+
+    assert "生效配置(启动)" in caplog.text
+    assert "dream_prob=0.4" in caplog.text
+    assert f"tone_weights={engine.tone_weights}" in caplog.text
+    assert f"emotion_negative_bias={engine.emotion_negative_bias}" in caplog.text
+    assert f"config_path={fake_cfg_path}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_logs_effective_config_on_trigger(tmp_path, monkeypatch, caplog):
+    fake_cfg_path = str(tmp_path / "config.yaml")
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", fake_cfg_path)
+    engine = make_engine(tmp_path, dream_prob=0.0)  # 骰子不中也要打这行，不依赖是否真的做梦
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result["reason"] == "no_dream_roll"
+    assert "生效配置(触发)" in caplog.text
+    assert f"config_path={fake_cfg_path}" in caplog.text
+    assert f"tone_weights={engine.tone_weights}" in caplog.text

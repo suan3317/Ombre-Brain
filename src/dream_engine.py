@@ -53,6 +53,8 @@ except ImportError:  # pragma: no cover - py<3.9 not supported by this repo
 
 import frontmatter as fm
 
+from utils import config_file_path
+
 try:  # jieba 软依赖，用法同 bm25_index.py：未装时静默降级，不炸管线
     import jieba.posseg as _jieba_posseg
     _jieba_posseg.setLogLevel(logging.WARNING)
@@ -261,6 +263,15 @@ def _has_first_person_pov(text: str) -> bool:
     if first_sentence[:1] in ("她", "他"):
         return False
     return True
+
+
+def _pov_first_sentence_opens_third_person(text: str) -> bool:
+    """仅供 pov 拦截日志排障用：单独复算首句是否她/他开头，不参与校验结果本身
+    （D-3 v3.2：只加日志不改行为，判定逻辑与 _has_first_person_pov 内保持一致）。"""
+    text = (text or "").strip()
+    first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
+    first_sentence = first_sentence.strip().lstrip("“‘\"'（(")
+    return first_sentence[:1] in ("她", "他")
 
 
 _TONE_LABELS = {
@@ -644,6 +655,16 @@ class DreamEngine:
         # GET /api/dream-book 暴露，用来区分"任务没跑"（长期不动）和
         # "跑了但骰子没中/无素材"（更新了但当晚 dreamed=False）。
         self.last_run_at: str | None = None
+
+        # D-3 v3.4/v3.8：自报生效配置（启动时打一行）——三家统一 push 部署，
+        # 若某家单独走了 OMBRE_CONFIG_PATH 指向的持久化配置文件，日志里的
+        # config_path 和数值会直接暴露，不用再靠截图/猜测。不含正文与密钥。
+        logger.info(
+            f"dream: 生效配置(启动) dream_prob={self.dream_prob} "
+            f"tone_weights={self.tone_weights} "
+            f"emotion_negative_bias={self.emotion_negative_bias} "
+            f"config_path={config_file_path()}"
+        )
 
     @property
     def is_running(self) -> bool:
@@ -1071,7 +1092,10 @@ class DreamEngine:
             logger.warning(f"dream: 生成结果疑似词表/清单体 (segments={len(segs)}, chars={len(raw)})")
             return "word_list"
         if not _has_first_person_pov(raw):
-            logger.warning(f"dream: 第一人称视角校验未通过 (我={raw.count('我')})")
+            logger.warning(
+                f"dream: 第一人称视角校验未通过 (我={raw.count('我')}, "
+                f"首句她/他开头={_pov_first_sentence_opens_third_person(raw)})"
+            )
             return "pov"
         return None
 
@@ -1323,6 +1347,14 @@ class DreamEngine:
         belongs_date = today - timedelta(days=1)
         # D-1R 心跳：无论本轮最终有没有梦，只要 nightly_dream() 被调用就更新。
         self.last_run_at = now_local.isoformat(timespec="seconds")
+
+        # D-3 v3.4/v3.8：自报生效配置（每晚触发时也打一行，不必等服务重启）。
+        logger.info(
+            f"dream: 生效配置(触发) dream_prob={self.dream_prob} "
+            f"tone_weights={self.tone_weights} "
+            f"emotion_negative_bias={self.emotion_negative_bias} "
+            f"config_path={config_file_path()}"
+        )
 
         try:
             self.cleanup_expired()
