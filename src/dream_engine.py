@@ -138,6 +138,16 @@ _NOISE_GROWTH_TEMPERATURE = 1.0
 _PROSE_BARE_NOUN_MAX_CHARS = 12       # 片段长于这个字数，不太可能是裸名词
 _PROSE_BARE_NOUN_RUN_THRESHOLD = 3    # 连续这么多个裸名词片段 → 判定为非法词表
 
+# --- D-3 D.5（v4.3~v4.5）：结尾专项补闸。原方案把结尾阈值收紧到 2 连，用
+# 12 条历史真实 kept 梦正文验收时打中 1 条误杀（F 8-06：焦虑碎片"病危、肝癌、
+# 离婚"是合法的意象并置，不是词表泄漏，见工单 D-3 v4.6 验收记录）——按 Silvia
+# 指令退回阈值，只保留"分隔符放宽"这一半：阈值维持跟中段判定一致的 3 连，
+# 但结尾额外用更宽的分隔符（含空格/斜杠/项目符号等常见清单分隔，不止顿号/
+# 逗号）扫一遍，专门补空格/项目符号这类不会被中段判定的窄分隔符正则切开的
+# 结尾清单形态。---
+_TAIL_BARE_NOUN_RUN_THRESHOLD = _PROSE_BARE_NOUN_RUN_THRESHOLD
+_TAIL_FRAGMENT_SPLIT_RE = re.compile(r"[\s\n、，,/／·•\-—]+")
+
 # --- 生成 prompt 按记忆度分两套（返修单 v2 改动三）---
 # 完全记得/记得一半 → 清晰/混沌交替结构；只剩画面/只剩情绪 → 维持 v1 prompt 不变
 _HIGH_TIER_LEVELS = ("full", "half")
@@ -195,14 +205,14 @@ def _is_bare_noun_fragment(fragment: str) -> bool:
     return not _fragment_has_verb(fragment)
 
 
-def _has_illegal_word_list_run(fragments: list[str]) -> bool:
+def _has_illegal_word_list_run(fragments: list[str], threshold: int = _PROSE_BARE_NOUN_RUN_THRESHOLD) -> bool:
     streak = 0
     for frag in fragments:
         if not frag.strip():
             continue  # 空片段（连续分隔符产生的）不参与计数，也不打断连续
         if _is_bare_noun_fragment(frag):
             streak += 1
-            if streak >= _PROSE_BARE_NOUN_RUN_THRESHOLD:
+            if streak >= threshold:
                 return True
         else:
             streak = 0
@@ -218,14 +228,23 @@ def _is_prose_like(text: str) -> bool:
     （连续 ≥3 个无动词的纯名词片段以顿号/逗号/换行串联）。按句读切成
     句子级块，块内再按换行/顿号/逗号细分成片段逐块扫描，任一块命中
     非法词表形态就判失败——不看语义，只看"是不是一串裸名词"。
+
+    D-3 D.5：最后一块额外过一遍结尾专项检测（阈值收紧到 2、分隔符更宽），
+    补上"结尾拖出一小截够不到 3 连的裸名词串"这个缝隙。
     """
     text = (text or "").strip()
     if not text:
         return False
-    for chunk in _SENTENCE_END_RE.split(text):
+    chunks = _SENTENCE_END_RE.split(text)
+    last_idx = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
         fragments = re.split(r"[\n、，,]", chunk)
         if _has_illegal_word_list_run(fragments):
             return False
+        if i == last_idx:
+            tail_fragments = _TAIL_FRAGMENT_SPLIT_RE.split(chunk)
+            if _has_illegal_word_list_run(tail_fragments, _TAIL_BARE_NOUN_RUN_THRESHOLD):
+                return False
     return True
 
 

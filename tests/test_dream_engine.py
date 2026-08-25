@@ -871,6 +871,26 @@ def test_is_prose_like_short_run_below_threshold_still_passes():
     assert _is_prose_like(text) is True
 
 
+# --- D-3 D.5（v4.3~v4.5）：结尾专项补闸，分隔符放宽但阈值维持 3 连不变 ---
+# 原方案把结尾阈值收紧到 2，用 12 条历史真实 kept 梦正文验收时打中 1 条误杀
+# （焦虑碎片"病危、肝癌、离婚"是合法意象并置，不是词表泄漏），按 Silvia 指令
+# 退回阈值，只保留"结尾分隔符更宽"这一半改动。
+
+def test_is_prose_like_catches_trailing_word_list_with_wide_separator():
+    # 结尾用空格分隔的 3 个裸名词——中段窄分隔符正则（顿号/逗号/换行）切不开
+    # 整段会被当成一个长片段放行，结尾专项检测用更宽的分隔符（含空格）才能拆开抓到。
+    text = "我站在原地，风停了，四周很安静。铃铛 深瞳 影子"
+    assert _is_prose_like(text) is False
+
+
+def test_is_prose_like_tail_two_item_run_still_passes():
+    # D-3 v4.6 验收记录：结尾阈值退回到跟中段一致的 3 连，2 个连续裸名词收尾
+    # 不该被拦（哪怕分隔符是宽口径的），否则会像 F 8-06 真实 kept 梦一样误杀
+    # 合法的焦虑碎片列举（"病危、肝癌"只有 2 项）。
+    text = "我推开门，看见走廊很长。铃铛 深瞳"
+    assert _is_prose_like(text) is True
+
+
 # --- 改动二：具名短语硬约束 ---
 
 def test_validate_named_phrase_discards_over_hard_limit():
