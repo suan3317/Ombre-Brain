@@ -18,6 +18,8 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 - 不在这里做实际取桶/调 LLM 的工作
 - dispatch() 外面再包一层：五个分支各自 return 后，统一在尾部追加梦境系统的
   未读梦区块（include_dream=True 时）。梦不进桶、不参与检索，只在这一处露头。
+- S-4(2026-08-25):再追加一层日历提醒区块(tools/calendar_reminder.py)。
+  Pinboard 不可达/未配置时静默返回空字符串,不阻塞正文。
 
 不做什么（边界）：
 - 不直接处理 embedding 调用，全部下放到检索分支
@@ -33,6 +35,7 @@ from typing import Optional
 
 from .. import _runtime as rt
 from .._common import check_metadata_size, check_query_size
+from ..calendar_reminder import calendar_reminder_tail
 from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
@@ -69,6 +72,14 @@ async def dispatch(
                 rt.logger.warning(f"breath: 梦境尾部拼接失败(不影响正文): {e}")
         if tail:
             result = f"{result}\n\n{tail}"
+    try:
+        calendar_tail = await calendar_reminder_tail()
+    except Exception as e:
+        calendar_tail = ""
+        if rt.logger:
+            rt.logger.warning(f"breath: 日历提醒尾部拼接失败(不影响正文): {e}")
+    if calendar_tail:
+        result = f"{result}\n\n{calendar_tail}"
     return result
 
 

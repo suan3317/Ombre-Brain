@@ -59,6 +59,7 @@ from utils import get_version, load_config, setup_logging
 # 真正的工具逻辑在 tools/breath, tools/hold, tools/grow, tools/trace,
 # tools/anchor, tools/plan, tools/dream 里，便于单独阅读和修改。
 from tools import _runtime as _tools_runtime
+from tools import calendar_reminder as _t_calendar_reminder
 from tools import breath as _t_breath
 from tools import hold as _t_hold
 from tools import grow as _t_grow
@@ -1327,7 +1328,20 @@ async def _wake_impl(window_hours: int) -> str:
         "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪 → 继承给下一个我的种子。\n"
         "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n"
     )
-    return header + "\n\n" + "\n\n".join(parts)
+    result = header + "\n\n" + "\n\n".join(parts)
+
+    # S-4(2026-08-25):日历提醒尾部,和 tools/breath/__init__.py dispatch()
+    # 同款拼接方式(独立 try/except,失败仅警告,不影响正文)。wake 与 breath
+    # 共享同一份去重记录,不像梦区块 wake 预览/breath 消费那样分两条路径。
+    try:
+        calendar_tail = await _t_calendar_reminder.calendar_reminder_tail()
+    except Exception as e:
+        calendar_tail = ""
+        logger.warning(f"wake: 日历提醒尾部拼接失败(不影响正文): {e}")
+    if calendar_tail:
+        result = f"{result}\n\n{calendar_tail}"
+
+    return result
 
 
 @mcp.tool(structured_output=False)

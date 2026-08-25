@@ -22,7 +22,12 @@ tools/pinboard.py — 家庭公告栏 Pinboard 代理工具
 - 不缓存结果
 - 不在这里读取除 PINBOARD_URL/PINBOARD_TOKEN 之外的任何 env
 
-对外暴露: broadcast_read_impl(limit) / broadcast_post_impl(content)
+对外暴露: broadcast_read_impl(limit) / broadcast_post_impl(content) /
+         calendar_upcoming_impl(days)
+
+S-4(2026-08-25):calendar_upcoming_impl 是第三个转发,一样走 _call_tool,
+不新开通道、不新增鉴权——日历提醒挂载(src/tools/calendar_reminder.py)
+就是把这里的原始返回文本再解析一层,本模块本身不关心日历业务语义。
 ========================================
 """
 
@@ -85,3 +90,7 @@ async def broadcast_read_impl(limit: int) -> str:
 
 async def broadcast_post_impl(content: str) -> str:
     return await _call_tool("broadcast_post", {"content": content})
+
+
+async def calendar_upcoming_impl(days: int) -> str:
+    return await _call_tool("calendar_upcoming", {"days": days})
