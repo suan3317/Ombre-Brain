@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import dream_engine as dream_engine_module  # noqa: E402
 from dream_engine import (  # noqa: E402
     DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
+    _WRITE_REQUEST,
     dream_book_dir, dream_book_path, dream_book_id, list_dream_book_entries,
     dream_book_keep, dream_book_delete, burn_expired_dreams,
 )
@@ -660,8 +661,8 @@ async def test_generate_dream_uses_high_tier_prompt_for_full_and_half(tmp_path):
         call = dehy.calls[-1]
         assert "清晰段" in call["system"] and "混沌段" in call["system"], f"level={level} 应走高档交替结构 prompt"
         assert call["max_tokens"] == 1200, f"level={level} 高档 max_tokens 应上调至 1200"
-        assert "清晰段的锚" in call["user"]
-        assert "她递来的信" in call["user"]
+        assert "她递来的信" in call["system"], "具名短语锚应注入 system（D-3 D.3：不再走 user 消息）"
+        assert call["user"] == _WRITE_REQUEST, "user 消息应只剩写作请求，不再携带素材词表"
 
 
 @pytest.mark.asyncio
@@ -674,7 +675,8 @@ async def test_generate_dream_uses_low_tier_prompt_for_glimpse_and_emotion(tmp_p
         call = dehy.calls[-1]
         assert "清晰段" not in call["system"], f"level={level} 不该走高档 prompt"
         assert call["max_tokens"] == 800, f"level={level} 低档 max_tokens 应维持 800"
-        assert "清晰段的锚" not in call["user"]
+        assert "清晰段的锚" not in call["system"]
+        assert call["user"] == _WRITE_REQUEST, "user 消息应只剩写作请求，不再携带素材词表"
 
 
 @pytest.mark.asyncio
@@ -684,7 +686,7 @@ async def test_generate_dream_high_tier_handles_no_named_phrase(tmp_path):
     result = await engine.generate_dream(["台灯", "钥匙"], [], "daily", "full")
     assert result == _ALTERNATING_DREAM_TEXT
     call = dehy.calls[-1]
-    assert "没有明确的具名素材" in call["user"]
+    assert "没有明确的具名素材" in call["system"]
 
 
 # --- 改动一：管线顺序（level 在 generate 前已知）---
@@ -1326,13 +1328,13 @@ async def test_extract_imagery_never_sees_raw_alias_because_cleaned_upstream(tmp
 
 def test_low_tier_prompt_includes_alias_pov_directive():
     from dream_engine import _DREAMER_ALIAS_POV_DIRECTIVE
-    prompt = DreamEngine._low_tier_prompt("daily")
+    prompt = DreamEngine._low_tier_prompt("daily", ["台灯", "钥匙"])
     assert _DREAMER_ALIAS_POV_DIRECTIVE in prompt
 
 
 def test_high_tier_prompt_includes_alias_pov_directive():
     from dream_engine import _DREAMER_ALIAS_POV_DIRECTIVE
-    prompt = DreamEngine._high_tier_prompt("daily")
+    prompt = DreamEngine._high_tier_prompt("daily", "她递来的信", ["台灯", "钥匙"])
     assert _DREAMER_ALIAS_POV_DIRECTIVE in prompt
 
 

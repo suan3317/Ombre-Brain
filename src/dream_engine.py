@@ -354,6 +354,22 @@ _DREAMER_ALIAS_POV_DIRECTIVE = (
     "素材中的称呼若指做梦者本人，梦中一律第一人称“我”；她是梦里唯一的他者。"
 )
 
+# --- D-3 v4.3~v4.5 治本：原始素材词表整体从 user 消息挪进 system 提示词内部，
+# user 消息只剩一句写作请求。旧实现里 user 消息本身就是一份顿号连接的词表
+# （低档甚至除此之外空无一物），1.3 高温度下"续写紧邻上一轮的格式"这条捷径
+# 与 system 里的散文要求直接打擂台——8-18 第一发 word_list、8-17 结尾词表
+# 拖尾都在这个模式下出的。改法：模型生成前看到的最后一条消息变成一句祈使句，
+# 不再是列表本身。---
+_WRITE_REQUEST = "写下这段梦。"
+
+# 结尾同样受词表禁令约束——单独成句强调，避免"结尾"被两套 prompt 里已有的
+# "禁止任何形式的分行列表或编号"笼统带过而没有专门盯住收尾这个位置。
+_NO_TRAILING_LIST_DIRECTIVE = (
+    "结尾同样不能破例：正文最后一句、倒数第二句都必须和前文一样是完整的场景或"
+    "感觉描写，不许在收尾处把意象词或短语用顿号/逗号/空行串成清单，不许用"
+    "总结、点题、列举的方式结束——梦要断在场景或感觉里，不是背完词表才停。"
+)
+
 
 # --- "只剩情绪"档残句池：正文全丢，从这里按基调抽一句。写死代码，不调 API ---
 _EMOTION_RESIDUE_POOL = {
@@ -983,43 +999,41 @@ class DreamEngine:
         self, material_words: list[str], named_phrases: list[str], tone: str, level: str,
     ) -> str:
         if level in _HIGH_TIER_LEVELS:
-            system = self._high_tier_prompt(tone)
             anchor_section = "、".join(named_phrases) if named_phrases else (
                 "（本次没有明确的具名素材，清晰段自己挑一个具体细节当锚）"
             )
-            user = (
-                f"清晰段的锚：{anchor_section}\n"
-                f"混沌段的素材，也可少量渗入清晰段：{'、'.join(material_words)}"
-            )
+            system = self._high_tier_prompt(tone, anchor_section, material_words)
             max_tokens = _HIGH_TIER_MAX_TOKENS
         else:
-            system = self._low_tier_prompt(tone)
-            user = "、".join(material_words)
+            system = self._low_tier_prompt(tone, material_words)
             max_tokens = _DEFAULT_MAX_TOKENS
 
         return await self.dehydrator.raw_chat(
-            system, user,
+            system, _WRITE_REQUEST,
             max_tokens=max_tokens,
             temperature=self.temperature,
             model=self.model,
         )
 
     @staticmethod
-    def _low_tier_prompt(tone: str) -> str:
+    def _low_tier_prompt(tone: str, material_words: list[str]) -> str:
         """只剩画面/只剩情绪档：维持返修单 v1 的碎片化 prompt 不变（除第一行
         新增的视角硬化，返修单 v3 改动四；基调注入换成 _tone_directive，
         增量单 v4 改动二）——反正会被裁到只剩几句或整段丢弃，不值得上交替
-        结构的复杂度。"""
+        结构的复杂度。D-3 D.3（v4.3~v4.5）：素材词表从 user 消息挪进这里，
+        嵌在解释性句子中间，不再是模型生成前看到的最后一条消息本身。"""
+        material_section = "、".join(material_words)
         return (
             "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
             "但看的人是「我」。正例：「我看见她站在院子里。」\n"
             "你不是作者，你是一段正在做梦的意识。第一人称、现在时，"
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
             f"{_DREAMER_ALIAS_POV_DIRECTIVE}\n"
-            "下面用户消息给你的词是抓到的碎片素材，不是要你输出的格式——"
-            "绝对禁止把它们原样列出来、分行罗列、写成“名词，名词，名词”这种清单体，"
-            "也不许每行一个词地照抄。你要做的是把这些碎片揉进连续的散文段落里，"
-            "输出必须是连贯的句子组成的正文，不是词表、不是提纲、不是关键词罗列。\n"
+            f"抓到的碎片素材（仅供你打散揉进散文当燃料，不是要你输出的格式，"
+            f"更不是要回应的消息——正文任何位置都不许原样列出、分行罗列、写成"
+            f"“名词，名词，名词”这种清单体，也不许每行一个词地照抄）：{material_section}。\n"
+            "你要做的是把这些碎片揉进连续的散文段落里，输出必须是连贯的句子组成"
+            "的正文，不是词表、不是提纲、不是关键词罗列。\n"
             "硬规则：每一句都必须是含动词的完整句子（可以短，但不能是孤立的名词短语）；"
             "禁用因果连接词（因为、所以、于是、接着、然后、由于）；"
             "禁止解释任何画面为什么出现；禁止收尾、点题、总结情绪；"
@@ -1027,15 +1041,19 @@ class DreamEngine:
             "允许场景毫无过渡地硬切——一句话写着写着换了场景、一个人说着话变成另一个人、"
             "一句话写到一半停住——但切换前后仍然是完整句子，不是词语拼贴；"
             f"情绪要连贯，情节不需要。{_tone_directive(tone)}"
-            "长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
+            f"长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
+            f"{_NO_TRAILING_LIST_DIRECTIVE}\n"
+            f"接下来 user 消息只会说“{_WRITE_REQUEST}”，不会再重复上面这些词——直接给出正文。"
         )
 
     @staticmethod
-    def _high_tier_prompt(tone: str) -> str:
+    def _high_tier_prompt(tone: str, anchor_section: str, material_words: list[str]) -> str:
         """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三），
         第一行是返修单 v3 改动四新增的视角硬化。依据 Silvia 描述的真实做梦
         节奏：一段很清晰的情节，混一段乱七八糟记不清的，再来一段清晰的
-        （接着之前或只是相关但飘走），又跟一大段乱七八糟的。"""
+        （接着之前或只是相关但飘走），又跟一大段乱七八糟的。D-3 D.3（v4.3~
+        v4.5）：具名短语锚 + 混沌素材词表都从 user 消息挪进这里。"""
+        chaos_section = "、".join(material_words)
         return (
             "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
             "但看的人是「我」。正例：「我看见她站在院子里。」\n"
@@ -1043,16 +1061,18 @@ class DreamEngine:
             "禁止出现“我梦见/梦到/仿佛/好像在梦里”。\n"
             f"{_DREAMER_ALIAS_POV_DIRECTIVE}\n"
             "这个梦由“清晰段”和“混沌段”交替组成，共 4-6 段：\n"
-            "清晰段（2-3 个，每个 80-150 字）：围绕给你的一条具名短语展开一个具体、"
-            "连续的小场景。段内允许情节连贯、允许“接着/然后”、允许动作有因果。"
-            "画面要完整，像真的发生过。\n"
-            "混沌段（1-3 个）：意象并置、互不相关、禁因果连接词、禁解释，"
-            "允许一句话写到一半停住。\n"
+            f"清晰段（2-3 个，每个 80-150 字）：围绕这条具名短语展开一个具体、"
+            f"连续的小场景——{anchor_section}。段内允许情节连贯、允许“接着/然后”、"
+            "允许动作有因果。画面要完整，像真的发生过。\n"
+            f"混沌段（1-3 个）：把这些素材词（仅供打散当燃料，不是要输出的格式，"
+            f"不许原样列出、分行罗列、写成清单体）意象并置、互不相关地嵌进段落——"
+            f"{chaos_section}。禁因果连接词，禁解释，允许一句话写到一半停住。\n"
             "段与段之间：硬切，零过渡，禁止说明段落之间的关系。后一个清晰段可以"
             "续接前一个清晰段的情节，也可以只是沾一点边然后飘走。\n"
             "全局：禁止收尾、禁止点题、禁止把所有意象统一成一个通顺的故事。"
-            "局部清楚，整体乱跳。\n"
+            f"局部清楚，整体乱跳。{_NO_TRAILING_LIST_DIRECTIVE}\n"
             f"{_tone_directive(tone)}总长 300-600 字。"
+            f"接下来 user 消息只会说“{_WRITE_REQUEST}”，不会再重复上面这些词——直接给出正文。"
         )
 
     # ---------------------------------------------------------
