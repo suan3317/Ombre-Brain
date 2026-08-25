@@ -1630,6 +1630,20 @@ async def test_nightly_dream_logs_no_dream_roll_silent_path(tmp_path, caplog):
 
 
 @pytest.mark.asyncio
+async def test_nightly_dream_no_dream_roll_logs_roll_value(tmp_path, caplog, monkeypatch):
+    """D-3 v4.3~v4.5 急件：no_dream_roll 静默行带上掷出的 roll 值（两位小数），
+    供随机数专案直接读分布，不用再猜。"""
+    engine = make_engine(tmp_path, dream_prob=0.0)
+    monkeypatch.setattr(dream_engine_module.random, "random", lambda: 0.123456)
+
+    with caplog.at_level("INFO"):
+        result = await engine.nightly_dream()
+
+    assert result["reason"] == "no_dream_roll"
+    assert "roll=0.12" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_nightly_dream_logs_no_material_silent_path(tmp_path, caplog):
     engine = make_engine(tmp_path)
     engine.bucket_mgr = FakeBucketMgr([])  # 桶全空 → 抽不到素材

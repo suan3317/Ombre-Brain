@@ -1371,8 +1371,9 @@ class DreamEngine:
             logger.info(f"dream: 静默返回 reason=disabled date={belongs_date}")
             return {"dreamed": False, "reason": "disabled"}
 
-        if random.random() > self.dream_prob:
-            logger.info(f"dream: 静默返回 reason=no_dream_roll date={belongs_date}")
+        roll = random.random()
+        if roll > self.dream_prob:
+            logger.info(f"dream: 静默返回 reason=no_dream_roll date={belongs_date} roll={roll:.2f}")
             return {"dreamed": False, "reason": "no_dream_roll"}
 
         try:
