@@ -8,9 +8,12 @@ web/config_api.py — Dashboard 配置 / 环境变量 / API Key 测试 / 模型�
 - /api/config (GET/POST)：运行期配置读取 / 热更新（含 embedding 热替换）
 - /api/test/dehydration、/api/test/embedding：压缩 / 向量化连通性自检
 - /api/models：列目标 provider 可用模型
-- /api/env-config (GET/POST)：四块 env（compress/embed/webhook/password）热更新；
+- /api/env-config (GET/POST)：五块 env（compress/embed/webhook/password/pinboard）热更新；
   embedding 改动会原子替换所有 Web/MCP/写入/迁移运行时引用。
   webhook 不再回写模块全局——_fire_webhook 每次读 os.environ。
+  pinboard（PINBOARD_URL/PINBOARD_TOKEN）同理：本文件不回写模块全局，
+  tools/pinboard.py 每次调用都现读 os.environ，改完即时生效不用重启
+  （S-4 故障二 2026-08-25，方便四台机器换发 service token 不用碰 .env 文件）。
 
 对外暴露：register(mcp)。
 ========================================
@@ -842,6 +845,11 @@ def register(mcp) -> None:
         "OMBRE_HOOK_SKIP":         {"group": "webhook",  "sensitive": False, "in_memory": None},
         # Identity / display labels
         "AI_NAME":                 {"group": "identity", "sensitive": False, "in_memory": None},
+        # Pinboard 家庭公告栏服务端直连通道（S-4 故障二，2026-08-25）：
+        # tools/pinboard.py 每次调用现读 os.environ，没有 config.yaml 映射，
+        # 所以 in_memory=None，跟 webhook 一样的模式。
+        "PINBOARD_URL":            {"group": "pinboard", "sensitive": False, "in_memory": None},
+        "PINBOARD_TOKEN":          {"group": "pinboard", "sensitive": True,  "in_memory": None},
     }
 
     _ENV_CONFIG_NOTE = {
@@ -849,6 +857,7 @@ def register(mcp) -> None:
         "embed": "API key / base_url / model 立即更新进程内 config；backend 切换请用「切换 / 重算所有 embedding…」按钮。",
         "webhook": "改完下次 breath/dream 触发时即生效，无需重启。",
         "identity": "AI 显示名立即生效；若由平台环境变量注入，重启后仍会被平台值覆盖。",
+        "pinboard": "改完下次调用 broadcast_read/broadcast_post 或 wake/breath 的日历提醒尾巴时即生效，无需重启。",
     }
 
 
