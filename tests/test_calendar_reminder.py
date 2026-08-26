@@ -133,6 +133,9 @@ class TestNonBlocking:
         )
 
         assert await calendar_reminder.calendar_reminder_tail() == ""
+        warnings = [call.args[0] for call in rt.logger.warning.call_args_list]
+        assert any("OB-PB01" in w for w in warnings)
+        assert not any("PINBOARD_URL" in w or "PINBOARD_TOKEN" in w for w in warnings)
 
     async def test_pinboard_request_failure_returns_empty_string(self, tmp_path, monkeypatch):
         install_runtime(tmp_path)
@@ -143,6 +146,22 @@ class TestNonBlocking:
         )
 
         assert await calendar_reminder.calendar_reminder_tail() == ""
+        warnings = [call.args[0] for call in rt.logger.warning.call_args_list]
+        assert any("OB-PB02" in w for w in warnings)
+        assert not any("connection refused" in w for w in warnings)
+
+    async def test_malformed_response_shape_logs_warning_without_body(self, tmp_path, monkeypatch):
+        install_runtime(tmp_path)
+        monkeypatch.setattr(
+            calendar_reminder,
+            "calendar_upcoming_impl",
+            AsyncMock(return_value='{"unexpected": "shape"}'),
+        )
+
+        assert await calendar_reminder.calendar_reminder_tail() == ""
+        warnings = [call.args[0] for call in rt.logger.warning.call_args_list]
+        assert any("非 OB-PB 前缀" in w for w in warnings)
+        assert not any("unexpected" in w for w in warnings)
 
     async def test_malformed_events_are_skipped_not_fatal(self, tmp_path, monkeypatch):
         install_runtime(tmp_path)

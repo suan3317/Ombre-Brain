@@ -17,6 +17,10 @@ America/Los_Angeles 的"今天"算 7/3/1/0 档位 → 去重 → 拼接成文本
 - Pinboard 未配置/请求失败/响应解析失败:一律返回空字符串,不抛异常——
   调用方(breath dispatch / wake _wake_impl)在自己的 try/except 里再兜
   一层,双重保险,确保这条尾巴的任何故障都不阻塞 wake/breath 正文。
+- S-4 故障二(2026-08-25):静默归静默,但拉取/解析失败这条路径原来完全
+  不留痕迹,长期拉空也发现不了。现在失败时补一行 warning,只带 OB-PBxx
+  错误码(见 _error_code),不带 pinboard._call_tool 错误文本里可能夹带的
+  响应正文,对齐 D-1R"能分清没跑/跑了没结果"的可观测纪律。
 
 不做什么（边界）：
 - 不做重复事件的规则展开(chatnest 侧已经把生日/年度节日实例化成具体
@@ -51,6 +55,14 @@ def _log_warning(message: str) -> None:
         log.warning(message)
     except Exception:
         pass
+
+
+def _error_code(raw: str) -> str:
+    """从 pinboard._call_tool 的失败返回里只取 OB-PBxx 错误码，不带正文——
+    OB-PB03/04 等错误文本里可能夹带响应体片段，日志只留码，不落内容。"""
+    if isinstance(raw, str) and raw.startswith("OB-PB"):
+        return raw.split(" ", 1)[0]
+    return "非 OB-PB 前缀（响应不是预期 JSON 形状）"
 
 
 def _today_la() -> date:
@@ -109,7 +121,9 @@ async def calendar_reminder_tail() -> str:
     except Exception:
         # Pinboard 未配置/请求失败/响应不是预期形状——静默跳过，不阻塞
         # wake/breath 正文（pinboard._call_tool 失败时返回的是可读错误文本，
-        # 不是合法 JSON，走的正是这一条）。
+        # 不是合法 JSON，走的正是这一条）。跳过归跳过，但要留一行 warning，
+        # 不然这条尾巴长期拉空也没人看得出来（S-4 故障二）。
+        _log_warning(f"calendar_reminder: 拉取失败，本轮不出日历提醒（{_error_code(raw)}）")
         return ""
 
     today = _today_la()
