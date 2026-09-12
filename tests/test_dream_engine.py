@@ -1192,30 +1192,88 @@ def test_roll_tone_can_produce_lust(tmp_path):
     assert abs(observed - 0.10) <= 0.03
 
 
-def test_tone_directive_lust_matches_spec_text_verbatim():
-    from dream_engine import _tone_directive, _LUST_TONE_DIRECTIVE
-    directive = _tone_directive("lust")
-    assert directive == _LUST_TONE_DIRECTIVE
-    for phrase in ("基调：欲", "情欲的梦", "禁因果", "禁解释", "允许断裂", "越要紧的地方越模糊"):
-        assert phrase in directive
+_ALL_TONES = ("daily", "absurd", "anxious", "sweet", "nightmare", "lust")
 
 
-def test_tone_directive_nightmare_and_others_unchanged():
-    from dream_engine import _tone_directive
-    assert _tone_directive("nightmare") == "基调：噩梦。噩梦就让它真的可怕，不要缓和。"
-    assert _tone_directive("daily") == "基调：日常残渣。"
-    assert _tone_directive("sweet") == "基调：甜。"
+# ============================================================
+# 工单 D-4：基调重写（前置句+系统说明+当晚那一档）+ OMBRE_LANG 开关
+# ============================================================
+
+def test_tone_directive_lust_no_longer_a_module_level_constant():
+    """原 _LUST_TONE_DIRECTIVE 已被 A-终稿的统一结构取代，不应再作为独立常量存在。"""
+    import dream_engine
+    assert not hasattr(dream_engine, "_LUST_TONE_DIRECTIVE")
+
+
+@pytest.mark.parametrize("tone", _ALL_TONES)
+def test_tone_directive_zh_injects_preamble_note_and_tone_body(monkeypatch, tone):
+    from dream_engine import _tone_directive, _TONE_PREAMBLE_ZH, _TONE_SYSTEM_NOTE_ZH, _TONE_DIRECTIVES_ZH
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    directive = _tone_directive(tone)
+    assert _TONE_PREAMBLE_ZH in directive, f"tone={tone} 中文注入缺前置句"
+    assert _TONE_SYSTEM_NOTE_ZH in directive, f"tone={tone} 中文注入缺系统说明"
+    assert _TONE_DIRECTIVES_ZH[tone] in directive, f"tone={tone} 中文注入缺该档正文"
+    # 注入结构是"前置句+系统说明+当晚那一档"，不是六档全注：其余五档正文不应混入
+    for other_tone, other_body in _TONE_DIRECTIVES_ZH.items():
+        if other_tone != tone:
+            assert other_body not in directive, f"tone={tone} 不应混入 {other_tone} 档正文"
+
+
+@pytest.mark.parametrize("tone", _ALL_TONES)
+def test_tone_directive_en_injects_preamble_note_and_tone_body(monkeypatch, tone):
+    from dream_engine import _tone_directive, _TONE_PREAMBLE_EN, _TONE_SYSTEM_NOTE_EN, _TONE_DIRECTIVES_EN
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    directive = _tone_directive(tone)
+    assert _TONE_PREAMBLE_EN in directive, f"tone={tone} 英文注入缺前置句"
+    assert _TONE_SYSTEM_NOTE_EN in directive, f"tone={tone} 英文注入缺系统说明"
+    assert _TONE_DIRECTIVES_EN[tone] in directive, f"tone={tone} 英文注入缺该档正文"
+    for other_tone, other_body in _TONE_DIRECTIVES_EN.items():
+        if other_tone != tone:
+            assert other_body not in directive, f"tone={tone} 不应混入 {other_tone} 档正文"
+
+
+def test_ombre_lang_defaults_to_zh_and_switches_on_en(monkeypatch):
+    from dream_engine import _ombre_lang
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    assert _ombre_lang() == "zh"
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    assert _ombre_lang() == "en"
+    monkeypatch.setenv("OMBRE_LANG", "EN")  # 大小写不敏感
+    assert _ombre_lang() == "en"
+    monkeypatch.setenv("OMBRE_LANG", "fr")  # 非法值一律回退中文，不炸管线
+    assert _ombre_lang() == "zh"
+    monkeypatch.setenv("OMBRE_LANG", "")
+    assert _ombre_lang() == "zh"
 
 
 @pytest.mark.asyncio
-async def test_generate_dream_injects_lust_directive_in_both_tiers(tmp_path):
-    for level in ("full", "half", "glimpse", "emotion"):
+@pytest.mark.parametrize("tone", _ALL_TONES)
+async def test_generate_dream_injects_tone_directive_in_both_tiers(tmp_path, monkeypatch, tone):
+    """高档（full/half）和低档（glimpse/emotion）两套 prompt 都要注入
+    前置句+系统说明+当晚那一档——不是六档全注。"""
+    from dream_engine import _TONE_PREAMBLE_ZH, _TONE_SYSTEM_NOTE_ZH, _TONE_DIRECTIVES_ZH
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    for level in ("full", "emotion"):  # 各代表一次高档/一次低档
         dehy = make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT)
         engine = make_engine(tmp_path, dehydrator=dehy)
-        await engine.generate_dream(["台灯", "钥匙"], [], "lust", level)
-        call = dehy.calls[-1]
-        assert "情欲的梦" in call["system"], f"level={level} 的 system prompt 应注入 lust 基调说明"
-        assert "禁因果" in call["system"] and "越要紧的地方越模糊" in call["system"]
+        await engine.generate_dream(["台灯", "钥匙"], ["她递来的信"], tone, level)
+        system = dehy.calls[-1]["system"]
+        assert _TONE_PREAMBLE_ZH in system, f"tone={tone} level={level} 应注入前置句"
+        assert _TONE_SYSTEM_NOTE_ZH in system, f"tone={tone} level={level} 应注入系统说明"
+        assert _TONE_DIRECTIVES_ZH[tone] in system, f"tone={tone} level={level} 应注入该档正文"
+
+
+@pytest.mark.asyncio
+async def test_generate_dream_uses_english_tone_directive_when_ombre_lang_en(tmp_path, monkeypatch):
+    from dream_engine import _TONE_PREAMBLE_EN, _TONE_SYSTEM_NOTE_EN, _TONE_DIRECTIVES_EN
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT)
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    await engine.generate_dream(["lamp", "key"], [], "sweet", "full")
+    system = dehy.calls[-1]["system"]
+    assert _TONE_PREAMBLE_EN in system
+    assert _TONE_SYSTEM_NOTE_EN in system
+    assert _TONE_DIRECTIVES_EN["sweet"] in system
 
 
 @pytest.mark.asyncio
@@ -1732,6 +1790,7 @@ def test_dream_engine_init_logs_effective_config(tmp_path, monkeypatch, caplog):
     assert "dream_prob=0.4" in caplog.text
     assert f"tone_weights={engine.tone_weights}" in caplog.text
     assert f"emotion_negative_bias={engine.emotion_negative_bias}" in caplog.text
+    assert f"model={engine.model} temperature={engine.temperature}" in caplog.text
     assert f"config_path={fake_cfg_path}" in caplog.text
 
 
@@ -1748,3 +1807,86 @@ async def test_nightly_dream_logs_effective_config_on_trigger(tmp_path, monkeypa
     assert "生效配置(触发)" in caplog.text
     assert f"config_path={fake_cfg_path}" in caplog.text
     assert f"tone_weights={engine.tone_weights}" in caplog.text
+    assert f"model={engine.model} temperature={engine.temperature}" in caplog.text
+
+
+# ============================================================
+# 工单 D-4 施工细则五：OMBRE_DREAM_MODEL / OMBRE_DREAM_TEMPERATURE
+# 覆盖 dream.model / dream.temperature，优先级 env > config.yaml > 默认。
+# ============================================================
+
+def test_load_config_dream_env_overrides_win_over_yaml(monkeypatch, tmp_path):
+    from utils import load_config
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"""
+buckets_dir: {tmp_path.as_posix()}
+dream:
+  model: yaml-model
+  temperature: 0.9
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OMBRE_DREAM_MODEL", "env-model")
+    monkeypatch.setenv("OMBRE_DREAM_TEMPERATURE", "1.7")
+
+    config = load_config(str(cfg_path))
+
+    assert config["dream"]["model"] == "env-model"
+    assert config["dream"]["temperature"] == 1.7
+
+
+def test_load_config_dream_falls_back_to_yaml_when_env_unset(monkeypatch, tmp_path):
+    from utils import load_config
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"""
+buckets_dir: {tmp_path.as_posix()}
+dream:
+  model: yaml-model
+  temperature: 0.9
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("OMBRE_DREAM_MODEL", raising=False)
+    monkeypatch.delenv("OMBRE_DREAM_TEMPERATURE", raising=False)
+
+    config = load_config(str(cfg_path))
+
+    assert config["dream"]["model"] == "yaml-model"
+    assert config["dream"]["temperature"] == 0.9
+
+
+def test_load_config_dream_falls_back_to_default_when_env_and_yaml_unset(monkeypatch, tmp_path):
+    from utils import load_config
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f"buckets_dir: {tmp_path.as_posix()}\n", encoding="utf-8")
+
+    monkeypatch.delenv("OMBRE_DREAM_MODEL", raising=False)
+    monkeypatch.delenv("OMBRE_DREAM_TEMPERATURE", raising=False)
+
+    config = load_config(str(cfg_path))
+
+    # 没写 dream: 段落、也没设 env 时，utils 层不应凭空造出 dream.model/temperature——
+    # DreamEngine.__init__ 自己的默认值（None / 1.3）才是最终兜底。
+    assert "dream" not in config or "model" not in config.get("dream", {})
+
+
+def test_dream_engine_reads_env_overridden_model_and_temperature(monkeypatch, tmp_path):
+    from utils import load_config
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f"buckets_dir: {tmp_path.as_posix()}\n", encoding="utf-8")
+    monkeypatch.setenv("OMBRE_DREAM_MODEL", "sonnet-via-env")
+    monkeypatch.setenv("OMBRE_DREAM_TEMPERATURE", "1.1")
+
+    config = load_config(str(cfg_path))
+    engine = DreamEngine(config, FakeBucketMgr(make_buckets()), make_fake_dehydrator())
+
+    assert engine.model == "sonnet-via-env"
+    assert engine.temperature == pytest.approx(1.1)

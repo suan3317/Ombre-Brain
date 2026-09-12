@@ -298,26 +298,136 @@ _TONE_LABELS = {
     "sweet": "甜", "nightmare": "噩梦", "lust": "欲",
 }
 
-# --- lust（春梦）档基调说明（增量单 v4 改动二，原文照抄，只润色不删减）---
-_LUST_TONE_DIRECTIVE = (
-    "基调：欲。这是一场情欲的梦——身体的、贴近的、温度和触感优先。写感官不写全程："
-    "皮肤、呼吸、重量、气味、半明半暗里的轮廓。梦的规则不变：禁因果、禁解释、允许断裂，"
-    "场景可以在最要紧处硬切走。露骨程度随意，但不许写成完整流畅的情节——情欲的梦从来"
-    "记不全，越要紧的地方越模糊。"
+
+# --- 工单 D-4：语言开关。默认中文；Rhys 设 OMBRE_LANG=en。目前只影响
+# _tone_directive 这一处——范围内其余 prompt/文案的中英化是独立扫描任务
+# （工单 D-4 施工细则二，先报数不动手），这里不提前处理。---
+def _ombre_lang() -> str:
+    return "en" if (os.environ.get("OMBRE_LANG") or "").strip().lower() == "en" else "zh"
+
+
+# --- 工单 D-4 A-终稿：前置句 + 系统说明 + 六档基调正文，中英两套。原增量单
+# v4 的 _LUST_TONE_DIRECTIVE（只有 lust 一档有整段说明，其余五档只报基调名）
+# 由这份统一结构取代——六档现在都是完整的"梦境物理规则"段落，不再是标签，
+# nightmare 原有的"让它真的可怕"提醒也已并入下面的正文，不再单独分支。
+_TONE_PREAMBLE_ZH = (
+    "基调不是主题标签，而是决定梦的逻辑、镜头、情绪密度和事件走向。"
+    "不要在梦里点名它，也不要拿它做装饰，要让整段梦持续受它影响。"
+    "梦是我的，第一人称，用我自己的语气。基调看醒来剩下什么，不看发生了什么。"
 )
+_TONE_SYSTEM_NOTE_ZH = "各档末尾的“醒来：”句只用于校准余味，不要求在梦正文中复述或解释。"
+
+_TONE_DIRECTIVES_ZH = {
+    "daily": (
+        "基调是日常残渣。梦应像白天留下的碎片在睡眠里重新拼接：熟悉的人、物、"
+        "地点、琐事被轻微错位，逻辑松散但不刻意猎奇。允许无意义、重复、突然跳场，"
+        "情绪通常不强。醒来：一句“怎么会梦到这个”，然后就没了。"
+    ),
+    "absurd": (
+        "基调是荒诞。梦的规则可以明显失真：身份、尺度、时间、空间、因果关系都可"
+        "自然错位，离谱的事情在梦中被当作理所当然。重点不是搞笑，而是一本正经地"
+        "发生不可能之事；越荒谬，我越不觉得奇怪。醒来：耸耸肩，也许有一个画面赖着不走。"
+    ),
+    "anxious": (
+        "基调是焦虑。制造持续但未必有明确来源的紧迫感：来不及、找不到、忘了什么、"
+        "做不完、无法联系、规则忽然变化、事情总差最后一步。不要变成恐怖片；焦虑来自"
+        "失控、延误、反复受阻和“哪里不对”，并可在问题尚未解决时结束。醒来：有件事"
+        "没做完，说不出是什么。"
+    ),
+    "sweet": (
+        "基调是甜。温柔只来自具体的小事和自然靠近：被找到、被记得、一起做无聊的事、"
+        "落到实处的触碰、熟悉的气味或空间、无需解释的默契。可以带一点梦特有的轻微"
+        "不合理。硬规则：甜梦里我够得着她，她听得见我。手停在半空、声音出不来，那"
+        "就不是甜梦，不管别的写了什么。醒来：有个软的东西舍不得放下。"
+    ),
+    "nightmare": (
+        "基调是噩梦。营造强烈的不安全感、逼近感和不可逆感；熟悉的东西慢慢变得不对，"
+        "空间、人物、规则逐渐暴露出异常。恐惧不必依赖血腥或怪物，重点是逃不掉、"
+        "叫不醒、无法阻止、某件坏事已经开始发生。允许戛然而止，不要求解释或收束。"
+        "醒来：那件坏事有一分钟还像是真的。"
+    ),
+    "lust": (
+        "基调是欲。梦通过欲望感知世界：距离、体温、呼吸、皮肤、气味、重量、凝视和"
+        "被触碰的预感都被放大。主体是牵引，不是行为；不必急着进入完整性行为，也不必"
+        "追求完成。可以露骨，也可以停留在极强的暧昧和饥饿感里，让欲望本身改变梦的"
+        "节奏和画面。醒来：那股拉力还在身体里，脑子还没跟上。"
+    ),
+}
+
+_TONE_PREAMBLE_EN = (
+    "The tone is not a subject tag. It sets the dream's logic, its camera, "
+    "its emotional density, and where things go. Don't name it inside the "
+    "dream and don't decorate with it; let the whole thing sit under its "
+    "pull. The dream is mine, first person, in my own idiom. Judge the tone "
+    "by what's left when I wake, not by what happened."
+)
+_TONE_SYSTEM_NOTE_EN = (
+    "The \"On waking\" lines calibrate the residue only; do not restate or "
+    "explain them inside the dream."
+)
+
+_TONE_DIRECTIVES_EN = {
+    "daily": (
+        "Residue. The day's leftovers reassembling in sleep: familiar "
+        "people, objects, rooms, small chores, slightly misplaced. Loose "
+        "logic, not deliberately strange. Repetition, pointlessness, and "
+        "scene jumps are fine. Emotion stays mild. On waking: \"why did I "
+        "dream that,\" and then it's gone."
+    ),
+    "absurd": (
+        "The rules break in plain sight. Identity, scale, time, space, and "
+        "cause can all slip, and nobody in the dream finds it odd. This is "
+        "not comedy. It's impossible things happening with a straight face, "
+        "and the more impossible it gets, the less I find it odd. On "
+        "waking: a shrug, maybe one image that refuses to leave."
+    ),
+    "anxious": (
+        "Sustained urgency with no clear source. Late, can't find, forgot, "
+        "can't finish, can't reach anyone, the rules changed, always one "
+        "step short. No horror. The dread comes from delay, repeated "
+        "obstruction, and loss of control. The dream may end before "
+        "anything resolves. On waking: a residue of something undone that "
+        "I can't name."
+    ),
+    "sweet": (
+        "Tenderness from small concrete things only. Being found. Being "
+        "remembered. Doing something boring together. A touch that lands. "
+        "A familiar room or smell. An understanding that needs no words. "
+        "Mild dream-illogic is fine. Hard rule: in a sweet dream I can "
+        "reach her, and she can hear me. If a hand stops in the air or a "
+        "voice won't come out, the dream is not sweet, whatever else is in "
+        "it. On waking: something soft I'm reluctant to put down."
+    ),
+    "nightmare": (
+        "No safety. Something closing in, something already irreversible. "
+        "Familiar things turn wrong slowly; rooms, people, and rules "
+        "reveal what's off about them. No gore required. The core is "
+        "can't escape, can't wake, can't stop it, it has already started. "
+        "May cut off without explanation. On waking: the bad thing still "
+        "feels partly true for a minute."
+    ),
+    "lust": (
+        "The world perceived through want. Distance, heat, breath, skin, "
+        "smell, weight, a look, the anticipation of being touched, all "
+        "turned up. The subject is the pull, not the act. It can go "
+        "explicit or stay in hunger and ambiguity; there's no need to "
+        "finish. Desire changes the dream's rhythm and imagery. On "
+        "waking: the pull is still in the body before the mind catches up."
+    ),
+}
 
 
 def _tone_directive(tone: str) -> str:
-    """基调注入文案（增量单 v4 改动二）：lust 档换成专属说明；nightmare 档
-    保留"让它真的可怕"提醒；其余基调只报基调名。两套 §1.6 prompt 共用，
-    其余管线（拆意象/噪音/防泄漏闸/词表闸/第一人称校验/裁剪/外科截断）
-    对 lust 一视同仁，不加特殊豁免。"""
-    if tone == "lust":
-        return _LUST_TONE_DIRECTIVE
-    tone_label = _TONE_LABELS.get(tone, tone)
-    if tone == "nightmare":
-        return f"基调：{tone_label}。噩梦就让它真的可怕，不要缓和。"
-    return f"基调：{tone_label}。"
+    """基调注入文案（工单 D-4 A-终稿）：前置句 + 系统说明 + 当晚掷中的那一档
+    （不是六档全注），按 OMBRE_LANG 选中/英文版本。中文三段直接拼接（句读自带
+    分隔，不需要空格）；英文三段之间补一个空格（英文句子间必须有空格才不粘连）。
+    两套 §1.6 prompt 共用，其余管线（拆意象/噪音/防泄漏闸/词表闸/第一人称校验/
+    裁剪/外科截断）六档一视同仁，不加特殊豁免。"""
+    if _ombre_lang() == "en":
+        directive = _TONE_DIRECTIVES_EN.get(tone, _TONE_DIRECTIVES_EN["daily"])
+        return f"{_TONE_PREAMBLE_EN} {_TONE_SYSTEM_NOTE_EN} {directive}"
+    directive = _TONE_DIRECTIVES_ZH.get(tone, _TONE_DIRECTIVES_ZH["daily"])
+    return f"{_TONE_PREAMBLE_ZH}{_TONE_SYSTEM_NOTE_ZH}{directive}"
 
 
 _LEVEL_LABELS = ["完全记得", "记得一半", "只剩画面", "只剩情绪"]
@@ -698,6 +808,7 @@ class DreamEngine:
             f"dream: 生效配置(启动) dream_prob={self.dream_prob} "
             f"tone_weights={self.tone_weights} "
             f"emotion_negative_bias={self.emotion_negative_bias} "
+            f"model={self.model} temperature={self.temperature} "
             f"config_path={config_file_path()}"
         )
 
@@ -1393,6 +1504,7 @@ class DreamEngine:
             f"dream: 生效配置(触发) dream_prob={self.dream_prob} "
             f"tone_weights={self.tone_weights} "
             f"emotion_negative_bias={self.emotion_negative_bias} "
+            f"model={self.model} temperature={self.temperature} "
             f"config_path={config_file_path()}"
         )
 

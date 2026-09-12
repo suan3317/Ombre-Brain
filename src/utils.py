@@ -259,6 +259,12 @@ def load_config(config_path: Optional[str] = None) -> dict:
     _apply_env_override(config, "OMBRE_EMBED_FORMAT", "embedding", "api_format")
     _apply_env_float_override(config, "OMBRE_EMBED_TIMEOUT_SECONDS", "embedding", "timeout_seconds")
 
+    # 梦境组（dream）—— 写到 config["dream"][*]（工单 D-4 施工细则五）：
+    # 优先级 env > config.yaml > DreamEngine 内置默认，与其余组同一套
+    # _apply_env_override 路数，不单独发明覆盖机制。
+    _apply_env_override(config, "OMBRE_DREAM_MODEL", "dream", "model")
+    _apply_env_float_override(config, "OMBRE_DREAM_TEMPERATURE", "dream", "temperature")
+
     # Obsidian / Git / manual Markdown edits cache poll interval.
     _apply_env_float_override(
         config,

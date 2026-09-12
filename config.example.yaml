@@ -137,8 +137,8 @@ dream:
   # （正文换成占位句，日期骨架永久保留）。跟"看没看过"(read_status)无关，
   # 没 keep 就烧是默认行为，不是"没投递就算了"。
   expire_hours: 48
-  model: null                     # null = 沿用 dehydration.model；也可单独指定
-  temperature: 1.3                # 通顺是梦的反义词
+  model: null                     # null = 沿用 dehydration.model；也可单独指定，或用 OMBRE_DREAM_MODEL 覆盖
+  temperature: 1.3                # 通顺是梦的反义词；也可用 OMBRE_DREAM_TEMPERATURE 覆盖
   cut_prob: 0.5                   # 外科截断（掐头/断尾各独立 50%）触发概率
   # 施工单·工程一：素材里做梦者本人的第三人称称呼，1.3 温度下会被生成
   # 成梦里的"另一个人"（人称分裂）。这里列的词在送入拆意象/生成模型
