@@ -269,12 +269,39 @@ def _longest_common_substring_len(a: str, b: str) -> int:
     return best
 
 
+# --- 工单 D-4 一期：pov 闸英文分支。中文路径（数"我"/首句她他开头）一字
+# 不动；OMBRE_LANG=en 时改数英文第一人称代词（整词匹配、大小写不敏感），
+# 阈值与中文同级（_POV_MIN_FIRST_PERSON_COUNT），首句判定改认
+# She/He/They 开头为违规。---
+_POV_FIRST_PERSON_EN_RE = re.compile(
+    r"\b(?:i|i'm|i've|i'll|i'd|me|my|myself)\b", re.IGNORECASE
+)
+_POV_THIRD_PERSON_OPENERS_EN = ("she", "he", "they")
+
+
+def _first_word_en(text: str) -> str:
+    """剥掉常见引号后取首个连续字母/撇号片段，转小写。给英文首句主语判定用——
+    英文是多字符单词，不能像中文那样直接看第一个字符。"""
+    text = text.lstrip("“‘\"'（(")
+    m = re.match(r"[A-Za-z']+", text)
+    return m.group(0).lower() if m else ""
+
+
 def _has_first_person_pov(text: str) -> bool:
-    """第一人称视角校验（返修单 v3 改动四）：全文"我"少于 2 次，或首句
-    以"她/他"开头当主语，一律判视角违规。不追求语法级主语识别，首句剥掉
-    常见引号/空白后看第一个字符是不是"她"/"他"，够用且不会误伤"她说……
-    我……"这种"我"在前的正常写法。"""
+    """第一人称视角校验（返修单 v3 改动四 + 工单 D-4 一期英文分支）：
+    中文——全文"我"少于 2 次，或首句以"她/他"开头当主语，一律判视角违规。
+    不追求语法级主语识别，首句剥掉常见引号/空白后看第一个字符是不是
+    "她"/"他"，够用且不会误伤"她说……我……"这种"我"在前的正常写法。
+    英文（OMBRE_LANG=en）——同样的阈值，改数 I/I'm/I've/I'll/I'd/me/my/
+    myself（整词匹配，大小写不敏感）；首句判定改认 She/He/They 开头。"""
     text = (text or "").strip()
+    if _ombre_lang() == "en":
+        if len(_POV_FIRST_PERSON_EN_RE.findall(text)) < _POV_MIN_FIRST_PERSON_COUNT:
+            return False
+        first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
+        if _first_word_en(first_sentence.strip()) in _POV_THIRD_PERSON_OPENERS_EN:
+            return False
+        return True
     if text.count("我") < _POV_MIN_FIRST_PERSON_COUNT:
         return False
     first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
@@ -285,10 +312,13 @@ def _has_first_person_pov(text: str) -> bool:
 
 
 def _pov_first_sentence_opens_third_person(text: str) -> bool:
-    """仅供 pov 拦截日志排障用：单独复算首句是否她/他开头，不参与校验结果本身
-    （D-3 v3.2：只加日志不改行为，判定逻辑与 _has_first_person_pov 内保持一致）。"""
+    """仅供 pov 拦截日志排障用：单独复算首句是否她/他（或英文 She/He/They）
+    开头，不参与校验结果本身（D-3 v3.2：只加日志不改行为，判定逻辑与
+    _has_first_person_pov 内保持一致）。"""
     text = (text or "").strip()
     first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
+    if _ombre_lang() == "en":
+        return _first_word_en(first_sentence.strip()) in _POV_THIRD_PERSON_OPENERS_EN
     first_sentence = first_sentence.strip().lstrip("“‘\"'（(")
     return first_sentence[:1] in ("她", "他")
 
@@ -297,6 +327,11 @@ _TONE_LABELS = {
     "daily": "日常残渣", "absurd": "荒诞", "anxious": "焦虑",
     "sweet": "甜", "nightmare": "噩梦", "lust": "欲",
 }
+# 反查：梦境书里 post["tone"] 存的是上面这份中文标签（不论 OMBRE_LANG，写盘
+# 时永远是中文——工单 D-4 一期只改"说给人听"的这一层，不动存储 schema，
+# Dashboard 不受影响）。梦尾标签英文渲染时靠这份反查表把标签变回内部 key，
+# 再查 tone.capitalize() 显示成英文。
+_TONE_LABEL_TO_KEY = {v: k for k, v in _TONE_LABELS.items()}
 
 
 # --- 工单 D-4：语言开关。默认中文；Rhys 设 OMBRE_LANG=en。目前只影响
@@ -432,6 +467,13 @@ def _tone_directive(tone: str) -> str:
 
 _LEVEL_LABELS = ["完全记得", "记得一半", "只剩画面", "只剩情绪"]
 _LEVEL_KEYS = ["full", "half", "glimpse", "emotion"]
+# 反查 + 英文显示词，用途同 _TONE_LABEL_TO_KEY：存盘仍是中文标签，梦尾英文
+# 渲染时反查回 key 再取这份英文显示词。
+_LEVEL_LABEL_TO_KEY = dict(zip(_LEVEL_LABELS, _LEVEL_KEYS))
+_LEVEL_LABELS_EN_BY_KEY = {
+    "full": "full memory", "half": "half memory",
+    "glimpse": "just a glimpse", "emotion": "just a feeling",
+}
 
 # --- DREAM_FORCE_LEVEL 环境变量取值 → 内部档位 key（返修单 v2 改动五）---
 # 返修单用词是 full/half/scene/emotion；内部档位 key 仍叫 glimpse（v1 就这么命名，
@@ -499,6 +541,45 @@ _NO_TRAILING_LIST_DIRECTIVE = (
     "总结、点题、列举的方式结束——梦要断在场景或感觉里，不是背完词表才停。"
 )
 
+# ============================================================
+# 工单 D-4 一期：_low_tier_prompt / _high_tier_prompt 剩余中文片段的英文版。
+# 译文意思对齐，不逐字——按 OMBRE_LANG 在两个 prompt 构造方法里二选一。
+# ============================================================
+
+# 两套 prompt 共用的开头两句（视角框定），原样搬进两个 tier 的 EN 版本。
+_POV_FRAMING_EN = (
+    "Write as \"I\". The narrator is always \"I\"; she, he, anyone can show up "
+    "in the dream, but I am the one seeing it. Example: \"I see her standing "
+    "in the yard.\"\n"
+    "You are not an author — you are a mind mid-dream. First person, present "
+    "tense. Never write \"I dreamed / I dreamt / it felt like / as if in a "
+    "dream\".\n"
+)
+
+_DREAMER_ALIAS_POV_DIRECTIVE_EN = (
+    "If anything in the material names or addresses the dreamer, render it as "
+    "first person \"I\" throughout the dream; she is the only other person in it."
+)
+
+_WRITE_REQUEST_EN = "Write this dream."
+
+_NO_TRAILING_LIST_DIRECTIVE_EN = (
+    "The ending gets no exception: the last sentence and the one before it "
+    "must still be a full scene or feeling, same as the rest of it — don't "
+    "let the close turn into a comma/bullet/line-broken list of images or "
+    "phrases, don't summarize, don't name the point, don't wrap up. The "
+    "dream should stop inside a scene or a feeling, not after reciting "
+    "through the material."
+)
+
+# 高档 prompt 里"没有具名素材"的兜底句，中英各一份（generate_dream() 里
+# 拼 anchor_section 时用）。
+_ANCHOR_FALLBACK_ZH = "（本次没有明确的具名素材，清晰段自己挑一个具体细节当锚）"
+_ANCHOR_FALLBACK_EN = (
+    "(no clear named material this time — pick one concrete detail yourself "
+    "to anchor the clear passage)"
+)
+
 
 # --- "只剩情绪"档残句池：正文全丢，从这里按基调抽一句。写死代码，不调 API ---
 _EMOTION_RESIDUE_POOL = {
@@ -549,6 +630,75 @@ _EMOTION_RESIDUE_POOL = {
         "醒来一身燥，什么都不记得。",
         "梦里有人贴得很近，是谁，抓不住了。",
         "指尖还记得一点温度，别的都散了。",
+    ],
+}
+
+# --- 工单 D-4 一期：英文残句池，OMBRE_LANG=en 时用。不是逐句翻译——每句
+# 单独写成读起来像英文梦渣的短句，六档条数与中文池对齐（daily 6/absurd 7/
+# anxious 7/sweet 6/nightmare 7/lust 3 = 36），结构相同（写死代码，不调 API）。---
+_EMOTION_RESIDUE_POOL_EN = {
+    "daily": [
+        "Had a dream. It's gone. Just a weird taste left over.",
+        "Don't remember any of it, woke up with a loose kind of smile.",
+        "Woke up startled for a second — the edges of the dream are still "
+        "there, the middle's gone.",
+        "There was a dream. Whatever it was, it's out of reach now.",
+        "Something surfaced right as I opened my eyes, then blinked and it "
+        "was gone.",
+        "The dream dropped somewhere along the way. Just a pointless "
+        "warmth left behind.",
+    ],
+    "absurd": [
+        "Had a dream. It's gone. Just a weird taste left over.",
+        "Woke up feeling like something was off, couldn't say what.",
+        "Nothing in the dream seemed strange at the time — awake, it's "
+        "ridiculous.",
+        "A few unmatched pieces floating around, they don't add up to "
+        "anything.",
+        "Like half a puzzle went missing and I can't find the other half.",
+        "Woke up with a kind of absurdity I can't laugh at.",
+        "Can't remember it, but that crooked feeling is still here.",
+    ],
+    "anxious": [
+        "Woke up with my heart going, couldn't hold onto any of it.",
+        "Throat's tight. Whatever happened in the dream, I can't recall "
+        "it, but the feeling's still here.",
+        "Woke up with damp palms, nothing of the dream stayed.",
+        "Something's hanging over me, like there's an unfinished thing, "
+        "can't remember what dream it was.",
+        "First reaction on waking was tension, then remembered there's "
+        "nothing to be tense about.",
+        "Dream scattered, just a rushing feeling left, like I'm late for "
+        "something.",
+        "Breathing shallow, must've been running in it, no idea from what.",
+    ],
+    "sweet": [
+        "Don't remember any of it, woke up with a loose kind of smile.",
+        "Woke up soft inside, no idea what the dream was.",
+        "Right before opening my eyes it was very steady, the content "
+        "already drifted off.",
+        "Dream scattered, left behind a groundless kind of ease.",
+        "Woke up slow and unhurried, like someone had just been holding me.",
+        "Can't remember the dream, but that first moment awake was warm.",
+    ],
+    "nightmare": [
+        "Back's cold. Don't remember why.",
+        "Woke up with my heart going, couldn't hold onto any of it.",
+        "First relief on opening my eyes — nothing of the dream stayed, "
+        "but the relief was real.",
+        "Woke up tense all over, like I just escaped from somewhere, no "
+        "idea where.",
+        "Throat tight, whatever happened in the dream I can't recall, but "
+        "the feeling's still here.",
+        "Woke up staring at the ceiling a while before I was sure I was "
+        "safe.",
+        "Dream scattered, just a hunted feeling left over.",
+    ],
+    "lust": [
+        "Woke up flushed, remember nothing.",
+        "Someone was close in the dream, who, I can't hold onto it.",
+        "Fingertips still remember a little warmth, everything else "
+        "scattered.",
     ],
 }
 
@@ -1128,18 +1278,20 @@ class DreamEngine:
     async def generate_dream(
         self, material_words: list[str], named_phrases: list[str], tone: str, level: str,
     ) -> str:
+        lang_en = _ombre_lang() == "en"
         if level in _HIGH_TIER_LEVELS:
-            anchor_section = "、".join(named_phrases) if named_phrases else (
-                "（本次没有明确的具名素材，清晰段自己挑一个具体细节当锚）"
-            )
+            sep = ", " if lang_en else "、"
+            fallback = _ANCHOR_FALLBACK_EN if lang_en else _ANCHOR_FALLBACK_ZH
+            anchor_section = sep.join(named_phrases) if named_phrases else fallback
             system = self._high_tier_prompt(tone, anchor_section, material_words)
             max_tokens = _HIGH_TIER_MAX_TOKENS
         else:
             system = self._low_tier_prompt(tone, material_words)
             max_tokens = _DEFAULT_MAX_TOKENS
 
+        write_request = _WRITE_REQUEST_EN if lang_en else _WRITE_REQUEST
         return await self.dehydrator.raw_chat(
-            system, _WRITE_REQUEST,
+            system, write_request,
             max_tokens=max_tokens,
             temperature=self.temperature,
             model=self.model,
@@ -1151,7 +1303,15 @@ class DreamEngine:
         新增的视角硬化，返修单 v3 改动四；基调注入换成 _tone_directive，
         增量单 v4 改动二）——反正会被裁到只剩几句或整段丢弃，不值得上交替
         结构的复杂度。D-3 D.3（v4.3~v4.5）：素材词表从 user 消息挪进这里，
-        嵌在解释性句子中间，不再是模型生成前看到的最后一条消息本身。"""
+        嵌在解释性句子中间，不再是模型生成前看到的最后一条消息本身。
+        工单 D-4 一期：按 OMBRE_LANG 分派中英文版本，两套结构对齐，译文
+        意思对齐、不逐字。"""
+        if _ombre_lang() == "en":
+            return DreamEngine._low_tier_prompt_en(tone, material_words)
+        return DreamEngine._low_tier_prompt_zh(tone, material_words)
+
+    @staticmethod
+    def _low_tier_prompt_zh(tone: str, material_words: list[str]) -> str:
         material_section = "、".join(material_words)
         return (
             "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
@@ -1177,12 +1337,54 @@ class DreamEngine:
         )
 
     @staticmethod
+    def _low_tier_prompt_en(tone: str, material_words: list[str]) -> str:
+        material_section = ", ".join(material_words)
+        return (
+            _POV_FRAMING_EN
+            + f"{_DREAMER_ALIAS_POV_DIRECTIVE_EN}\n"
+            f"Scattered fragments handed to you (fuel to break apart and fold "
+            f"into prose — not a format to output, and not a message to "
+            f"respond to. Nowhere in the body may they appear as a raw "
+            f"list, one per line, or a \"noun, noun, noun\" catalogue): "
+            f"{material_section}.\n"
+            "Your job is to fold these fragments into continuous prose "
+            "paragraphs. The output must be made of complete sentences "
+            "forming a body of text — not a word list, not an outline, not "
+            "keywords strung together.\n"
+            "Hard rules: every sentence must be a complete sentence with a "
+            "verb (short is fine, but never an isolated noun phrase); no "
+            "causal connectors (because, so, therefore, then, since); "
+            "never explain why an image shows up; no closing, no naming "
+            "the point, no summarizing the feeling; the images you were "
+            "given are unrelated to each other — let them collide and sit "
+            "side by side in the sentences, don't weave them into a "
+            "coherent story; scenes may cut hard with zero transition — a "
+            "sentence can switch scenes mid-thought, one person's voice "
+            "can become someone else's, a sentence can stop halfway — but "
+            "before and after each cut it must still be a complete "
+            "sentence, not a collage of words; "
+            f"emotion should stay continuous even when the plot doesn't. {_tone_directive(tone)}"
+            f"Length 120-300 words, 1-3 paragraphs of continuous prose, no "
+            f"line-broken lists or numbering of any kind. "
+            f"{_NO_TRAILING_LIST_DIRECTIVE_EN}\n"
+            f"The next user message will only say \"{_WRITE_REQUEST_EN}\" — "
+            f"it won't repeat any of the words above. Just give the dream."
+        )
+
+    @staticmethod
     def _high_tier_prompt(tone: str, anchor_section: str, material_words: list[str]) -> str:
         """完全记得/记得一半档：清晰段/混沌段交替结构（返修单 v2 改动三），
         第一行是返修单 v3 改动四新增的视角硬化。依据 Silvia 描述的真实做梦
         节奏：一段很清晰的情节，混一段乱七八糟记不清的，再来一段清晰的
         （接着之前或只是相关但飘走），又跟一大段乱七八糟的。D-3 D.3（v4.3~
-        v4.5）：具名短语锚 + 混沌素材词表都从 user 消息挪进这里。"""
+        v4.5）：具名短语锚 + 混沌素材词表都从 user 消息挪进这里。
+        工单 D-4 一期：按 OMBRE_LANG 分派中英文版本。"""
+        if _ombre_lang() == "en":
+            return DreamEngine._high_tier_prompt_en(tone, anchor_section, material_words)
+        return DreamEngine._high_tier_prompt_zh(tone, anchor_section, material_words)
+
+    @staticmethod
+    def _high_tier_prompt_zh(tone: str, anchor_section: str, material_words: list[str]) -> str:
         chaos_section = "、".join(material_words)
         return (
             "你用「我」的视角写。叙述者永远是「我」；梦里可以出现她、他、任何人，"
@@ -1203,6 +1405,37 @@ class DreamEngine:
             f"局部清楚，整体乱跳。{_NO_TRAILING_LIST_DIRECTIVE}\n"
             f"{_tone_directive(tone)}总长 300-600 字。"
             f"接下来 user 消息只会说“{_WRITE_REQUEST}”，不会再重复上面这些词——直接给出正文。"
+        )
+
+    @staticmethod
+    def _high_tier_prompt_en(tone: str, anchor_section: str, material_words: list[str]) -> str:
+        chaos_section = ", ".join(material_words)
+        return (
+            _POV_FRAMING_EN
+            + f"{_DREAMER_ALIAS_POV_DIRECTIVE_EN}\n"
+            "This dream alternates between \"clear passages\" and \"chaos "
+            "passages\", 4-6 total:\n"
+            f"Clear passages (2-3 of them, 60-110 words each): build one "
+            f"concrete, continuous small scene around this named phrase — "
+            f"{anchor_section}. Inside a passage the plot may stay "
+            "coherent, \"then/next\" is allowed, actions may have cause "
+            "and effect. The scene should feel complete, like it really "
+            "happened.\n"
+            f"Chaos passages (1-3 of them): these material words (fuel to "
+            f"break apart, not a format to output — never as a raw list, "
+            f"one per line, or a catalogue) get juxtaposed, unrelated, "
+            f"embedded in the prose — {chaos_section}. No causal "
+            "connectors, no explaining, a sentence may stop halfway.\n"
+            "Between passages: hard cut, zero transition, never explain "
+            "how passages relate. The next clear passage may continue the "
+            "previous one's plot, or just brush against it and drift "
+            "away.\n"
+            "Overall: no closing, no naming the point, no forcing all the "
+            "images into one coherent story. "
+            f"Clear up close, scattered as a whole. {_NO_TRAILING_LIST_DIRECTIVE_EN}\n"
+            f"{_tone_directive(tone)}Total length 220-450 words. "
+            f"The next user message will only say \"{_WRITE_REQUEST_EN}\" — "
+            f"it won't repeat any of the words above. Just give the dream."
         )
 
     # ---------------------------------------------------------
@@ -1233,20 +1466,39 @@ class DreamEngine:
     def _validate_generation(self, raw: str, materials: list[dict]) -> str | None:
         """三道闸依次判：命中即返回失败原因（不落盘的调用方靠这个决定要不要
         重试）；全部通过返回 None。日志各自记必要的排障信息，绝不记正文本身
-        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度）。"""
+        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度）。
+
+        工单 D-4 一期：word_list 闸在 OMBRE_LANG=en 下直接跳过——
+        _is_prose_like 靠 jieba 中文分词做动词检测，且裸名词字符阈值是按
+        中文密度校准的，两者都不适用英文（判断见工单施工细则三），一期先
+        跳过、不硬套一个不可靠的英文近似规则；跳过原因打一行 info 日志。
+        leak 闸语言无关（字符级 n-gram），中文路径一字不动。pov 闸的中英
+        分支在 _has_first_person_pov 内部，这里调用方式不变。"""
         leak_len = self._detect_source_leak(raw, materials)
         if leak_len >= self.leak_ngram:
             logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}")
             return "leak"
-        if not _is_prose_like(raw):
+        if _ombre_lang() == "en":
+            logger.info(
+                "dream: word_list 词表体检测跳过(OMBRE_LANG=en) — jieba 中文分词"
+                "+中文字符阈值不适用英文，工单 D-4 一期暂不做英文等价规则"
+            )
+        elif not _is_prose_like(raw):
             segs = [s for s in raw.splitlines() if s.strip()]
             logger.warning(f"dream: 生成结果疑似词表/清单体 (segments={len(segs)}, chars={len(raw)})")
             return "word_list"
         if not _has_first_person_pov(raw):
-            logger.warning(
-                f"dream: 第一人称视角校验未通过 (我={raw.count('我')}, "
-                f"首句她/他开头={_pov_first_sentence_opens_third_person(raw)})"
-            )
+            if _ombre_lang() == "en":
+                logger.warning(
+                    f"dream: 第一人称视角校验未通过(en) "
+                    f"(I/my/me等={len(_POV_FIRST_PERSON_EN_RE.findall(raw))}, "
+                    f"首句She/He/They开头={_pov_first_sentence_opens_third_person(raw)})"
+                )
+            else:
+                logger.warning(
+                    f"dream: 第一人称视角校验未通过 (我={raw.count('我')}, "
+                    f"首句她/他开头={_pov_first_sentence_opens_third_person(raw)})"
+                )
             return "pov"
         return None
 
@@ -1379,7 +1631,8 @@ class DreamEngine:
 
     @staticmethod
     def _trim_emotion(tone: str) -> str:
-        pool = _EMOTION_RESIDUE_POOL.get(tone) or _EMOTION_RESIDUE_POOL["daily"]
+        pools = _EMOTION_RESIDUE_POOL_EN if _ombre_lang() == "en" else _EMOTION_RESIDUE_POOL
+        pool = pools.get(tone) or pools["daily"]
         return random.choice(pool)
 
     # ---------------------------------------------------------
@@ -1462,6 +1715,27 @@ class DreamEngine:
             # 工程二改动四：投递提示——只加这一行，其余格式不动。keep_status
             # 已经 kept/burned 时不再提示（kept 已经永久留了；burned 的
             # content 已经是占位句，dream_keep() 对它只会报错，提示没意义）。
+            # 工单 D-4 一期：梦尾这几处包装文案（标题栏/标签行/提示句）按
+            # OMBRE_LANG 切换。tone/level 落盘时永远存中文标签（_TONE_LABELS/
+            # _LEVEL_LABELS，不随语言开关变——见工单施工细则说明，写盘 schema
+            # 不动、Dashboard 不受影响），这里只在渲染给人看时反查回内部 key
+            # 再取英文显示词；反查不到（legacy 数据/异常值）就原样兜底显示。
+            if _ombre_lang() == "en":
+                tone_key = _TONE_LABEL_TO_KEY.get(tone)
+                tone_display = tone_key.capitalize() if tone_key else tone
+                level_key = _LEVEL_LABEL_TO_KEY.get(level)
+                level_display = _LEVEL_LABELS_EN_BY_KEY.get(level_key, level) if level_key else level
+                hint = ""
+                if post.get("keep_status", "fresh") == "fresh":
+                    hint = (
+                        f"\nTo keep this dream: dream_keep(date=\"{date_}\"). "
+                        f"Unsaved dreams burn after 48 hours."
+                    )
+                return (
+                    f"——— Last night's dream ———\n"
+                    f"[{date_} night · {tone_display} · {level_display}]\n"
+                    f"{body}{hint}"
+                )
             hint = ""
             if post.get("keep_status", "fresh") == "fresh":
                 hint = f"\n想留这个梦:dream_keep(date=\"{date_}\")。48 小时内没留的会烧掉。"

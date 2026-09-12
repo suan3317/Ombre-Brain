@@ -8,6 +8,7 @@
 6. 过期清理：伪造 50h 前，正文被替换
 """
 import os
+import re
 import random
 import datetime as dt
 from pathlib import Path
@@ -1274,6 +1275,180 @@ async def test_generate_dream_uses_english_tone_directive_when_ombre_lang_en(tmp
     assert _TONE_PREAMBLE_EN in system
     assert _TONE_SYSTEM_NOTE_EN in system
     assert _TONE_DIRECTIVES_EN["sweet"] in system
+
+
+# ============================================================
+# 工单 D-4 一期：梦的英文化——_low_tier_prompt/_high_tier_prompt 剩余中文
+# 片段英文化、_EMOTION_RESIDUE_POOL 英文池、梦尾标签英文版、pov/word_list
+# 两道闸的英文分支。
+# ============================================================
+
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tone", _ALL_TONES)
+async def test_generate_dream_en_prompt_has_no_chinese_characters_both_tiers(tmp_path, monkeypatch, tone):
+    """六档 en 路径各生成一次：高档(full)/低档(emotion)两套 prompt 都不能
+    再混进中文字符——否则达不到"能出完整英文梦"的目标。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    for level in ("full", "emotion"):
+        dehy = make_fake_dehydrator(dream_text="I see the lamp flicker in the hall.")
+        engine = make_engine(tmp_path, dehydrator=dehy)
+        await engine.generate_dream(["lamp", "key"], ["the note she left"], tone, level)
+        system = dehy.calls[-1]["system"]
+        assert not _CJK_RE.search(system), f"tone={tone} level={level} en prompt 不应含中文字符: {system!r}"
+
+
+@pytest.mark.asyncio
+async def test_generate_dream_en_write_request_is_english(tmp_path, monkeypatch):
+    from dream_engine import _WRITE_REQUEST_EN
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT)
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    await engine.generate_dream(["lamp"], [], "daily", "full")
+    assert dehy.calls[-1]["user"] == _WRITE_REQUEST_EN
+    assert not _CJK_RE.search(dehy.calls[-1]["user"])
+
+
+def test_emotion_residue_pool_en_mirrors_zh_structure():
+    from dream_engine import _EMOTION_RESIDUE_POOL, _EMOTION_RESIDUE_POOL_EN
+    assert set(_EMOTION_RESIDUE_POOL_EN) == set(_EMOTION_RESIDUE_POOL)
+    total = 0
+    for tone, zh_lines in _EMOTION_RESIDUE_POOL.items():
+        en_lines = _EMOTION_RESIDUE_POOL_EN[tone]
+        assert len(en_lines) == len(zh_lines), f"tone={tone} 英文残句条数应与中文对齐"
+        for line in en_lines:
+            assert line.strip()
+            assert not _CJK_RE.search(line), f"tone={tone} 英文残句不应含中文字符: {line!r}"
+        total += len(en_lines)
+    assert total == 36
+
+
+def test_trim_emotion_uses_english_pool_when_ombre_lang_en(monkeypatch):
+    from dream_engine import DreamEngine, _EMOTION_RESIDUE_POOL_EN
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    for _ in range(20):
+        residue = DreamEngine._trim_emotion("nightmare")
+        assert residue in _EMOTION_RESIDUE_POOL_EN["nightmare"]
+        assert not _CJK_RE.search(residue)
+
+
+def test_latest_unread_tail_renders_english_when_ombre_lang_en(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    _write_unread_dream(engine, dt.date(2026, 8, 11), tone="甜", level="完全记得",
+                         body="I reach for her hand in the dark.")
+    tail = engine.latest_unread_tail(consume=False)
+    assert "——— Last night's dream ———" in tail
+    assert "[2026-08-11 night · Sweet · full memory]" in tail
+    assert "To keep this dream: dream_keep(date=\"2026-08-11\")" in tail
+    assert "Unsaved dreams burn after 48 hours." in tail
+    assert not _CJK_RE.search(tail.replace("I reach for her hand in the dark.", ""))
+
+
+def test_latest_unread_tail_english_falls_back_when_label_unrecognized(tmp_path, monkeypatch):
+    """反查表查不到（legacy 数据/异常值）时原样兜底显示，不炸管线。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    _write_unread_dream(engine, dt.date(2026, 8, 12), tone="未知基调", level="未知档位",
+                         body="something strange")
+    tail = engine.latest_unread_tail(consume=False)
+    assert "[2026-08-12 night · 未知基调 · 未知档位]" in tail
+
+
+@pytest.mark.asyncio
+async def test_nightly_dream_produces_full_english_dream_end_to_end(tmp_path, monkeypatch):
+    """目标验收：OMBRE_LANG=en + 完全记得档 + 一段规规矩矩的英文梦正文，
+    应该顺利通过全部校验闸落盘——之前的中文写死校验闸会 100% 误杀这种文本
+    （pov 数不到"我"，word_list 靠 jieba 也认不出英文动词）。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    english_dream = (
+        "I walk down a hallway that keeps stretching. My hand finds a cold "
+        "door handle. I push it open and the room behind it is my old "
+        "kitchen, except the light is wrong. I hear someone call my name "
+        "from somewhere I can't place, and my feet keep moving anyway."
+    )
+    dehy = make_fake_dehydrator(dream_text=english_dream)
+    # cut_prob=0：外科截断是随机触发的，这里只想验证校验闸本身，不希望
+    # 偶发的头尾裁切把首句/"I"计数裁没了造成测试不稳定。
+    engine = make_engine(tmp_path, dehydrator=dehy, memory_levels=[1.0, 0.0, 0.0, 0.0], cut_prob=0.0)
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True
+    post = fm.load(result["path"])
+    assert not _CJK_RE.search(str(post.content))
+
+
+# ============================================================
+# 工单 D-4 一期：pov 闸英文分支（中文路径不动）
+# ============================================================
+
+def test_pov_gate_en_positive_case_first_person_pronouns_and_opening(monkeypatch):
+    from dream_engine import _has_first_person_pov
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = "I walk into the hallway. My hand finds the door before I know why."
+    assert _has_first_person_pov(text) is True
+
+
+def test_pov_gate_en_negative_case_too_few_first_person_words(monkeypatch):
+    from dream_engine import _has_first_person_pov
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = "The hallway stretches on. A door opens somewhere far away."
+    assert _has_first_person_pov(text) is False
+
+
+def test_pov_gate_en_negative_case_third_person_opening(monkeypatch):
+    from dream_engine import _has_first_person_pov
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = "She walks into the hallway. I follow her and my hand finds the door."
+    assert _has_first_person_pov(text) is False
+
+
+@pytest.mark.parametrize("opener", ["He", "They", "she", "HE"])
+def test_pov_gate_en_negative_case_third_person_opening_case_insensitive(monkeypatch, opener):
+    from dream_engine import _has_first_person_pov
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = f"{opener} stands in the hallway. I watch, my hand still on the door, me unable to move."
+    assert _has_first_person_pov(text) is False
+
+
+def test_pov_gate_zh_path_unaffected_by_en_regex(monkeypatch):
+    """中文路径必须一字不动：中文正例/反例的判定结果与工单 D-4 之前完全一致。"""
+    from dream_engine import _has_first_person_pov
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    assert _has_first_person_pov("我看见她站在院子里，我又往前走了一步。") is True
+    assert _has_first_person_pov("她站在院子里，风吹过来，她转身走了。") is False
+
+
+# ============================================================
+# 工单 D-4 一期：word_list 闸 OMBRE_LANG=en 直接跳过（中文路径不动）
+# ============================================================
+
+def test_validate_generation_skips_word_list_gate_when_ombre_lang_en(tmp_path, monkeypatch, caplog):
+    """英文词表体退化文本（jieba 认不出英文动词，会被中文规则误杀）在
+    en 下应该跳过 word_list 闸，不因为它而判 word_list 失败。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "unrelated source text"}]
+    # 短逗号片段 + 足够的第一人称词，只用来验证 word_list 这一道闸被跳过
+    # （不掺 leak/pov 的干扰）。
+    raw = "lamp, key, stairs, watch, rain. I see it, I feel it, I know it, my hand, my eye."
+    with caplog.at_level("INFO"):
+        reason = engine._validate_generation(raw, materials)
+    assert reason is None
+    assert "word_list 词表体检测跳过(OMBRE_LANG=en)" in caplog.text
+
+
+def test_validate_generation_word_list_gate_zh_path_unaffected(tmp_path, monkeypatch):
+    """中文路径 word_list 闸行为不变：连续裸名词词表仍然判 word_list 失败。"""
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "无关源文本"}]
+    raw = "台灯\n钥匙\n楼梯\n手表\n雨声"
+    reason = engine._validate_generation(raw, materials)
+    assert reason == "word_list"
 
 
 @pytest.mark.asyncio
