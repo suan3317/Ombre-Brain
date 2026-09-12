@@ -978,15 +978,20 @@ def _fz_list_entries(base: str, root: str, keyword: str = "") -> list:
 
 
 def _fz_format_rows(entries: list) -> list:
-    return [f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})"
-            for rel, size, mt in entries]
+    return [
+        _t(
+            f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})",
+            f"- {rel}  ({size} bytes, modified {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})",
+        )
+        for rel, size, mt in entries
+    ]
 
 
 async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", keyword: str = "") -> str:
     root = _fz_root()
     base = _fz_safe(folder) if (folder or "").strip() else root
     if not os.path.isdir(base):
-        return f"OB-FZ03 文件夹不存在: files/{folder}"
+        return _t(f"OB-FZ03 文件夹不存在: files/{folder}", f"OB-FZ03 folder does not exist: files/{folder}")
     kw = (keyword or "").strip().lower()
     entries = _fz_list_entries(base, root, kw)
     _keys = {"name": lambda e: e[0].lower(), "size": lambda e: e[1]}
@@ -994,16 +999,24 @@ async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", key
                  reverse=(order or "desc").lower() != "asc")
     rows = _fz_format_rows(entries)
     if not rows:
-        return "没有匹配的文件。" if kw else "文件区是空的。用 file_save 存入第一个文件。"
-    return f"文件区共 {len(rows)} 个文件:\n" + "\n".join(rows)
+        if kw:
+            return _t("没有匹配的文件。", "No matching files.")
+        return _t(
+            "文件区是空的。用 file_save 存入第一个文件。",
+            "The file zone is empty. Use file_save to store the first file.",
+        )
+    return _t(f"文件区共 {len(rows)} 个文件:\n", f"The file zone has {len(rows)} files:\n") + "\n".join(rows)
 
 
 async def _fz_delete(name: str) -> str:
     path = _fz_safe(name)
     if not os.path.isfile(path):
-        return f"OB-FZ02 文件不存在: files/{name}"
+        return _t(f"OB-FZ02 文件不存在: files/{name}", f"OB-FZ02 file does not exist: files/{name}")
     os.remove(path)
-    return f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。"
+    return _t(
+        f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。",
+        f"Deleted files/{name}. Historical versions can still be recovered from the GitHub backup.",
+    )
 
 
 @mcp.tool(structured_output=False)

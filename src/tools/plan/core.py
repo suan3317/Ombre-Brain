@@ -29,7 +29,7 @@ from typing import Optional
 
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size, check_query_size
-from utils import strip_wikilinks, get_ai_name
+from utils import strip_wikilinks, get_ai_name, t as _t
 
 
 async def plan_create(
@@ -57,7 +57,7 @@ async def plan_create(
     why_remembered = str(why_remembered).strip()[:500]
     await rt.decay_engine.ensure_started()
     if not content or not content.strip():
-        return "内容为空，无法登记计划。"
+        return _t("内容为空，无法登记计划。", "Content is empty, nothing to register as a plan.")
     size_err = check_content_size(content)
     if size_err:
         return size_err
@@ -82,7 +82,10 @@ async def plan_create(
                 and m.get("status", "active") == "active"
                 and (b.get("content") or "").strip() == norm
             ):
-                return f"跟原有 active plan 完全重复→{b['id']}（未重复登记）"
+                return _t(
+                    f"跟原有 active plan 完全重复→{b['id']}（未重复登记）",
+                    f"Exact duplicate of an existing active plan → {b['id']} (not registered again)",
+                )
     except Exception as e:
         rt.logger.warning(f"plan() dedup scan failed: {e}")
 
@@ -130,9 +133,9 @@ async def letter_write(
     # ai_name：显式传入优先，否则取环境变量 AI_NAME（回退 "AI"）。
     ai = (ai_name or "").strip() or get_ai_name()
     if not author or not author.strip():
-        return "author 不能为空。"
+        return _t("author 不能为空。", "author can't be empty.")
     if not content or not content.strip():
-        return "信件内容不能为空。"
+        return _t("信件内容不能为空。", "Letter content can't be empty.")
     size_err = check_content_size(content)
     if size_err:
         return size_err
@@ -221,7 +224,7 @@ async def letter_read(
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"读取信件失败: {e}"
+        return _t(f"读取信件失败: {e}", f"Failed to read letters: {e}")
     letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
     af = author.strip()
     if af:
@@ -284,7 +287,7 @@ async def letter_read(
 
     letters = letters[:limit]
     if not letters:
-        return "没有找到匹配的信件。"
+        return _t("没有找到匹配的信件。", "No matching letters found.")
     parts = []
     for b in letters:
         m = b["metadata"]
@@ -295,4 +298,4 @@ async def letter_read(
             f"[{b['id']}] {a} · {d}{(' · ' + title) if title else ''}\n"
             + strip_wikilinks(b["content"])
         )
-    return "=== 信件 ===\n" + "\n\n---\n\n".join(parts)
+    return _t("=== 信件 ===\n", "=== Letters ===\n") + "\n\n---\n\n".join(parts)

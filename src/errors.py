@@ -36,6 +36,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+from utils import ombre_lang, t as _t
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +63,12 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="F",
         title_zh="向量化 API Key 缺失",
         title_en="Embedding API key missing",
+        suggestion_en=(
+            "Set the OMBRE_EMBED_API_KEY environment variable (or fill in embedding.api_key "
+            "in config.yaml).\n"
+            "If semantic search isn't needed for now, set embedding.enabled=false in "
+            "config.yaml to skip it."
+        ),
         suggestion_zh=(
             "设置环境变量 OMBRE_EMBED_API_KEY（或在 config.yaml 中填写 embedding.api_key）。\n"
             "若暂时不需要语义检索，可在 config.yaml 中设置 embedding.enabled=false 跳过。"
@@ -71,6 +79,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="F",
         title_zh="config.yaml 损坏或缺失",
         title_en="config.yaml missing or malformed",
+        suggestion_en=(
+            "Check whether config.yaml exists in the project root; if missing, copy it from "
+            "config.example.yaml. If it exists, run `python -c \"import yaml; "
+            "yaml.safe_load(open('config.yaml'))\"` to see if it parses."
+        ),
         suggestion_zh=(
             "检查项目根目录是否存在 config.yaml；如缺失，从 config.example.yaml 复制一份。"
             "如已存在，运行 `python -c \"import yaml; yaml.safe_load(open('config.yaml'))\"` 看是否能解析。"
@@ -81,6 +94,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="F",
         title_zh="vault 目录不可写",
         title_en="vault (buckets) directory not writable",
+        suggestion_en=(
+            "Check that the directory OMBRE_BUCKETS_DIR points to exists and the current "
+            "user has write permission. For Docker deployments, check the volume mount and "
+            "uid/gid mapping."
+        ),
         suggestion_zh=(
             "检查 OMBRE_BUCKETS_DIR 指向的目录是否存在且当前用户拥有写权限。"
             "Docker 部署请检查 volume 挂载与 uid/gid 映射。"
@@ -91,6 +109,10 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="F",
         title_zh="embedding 后端初始化失败",
         title_en="Embedding backend initialization failed",
+        suggestion_en=(
+            "Check whether OMBRE_EMBED_API_KEY is valid and whether OMBRE_EMBED_BASE_URL "
+            "is reachable."
+        ),
         suggestion_zh=(
             "检查 OMBRE_EMBED_API_KEY 是否有效，以及 OMBRE_EMBED_BASE_URL 是否可达。"
         ),
@@ -102,6 +124,12 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="E",
         title_zh="embedding API 调用失败",
         title_en="Embedding API call failed",
+        suggestion_en=(
+            "Check network reachability, whether OMBRE_EMBED_API_KEY is valid, and whether "
+            "the quota is exhausted. This write is still saved to buckets; the vector will "
+            "be retried automatically in the background — or call /api/embedding/backfill "
+            "to trigger a manual full-store reconciliation."
+        ),
         suggestion_zh=(
             "检查网络可达性、OMBRE_EMBED_API_KEY 是否有效、配额是否耗尽。"
             "本次写入仍会保存到 buckets，向量由后台自动重试；也可调用 "
@@ -113,6 +141,10 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="E",
         title_zh="写盘失败",
         title_en="Disk write failed",
+        suggestion_en=(
+            "Check remaining disk space and directory permissions; confirm the file isn't "
+            "locked by backup/sync software (iCloud, Dropbox, etc.)."
+        ),
         suggestion_zh=(
             "检查磁盘剩余空间、目录权限；确认未被备份/同步软件锁定（iCloud/Dropbox 等）。"
         ),
@@ -122,6 +154,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="E",
         title_zh="并发冲突超时",
         title_en="Concurrency lock timeout",
+        suggestion_en=(
+            "merge_or_create for the same content held its lock too long — usually the "
+            "previous call got stuck. Retry shortly; if it keeps happening, restart the "
+            "service or check whether the LLM provider is responding slowly."
+        ),
         suggestion_zh=(
             "同一 content 的 merge_or_create 长时间未释放锁；通常是上一个调用卡死。"
             "稍后重试；若反复出现，重启服务或检查 LLM 提供方是否慢响应。"
@@ -132,6 +169,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="E",
         title_zh="MCP 工具执行异常",
         title_en="MCP tool execution exception",
+        suggestion_en=(
+            "See the exception details and the last 15 log lines below to find the root "
+            "cause. If it's a parameter issue, fix it per the message; if it's a backend "
+            "failure, retry or report it."
+        ),
         suggestion_zh=(
             "查看下方异常详情与最近 15 条日志定位根因。"
             "若是参数问题，按提示修正；若是后端故障，请重试或反馈。"
@@ -144,6 +186,7 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="W",
         title_zh="importance 越界已修正",
         title_en="importance out of range, clamped",
+        suggestion_en="importance must be within [1,10]; it has been clamped to the boundary value this time.",
         suggestion_zh="importance 必须在 [1,10]；本次已被修正到边界值。",
     ),
     "OB-W002": ErrorSpec(
@@ -151,6 +194,7 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="W",
         title_zh="valence/arousal 越界已回退",
         title_en="valence/arousal out of range, clamped",
+        suggestion_en="valence/arousal must be within [0.0, 1.0]; it has been clamped to the boundary value this time.",
         suggestion_zh="valence/arousal 必须在 [0.0, 1.0]；本次已被修正到边界值。",
     ),
     "OB-W003": ErrorSpec(
@@ -158,6 +202,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="W",
         title_zh="importance≥9 配额接近上限",
         title_en="importance≥9 quota near cap",
+        suggestion_en=(
+            "Buckets marked importance≥9 are close to the cap (22/24, hard limit 24). "
+            "Suggest downgrading old buckets that are no longer core with "
+            "trace(bucket_id, importance=…) before marking a new one."
+        ),
         suggestion_zh=(
             "标为 importance≥9 的桶接近上限（22/24，硬上限 24）。"
             "建议先用 trace(bucket_id, importance=…) 把不再核心的旧桶降级，再标新桶。"
@@ -168,6 +217,11 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="W",
         title_zh="pinned 配额接近上限",
         title_en="pinned quota near cap",
+        suggestion_en=(
+            "Pinned buckets are close to the cap (default 18/20, hard limit 20, adjustable "
+            "via config.limits.max_pinned). Suggest unpinning ones that are no longer core "
+            "with trace(bucket_id, pinned=0) before pinning a new one."
+        ),
         suggestion_zh=(
             "pinned 桶接近上限（默认 18/20，硬上限 20，可在 config.limits.max_pinned 调整）。"
             "建议先用 trace(bucket_id, pinned=0) 取消不再核心的钉选，再钉新桶。"
@@ -178,6 +232,12 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="W",
         title_zh="embeddings.db 中的模型/维度与当前后端不一致",
         title_en="embeddings.db model/dim mismatch with current backend",
+        suggestion_en=(
+            "Previously stored vectors have a different dimension than the current model, "
+            "search will degrade to a score of 0. Click \"Switch model\" on the Dashboard "
+            "settings page, or call POST /api/embedding/migrate to rebuild the index. "
+            "Search falls back to keyword mode during migration; no files are lost."
+        ),
         suggestion_zh=(
             "过往写入的向量与当前模型不同维，搜索会退化为 0 分。"
             "请在 Dashboard 设置页点击「切换模型」，或调用 POST /api/embedding/migrate 重建索引。"
@@ -191,6 +251,15 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="I",
         title_zh="importance 已自动降级（importance≥9 配额超标）",
         title_en="importance auto-downgraded (≥9 quota exceeded)",
+        suggestion_en=(
+            "★ This is something OB decided to do on its own ★\n"
+            "Buckets with importance≥9 have hit the hard limit of 24; this new bucket was "
+            "auto-downgraded to importance=8.\n"
+            "Suggest: use breath_advanced(importance_min=9) to re-read all \"core items\" "
+            "and re-evaluate each one's importance; downgrade ones no longer core with "
+            "trace(bucket_id, importance=7).\n"
+            "(Re-setting importance is your call — OB won't judge for you which one matters more.)"
+        ),
         suggestion_zh=(
             "★ 这是 OB 自作主张帮你做的事 ★\n"
             "importance≥9 的桶已达硬上限 24，本次新桶被自动降级为 importance=8。\n"
@@ -204,6 +273,14 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         level="I",
         title_zh="pinned 已自动退出（pinned 配额超标）",
         title_en="pinned auto-unset (pinned quota exceeded)",
+        suggestion_en=(
+            "★ This is something OB decided to do on its own ★\n"
+            "Pinned buckets have hit the hard limit (default 20, adjustable via "
+            "config.limits.max_pinned); this one wasn't pinned (kept as a normal bucket).\n"
+            "Suggest: use breath to review the current pinned list, unpin any that are no "
+            "longer \"permanent core principles\" with trace(bucket_id, pinned=0), then pin "
+            "this one."
+        ),
         suggestion_zh=(
             "★ 这是 OB 自作主张帮你做的事 ★\n"
             "pinned 桶已达硬上限（默认 20，可在 config.limits.max_pinned 调整），本次未钉成功（保留为普通桶）。\n"
@@ -367,31 +444,37 @@ def format_error(
     spec = ERROR_CODES.get(code)
     if not spec:
         # 未知码：仍能渲染，让排错时一眼看到拼错的码
-        return (
+        return _t(
             f"❌ [{code}] 未注册错误码\n"
             f"详情：{detail}\n"
-            f"建议：在 src/errors.py ERROR_CODES 注册该码或修正调用处。"
+            f"建议：在 src/errors.py ERROR_CODES 注册该码或修正调用处。",
+            f"❌ [{code}] Unregistered error code\n"
+            f"Detail: {detail}\n"
+            "Suggestion: register this code in src/errors.py ERROR_CODES or fix the call site.",
         )
+    lang_en = ombre_lang() == "en"
+    title = spec.title_en if lang_en else spec.title_zh
+    suggestion = (spec.suggestion_en or spec.title_en) if lang_en else spec.suggestion_zh
     prefix = _LEVEL_PREFIX.get(spec.level, "•")
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     parts = [
-        f"{prefix} [{spec.code}] {spec.title_zh}",
+        f"{prefix} [{spec.code}] {title}",
     ]
     if detail:
-        parts.append(f"描述：{detail}")
-    parts.append(f"建议：{spec.suggestion_zh}")
-    parts.append(f"时间：{ts}")
+        parts.append(_t(f"描述：{detail}", f"Detail: {detail}"))
+    parts.append(_t(f"建议：{suggestion}", f"Suggestion: {suggestion}"))
+    parts.append(_t(f"时间：{ts}", f"Time: {ts}"))
     if extra:
         for k, v in extra.items():
-            parts.append(f"{k}：{v}")
+            parts.append(f"{k}：{v}" if not lang_en else f"{k}: {v}")
 
     if include_logs is None:
         include_logs = spec.level in ("F", "E")
     if include_logs:
         tail = get_recent_logs(_LOG_TAIL_FOR_ERROR)
         parts.append("")
-        parts.append(f"--- 最近 {len(tail)} 条日志 ---")
-        parts.extend(tail if tail else ["(暂无日志)"])
+        parts.append(_t(f"--- 最近 {len(tail)} 条日志 ---", f"--- Last {len(tail)} log lines ---"))
+        parts.extend(tail if tail else [_t("(暂无日志)", "(no logs yet)")])
     return "\n".join(parts)
 
 

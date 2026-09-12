@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - py<3.9 not supported by this repo
 
 import frontmatter as fm
 
-from utils import config_file_path, ombre_lang as _ombre_lang
+from utils import config_file_path, ombre_lang as _ombre_lang, t as _t
 
 try:  # jieba 软依赖，用法同 bm25_index.py：未装时静默降级，不炸管线
     import jieba.posseg as _jieba_posseg
@@ -747,22 +747,22 @@ def dream_book_dir(buckets_dir: str) -> str:
 def dream_book_path(buckets_dir: str, day) -> str:
     date_str = day if isinstance(day, str) else day.isoformat()
     if not _DREAM_DATE_PATTERN.fullmatch(date_str):
-        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+        raise ValueError(_t("date 必须是有效的 YYYY-MM-DD 日期", "date must be a valid YYYY-MM-DD date"))
     try:
         parsed = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError as exc:
-        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期") from exc
+        raise ValueError(_t("date 必须是有效的 YYYY-MM-DD 日期", "date must be a valid YYYY-MM-DD date")) from exc
     if parsed.strftime("%Y-%m-%d") != date_str:
-        raise ValueError("date 必须是有效的 YYYY-MM-DD 日期")
+        raise ValueError(_t("date 必须是有效的 YYYY-MM-DD 日期", "date must be a valid YYYY-MM-DD date"))
 
     root = Path(dream_book_dir(buckets_dir)).resolve()
     path = (root / f"{date_str}.md").resolve()
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise ValueError("dream 路径越出 dream_book 根目录") from exc
+        raise ValueError(_t("dream 路径越出 dream_book 根目录", "dream path escapes the dream_book root")) from exc
     if path.parent != root:
-        raise ValueError("dream 路径越出 dream_book 根目录")
+        raise ValueError(_t("dream 路径越出 dream_book 根目录", "dream path escapes the dream_book root"))
     return str(path)
 
 
@@ -810,14 +810,20 @@ def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if not os.path.isfile(path):
-        return {"ok": False, "error": f"没有 {date_str} 这晚的梦记录。"}
+        return {"ok": False, "error": _t(
+            f"没有 {date_str} 这晚的梦记录。", f"No dream recorded for the night of {date_str}.",
+        )}
     try:
         post = fm.load(path)
     except Exception as e:
-        return {"ok": False, "error": f"读取失败: {e}"}
+        return {"ok": False, "error": _t(f"读取失败: {e}", f"Read failed: {e}")}
     keep_status = post.get("keep_status", "fresh")
     if keep_status == "burned":
-        return {"ok": False, "error": f"{date_str} 这晚的梦已经烧掉了，没留下来，没法再留。"}
+        return {"ok": False, "error": _t(
+            f"{date_str} 这晚的梦已经烧掉了，没留下来，没法再留。",
+            f"The dream from the night of {date_str} has already been burned, it wasn't "
+            "kept, and can't be kept now.",
+        )}
     if keep_status == "kept":
         return {"ok": True, "date": date_str, "already_kept": True}
     now = now or datetime.now()
@@ -827,7 +833,7 @@ def dream_book_keep(buckets_dir: str, date_str: str, now: datetime | None = None
         with open(path, "w", encoding="utf-8") as f:
             f.write(fm.dumps(post))
     except Exception as e:
-        return {"ok": False, "error": f"写入失败: {e}"}
+        return {"ok": False, "error": _t(f"写入失败: {e}", f"Write failed: {e}")}
     return {"ok": True, "date": date_str, "already_kept": False}
 
 
