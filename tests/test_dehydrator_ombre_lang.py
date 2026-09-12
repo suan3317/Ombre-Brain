@@ -416,3 +416,115 @@ def test_zh_default_human_fallback_unaffected(tmp_path, monkeypatch):
     dehy = Dehydrator({"buckets_dir": str(tmp_path / "vault")})
     assert dehy.human == "用户"
     dehy._cache_conn.close()
+
+
+# ============================================================
+# 工单 D-4 四期：dehydrator.py 内部报错 + judge_plan_resolution +
+# dehydrate() 空内容固定输出
+# ============================================================
+
+def _dehydrator_no_api(tmp_path) -> Dehydrator:
+    return Dehydrator({"buckets_dir": str(tmp_path / "vault")})  # 无 api_key
+
+
+@pytest.mark.asyncio
+async def test_en_require_api_error_has_no_chinese_characters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator_no_api(tmp_path)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await dehy.merge("old", "new")
+
+    assert not _CJK_RE.search(str(exc_info.value))
+    assert "Dehydration API unavailable" in str(exc_info.value)
+    dehy._cache_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_en_merge_analyze_digest_wrapped_errors_have_no_chinese_characters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator(tmp_path)
+
+    async def failing(*_a, **_k):
+        raise TimeoutError("upstream down")
+
+    monkeypatch.setattr(dehy, "_api_merge", failing)
+    with pytest.raises(RuntimeError) as merge_exc:
+        await dehy.merge("old", "new")
+    assert not _CJK_RE.search(str(merge_exc.value))
+    assert "API merge failed" in str(merge_exc.value)
+
+    monkeypatch.setattr(dehy, "_api_analyze", failing)
+    with pytest.raises(RuntimeError) as analyze_exc:
+        await dehy.analyze("some content")
+    assert not _CJK_RE.search(str(analyze_exc.value))
+    assert "API tagging failed" in str(analyze_exc.value)
+    dehy._cache_conn.close()
+
+
+def test_en_dehydrate_empty_content_has_no_chinese_characters(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator(tmp_path)
+
+    out = asyncio.run(dehy.dehydrate(""))
+
+    assert not _CJK_RE.search(out)
+    assert out == "(empty memory)"
+    dehy._cache_conn.close()
+
+
+def test_en_judge_plan_resolution_system_prompt_has_no_chinese_characters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator(tmp_path)
+    captured = {}
+
+    async def fake_chat(system, user, **kwargs):
+        captured["system"] = system
+        return '{"resolved": false, "confidence": 0.1, "reason": "not yet"}'
+
+    monkeypatch.setattr(dehy, "_chat", fake_chat)
+    import asyncio
+    result = asyncio.run(dehy.judge_plan_resolution("plan text", "new event text"))
+
+    assert not _CJK_RE.search(captured["system"])
+    assert result["reason"] == "not yet"
+    dehy._cache_conn.close()
+
+
+def test_en_judge_plan_resolution_api_unavailable_reason_is_english(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator_no_api(tmp_path)
+
+    result = asyncio.run(dehy.judge_plan_resolution("plan text", "new event text"))
+
+    assert result == {"resolved": False, "confidence": 0.0, "reason": "API unavailable"}
+    dehy._cache_conn.close()
+
+
+# ============================================================
+# zh 回归：默认（不设 OMBRE_LANG）路径必须逐字保持原有中文
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_zh_default_require_api_error_unaffected(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    dehy = _dehydrator_no_api(tmp_path)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await dehy.merge("old", "new")
+
+    assert str(exc_info.value) == "脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置"
+    dehy._cache_conn.close()
+
+
+def test_zh_default_dehydrate_empty_content_unaffected(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    dehy = _dehydrator(tmp_path)
+
+    out = asyncio.run(dehy.dehydrate(""))
+
+    assert out == "（空记忆 / empty memory）"
+    dehy._cache_conn.close()

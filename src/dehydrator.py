@@ -559,7 +559,10 @@ class Dehydrator:
         统一后调用方一行 `self._require_api()` 即可，且文案改一处全部生效。
         """
         if not self.api_available:
-            raise RuntimeError("脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置")
+            raise RuntimeError(_t(
+                "脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置",
+                "Dehydration API unavailable, check the dehydration config in config.yaml",
+            ))
 
     @staticmethod
     def _is_transient_error(exc: BaseException) -> bool:
@@ -812,7 +815,7 @@ class Dehydrator:
         使用 SQLite 缓存避免重复调用 API。
         """
         if not content or not content.strip():
-            return "（空记忆 / empty memory）"
+            return _t("（空记忆 / empty memory）", "(empty memory)")
 
         # --- Content is short enough, no compression needed ---
         # --- 内容已经很短，不需要压缩 ---
@@ -881,11 +884,13 @@ class Dehydrator:
             result = await self._api_merge(old_content, new_content)
             if result:
                 return result
-            raise RuntimeError("API 合并返回空结果")
+            raise RuntimeError(_t("API 合并返回空结果", "API merge returned an empty result"))
         except RuntimeError:
             raise
         except Exception as e:
-            raise RuntimeError(f"API 合并失败，请检查 API 连接: {e}") from e
+            raise RuntimeError(_t(
+                f"API 合并失败，请检查 API 连接: {e}", f"API merge failed, check the API connection: {e}",
+            )) from e
 
     # ---------------------------------------------------------
     # API call: dehydration
@@ -1046,11 +1051,13 @@ class Dehydrator:
             result = await self._api_analyze(content)
             if result:
                 return result
-            raise RuntimeError("API 打标返回空结果")
+            raise RuntimeError(_t("API 打标返回空结果", "API tagging returned an empty result"))
         except RuntimeError:
             raise
         except Exception as e:
-            raise RuntimeError(f"API 打标失败，请检查 API 连接: {e}") from e
+            raise RuntimeError(_t(
+                f"API 打标失败，请检查 API 连接: {e}", f"API tagging failed, check the API connection: {e}",
+            )) from e
 
     # ---------------------------------------------------------
     # API call: auto-tagging
@@ -1144,11 +1151,14 @@ class Dehydrator:
             result = await self._api_digest(content)
             if result:
                 return result
-            raise RuntimeError("API 日记整理返回空结果")
+            raise RuntimeError(_t("API 日记整理返回空结果", "API diary digest returned an empty result"))
         except RuntimeError:
             raise
         except Exception as e:
-            raise RuntimeError(f"API 日记整理失败，请检查 API 连接: {e}") from e
+            raise RuntimeError(_t(
+                f"API 日记整理失败，请检查 API 连接: {e}",
+                f"API diary digest failed, check the API connection: {e}",
+            )) from e
 
     # ---------------------------------------------------------
     # API call: diary digest
@@ -1251,12 +1261,17 @@ class Dehydrator:
         Returns {"resolved": False} silently when API unavailable.
         """
         if not self.api_available:
-            return {"resolved": False, "confidence": 0.0, "reason": "API 不可用"}
-        system = (
+            return {"resolved": False, "confidence": 0.0, "reason": _t("API 不可用", "API unavailable")}
+        system = _t(
             "你是一个保守的计划完成判断器。给定一条 plan 和一条新事件，"
             "只在新事件明确表示该 plan 已被完成、放弃或不再相关时，输出 resolved=true；"
             "其它情况一律 false。返回严格 JSON：{\"resolved\": true/false, \"confidence\": 0~1, \"reason\": \"...\"}。"
-            "不要解释、不要 markdown、不要多余文本。"
+            "不要解释、不要 markdown、不要多余文本。",
+            "You are a conservative plan-completion judge. Given a plan and a new event, "
+            "output resolved=true only when the new event clearly shows the plan has been "
+            "completed, abandoned, or is no longer relevant; false in every other case. "
+            "Return strict JSON: {\"resolved\": true/false, \"confidence\": 0-1, \"reason\": \"...\"}. "
+            "No explanation, no markdown, no extra text.",
         )
         user = (
             f"PLAN:\n{plan_text[:_PLAN_JUDGE_INPUT_LIMIT]}\n\n"
@@ -1270,7 +1285,7 @@ class Dehydrator:
                 temperature=_PLAN_JUDGE_TEMPERATURE,
             )
             if not raw:
-                return {"resolved": False, "confidence": 0.0, "reason": "空响应"}
+                return {"resolved": False, "confidence": 0.0, "reason": _t("空响应", "empty response")}
             cleaned = self._strip_md_fence(raw)
             data = json.loads(cleaned)
             return {

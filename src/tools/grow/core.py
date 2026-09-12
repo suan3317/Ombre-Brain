@@ -36,6 +36,13 @@ from .._common import (
     check_plan_resolution,
     resolve_citations,
 )
+from utils import t as _t
+
+
+def _default_domain() -> list[str]:
+    # 同 hold/core.py、hold/pinned.py、grow/shortpath.py 的本地兜底，工单
+    # D-4 四期一并按 ombre_lang() 切换。
+    return [_t("未分类", "unclassified")]
 
 
 async def grow_core(content: str, cited: str = "") -> str:
@@ -43,12 +50,14 @@ async def grow_core(content: str, cited: str = "") -> str:
         items = await rt.dehydrator.digest(content)
     except Exception as e:
         rt.logger.error(f"Diary digest failed / 日记整理失败: {e}")
-        raise RuntimeError(
-            f"API key 未配置或调用失败，日记拆分无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。（错误：{e}）"
-        ) from e
+        raise RuntimeError(_t(
+            f"API key 未配置或调用失败，日记拆分无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。（错误：{e}）",
+            f"API key not configured or call failed, diary digest couldn't complete, no "
+            f"bucket created. Check OMBRE_COMPRESS_API_KEY. (error: {e})",
+        )) from e
 
     if not isinstance(items, list) or not items:
-        return "内容为空或整理失败。"
+        return _t("内容为空或整理失败。", "Content is empty or organizing failed.")
     payload_err = check_grow_items_payload(items)
     if payload_err:
         rt.logger.warning(f"grow digest output rejected: {payload_err}")
@@ -68,13 +77,15 @@ async def grow_core(content: str, cited: str = "") -> str:
         try:
             size_err = check_content_size(item.get("content", ""))
             if size_err:
-                results.append(f"⚠️{item.get('name', '?')}（{size_err}）")
+                results.append(_t(
+                    f"⚠️{item.get('name', '?')}（{size_err}）", f"⚠️{item.get('name', '?')} ({size_err})",
+                ))
                 continue
             result_name, is_merged, embed_warn = await merge_or_create(
                 content=item["content"],
                 tags=item.get("tags") or [],
                 importance=item.get("importance") or 5,
-                domain=item.get("domain") or ["未分类"],
+                domain=item.get("domain") or _default_domain(),
                 valence=item.get("valence") or 0.5,
                 arousal=item.get("arousal") or 0.3,
                 name=item.get("name", ""),
@@ -104,7 +115,10 @@ async def grow_core(content: str, cited: str = "") -> str:
         # 用到了哪些既有记忆"，不属于批次里某一条具体的桶——用 batch_id
         # 当 source，不挑某个 result_name 代表整批。
         asyncio.create_task(resolve_citations(cited, source=f"grow_batch:{batch_id}", location="grow"))
-    summary = f"{len(items)}条|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
+    summary = _t(
+        f"{len(items)}条|新{created}合{merged} batch:{batch_id}\n",
+        f"{len(items)} items|new:{created} merged:{merged} batch:{batch_id}\n",
+    ) + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
     return summary
@@ -135,7 +149,7 @@ async def grow_items(items: list, cited: str = "") -> str:
         if s:
             clean.append(s)
     if not clean:
-        return "items 为空或都不合法，未创建任何桶。"
+        return _t("items 为空或都不合法，未创建任何桶。", "items is empty or all invalid, no bucket created.")
 
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
     results = []
@@ -148,7 +162,7 @@ async def grow_items(items: list, cited: str = "") -> str:
         try:
             size_err = check_content_size(content_str)
             if size_err:
-                results.append(f"⚠️（{size_err}）")
+                results.append(_t(f"⚠️（{size_err}）", f"⚠️ ({size_err})"))
                 continue
             # 只打标，不改写正文；打标失败（如 API key 未配置）不应丢正文——
             # 落回本地中性元数据，与 hold 的降级行为保持一致（见 tools/hold/core.py）。
@@ -162,13 +176,13 @@ async def grow_items(items: list, cited: str = "") -> str:
                 )
                 default_analysis = getattr(rt.dehydrator, "_default_analysis", None)
                 meta = default_analysis() if callable(default_analysis) else {
-                    "domain": ["未分类"], "valence": 0.5, "arousal": 0.3, "tags": [], "suggested_name": "",
+                    "domain": _default_domain(), "valence": 0.5, "arousal": 0.3, "tags": [], "suggested_name": "",
                 }
             result_name, is_merged, embed_warn = await merge_or_create(
                 content=content_str,
                 tags=meta.get("tags") or [],
                 importance=5,
-                domain=meta.get("domain") or ["未分类"],
+                domain=meta.get("domain") or _default_domain(),
                 valence=meta.get("valence", 0.5),
                 arousal=meta.get("arousal", 0.3),
                 name=meta.get("suggested_name", ""),
@@ -192,9 +206,16 @@ async def grow_items(items: list, cited: str = "") -> str:
     asyncio.create_task(check_plan_resolution("\n".join(clean)))
     if cited:
         asyncio.create_task(resolve_citations(cited, source=f"grow_batch:{batch_id}", location="grow"))
-    summary = f"{len(clean)}条(预拆分·逐字)|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
+    summary = _t(
+        f"{len(clean)}条(预拆分·逐字)|新{created}合{merged} batch:{batch_id}\n",
+        f"{len(clean)} items (pre-split, verbatim)|new:{created} merged:{merged} batch:{batch_id}\n",
+    ) + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
     if metadata_fallback:
-        summary += "\n⚠️ 打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。"
+        summary += "\n⚠️ " + _t(
+            "打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。",
+            "Tagging API temporarily unavailable: content saved verbatim, no compression "
+            "applied; metadata falls back to local neutral defaults.",
+        )
     return summary

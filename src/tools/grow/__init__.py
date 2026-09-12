@@ -23,6 +23,7 @@ from typing import Optional
 
 from .. import _runtime as rt
 from .._common import check_grow_input_size, check_grow_items_payload
+from utils import t as _t
 from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
 
@@ -40,7 +41,7 @@ async def dispatch(content: str = "", items: Optional[list] = None, cited: Optio
         return await grow_items(items, cited=cited)
 
     if not content or not content.strip():
-        return "内容为空，无法整理。"
+        return _t("内容为空，无法整理。", "Content is empty, nothing to organize.")
 
     err = check_grow_input_size(content)
     if err:

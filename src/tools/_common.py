@@ -40,10 +40,18 @@ import time
 import uuid
 
 from . import _runtime as rt
+from utils import t as _t
 
-_EMBED_WARN = (
-    "向量化失败，该桶不参与语义检索，仅支持关键词匹配。请检查 OMBRE_EMBED_API_KEY。"
-)
+
+def _embed_warn() -> str:
+    # 工单 D-4 四期：写成函数而不是模块级常量——常量在模块 import 时就把
+    # ombre_lang() 冻在当时的值上，见 utils.t() 的用法说明（同三期
+    # STORED_DATA_NOTICE/_SEMANTIC_DISABLED_NOTE 的教训）。
+    return _t(
+        "向量化失败，该桶不参与语义检索，仅支持关键词匹配。请检查 OMBRE_EMBED_API_KEY。",
+        "Vectorization failed, this bucket won't participate in semantic search, "
+        "keyword matching only. Check OMBRE_EMBED_API_KEY.",
+    )
 
 # ============================================================
 # 常量 / Named constants
@@ -717,7 +725,7 @@ async def _merge_or_create_inner(
             existing = await rt.embedding_engine.get_embedding(bucket_id)
             if existing is None:
                 embedding_state = "missing"
-                embed_warn = _EMBED_WARN
+                embed_warn = _embed_warn()
                 rt.logger.info(
                     f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
                     f"reason=no_embedding_after_create"
@@ -726,7 +734,7 @@ async def _merge_or_create_inner(
                 embedding_state = "indexed"
         except Exception as _embed_exc:
             embedding_state = "missing"
-            embed_warn = _EMBED_WARN
+            embed_warn = _embed_warn()
             rt.logger.info(
                 f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
                 f"reason={type(_embed_exc).__name__}"

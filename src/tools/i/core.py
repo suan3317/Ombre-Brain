@@ -25,6 +25,7 @@ from typing import Optional
 from bucket_manager import format_staleness_warning
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size
+from utils import t as _t
 
 _VALID_ASPECTS = {"nature", "values", "patterns", "limits", "becoming", "uncertainty", "stance"}
 
@@ -58,7 +59,7 @@ async def i_core(
         return await _read_i(limit)
     if aspect and aspect not in _VALID_ASPECTS:
         choices = ", ".join(sorted(_VALID_ASPECTS))
-        return f"aspect 无效：{aspect}。可选值: {choices}"
+        return _t(f"aspect 无效：{aspect}。可选值: {choices}", f"Invalid aspect: {aspect}. Choices: {choices}")
     size_err = check_content_size(content)
     if size_err:
         return size_err
@@ -85,7 +86,7 @@ async def _write_i(content: str, aspect: str) -> str:
             source_tool="I",
         )
     except Exception as e:
-        return f"写入失败: {e}"
+        return _t(f"写入失败: {e}", f"Write failed: {e}")
 
     try:
         await rt.bucket_mgr.update(bucket_id, dont_surface=True)
@@ -100,7 +101,7 @@ async def _read_i(limit: int) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"读取失败: {e}"
+        return _t(f"读取失败: {e}", f"Read failed: {e}")
 
     i_buckets = [
         b for b in all_buckets
@@ -108,7 +109,7 @@ async def _read_i(limit: int) -> str:
     ]
 
     if not i_buckets:
-        return "还没有任何自我认知记录。"
+        return _t("还没有任何自我认知记录。", "No self-knowledge entries yet.")
 
     i_buckets.sort(
         key=lambda b: b.get("metadata", {}).get("last_active", ""),
@@ -116,7 +117,7 @@ async def _read_i(limit: int) -> str:
     )
     i_buckets = i_buckets[:limit]
 
-    lines = [f"=== 我的自我认知（{len(i_buckets)} 条）==="]
+    lines = [_t(f"=== 我的自我认知（{len(i_buckets)} 条）===", f"=== My Self-Knowledge ({len(i_buckets)} entries) ===")]
     for b in i_buckets:
         meta = b.get("metadata", {})
         tags = meta.get("tags") or []

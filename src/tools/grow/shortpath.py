@@ -25,6 +25,13 @@ import uuid
 
 from .. import _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution, resolve_citations
+from utils import t as _t
+
+
+def _default_domain() -> list[str]:
+    # 同 hold/core.py、hold/pinned.py 的本地兜底，工单 D-4 四期一并按
+    # ombre_lang() 切换。
+    return [_t("未分类", "unclassified")]
 
 
 async def grow_shortpath(content: str, cited: str = "") -> str:
@@ -32,9 +39,11 @@ async def grow_shortpath(content: str, cited: str = "") -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
     except Exception as e:
-        raise RuntimeError(
-            f"API key 未配置或调用失败，打标无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。（错误：{e}）"
-        ) from e
+        raise RuntimeError(_t(
+            f"API key 未配置或调用失败，打标无法完成，桶未创建。请检查 OMBRE_COMPRESS_API_KEY。（错误：{e}）",
+            f"API key not configured or call failed, tagging couldn't complete, no bucket "
+            f"created. Check OMBRE_COMPRESS_API_KEY. (error: {e})",
+        )) from e
     importance = analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5
     # iter 2.0：短路径也是一次 grow 调用 → 仍生成 batch_id，便于 dashboard 聚合，
     # 即使 batch 里只有一条记录也保留字段，schema 一致。
@@ -43,7 +52,7 @@ async def grow_shortpath(content: str, cited: str = "") -> str:
         content=content.strip(),
         tags=analysis.get("tags", []),
         importance=importance,
-        domain=analysis.get("domain", ["未分类"]),
+        domain=analysis.get("domain", _default_domain()),
         valence=analysis.get("valence", 0.5),
         arousal=analysis.get("arousal", 0.3),
         name=analysis.get("suggested_name", ""),
@@ -51,15 +60,15 @@ async def grow_shortpath(content: str, cited: str = "") -> str:
         source_tool="grow",
         grow_batch_id=batch_id,
     )
-    action = "合并" if is_merged else "新建"
+    action = _t("合并", "merged") if is_merged else _t("新建", "created")
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
         asyncio.create_task(check_duplicate_for(result_name, content.strip()))
     if cited:
         asyncio.create_task(resolve_citations(cited, source=result_name, location="grow_shortpath"))
     result = (
-        "短内容已按 hold 路径保存为单条记忆，没有拆分。\n"
-        f"{action} → {result_name} | "
+        _t("短内容已按 hold 路径保存为单条记忆，没有拆分。\n", "Short content saved as a single memory via the hold path, not split.\n")
+        + f"{action} → {result_name} | "
         f"{','.join(analysis.get('domain', []))} "
         f"V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}"
     )

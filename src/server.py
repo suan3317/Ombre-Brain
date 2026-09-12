@@ -837,10 +837,17 @@ async def _dream_keep_impl(date: str) -> str:
     from dream_engine import dream_book_keep
     result = dream_book_keep(config.get("buckets_dir", "buckets"), date)
     if not result["ok"]:
-        return f"没留成:{result['error']}"
+        return _t(f"没留成:{result['error']}", f"Not kept: {result['error']}")
     if result.get("already_kept"):
-        return f"{result['date']} 这晚的梦本来就是 kept 状态，还在梦境书里，没有变化。"
-    return f"已保留 {result['date']} 这晚的梦，永久留在梦境书里，不会再被烧掉。"
+        return _t(
+            f"{result['date']} 这晚的梦本来就是 kept 状态，还在梦境书里，没有变化。",
+            f"The dream from {result['date']} was already kept, still in the dream book, no change.",
+        )
+    return _t(
+        f"已保留 {result['date']} 这晚的梦，永久留在梦境书里，不会再被烧掉。",
+        f"Kept the dream from {result['date']} — it stays in the dream book permanently and "
+        "won't be burned.",
+    )
 
 
 @mcp.tool(structured_output=False)
@@ -875,13 +882,13 @@ def _fz_safe(name: str) -> str:
     """校验文件名,拦路径穿越;允许至多一层子文件夹。返回绝对路径。"""
     name = (name or "").strip().replace("\\", "/")
     if not name or name.startswith("/") or ".." in name:
-        raise ValueError(f"非法文件名: {name!r}")
+        raise ValueError(_t(f"非法文件名: {name!r}", f"Invalid filename: {name!r}"))
     parts = [p for p in name.split("/") if p]
     if len(parts) > 2:
-        raise ValueError(f"最多一层子文件夹: {name}")
+        raise ValueError(_t(f"最多一层子文件夹: {name}", f"At most one level of subfolder: {name}"))
     for p in parts:
         if not _fz_re.match(r"^[\w\u4e00-\u9fff.\- ]{1,80}$", p) or p.startswith("."):
-            raise ValueError(f"文件名含非法字符: {p!r}")
+            raise ValueError(_t(f"文件名含非法字符: {p!r}", f"Filename has illegal characters: {p!r}"))
     return os.path.join(_fz_root(), *parts)
 
 
@@ -889,7 +896,10 @@ async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> st
     path = _fz_safe(name)
     data = content or ""
     if len(data.encode("utf-8")) > _FZ_MAX_BYTES:
-        return "OB-FZ01 内容超过 2MB 上限,拒绝写入。请拆分后再存。"
+        return _t(
+            "OB-FZ01 内容超过 2MB 上限,拒绝写入。请拆分后再存。",
+            "OB-FZ01 content exceeds the 2MB limit, write refused. Split it and store again.",
+        )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     existed = os.path.exists(path)
     if append and existed and os.path.getsize(path) > 0:
@@ -897,30 +907,44 @@ async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> st
     with open(path, "a" if append else "w", encoding="utf-8") as f:
         f.write(data)
     size = os.path.getsize(path)
-    verb = "追加到" if (append and existed) else ("覆盖" if existed else "创建")
-    result = f"已{verb} files/{name} (当前 {size} 字节)。"
+    if append and existed:
+        verb = _t("追加到", "appended to")
+    elif existed:
+        verb = _t("覆盖", "overwrote")
+    else:
+        verb = _t("创建", "created")
+    result = _t(f"已{verb} files/{name} (当前 {size} 字节)。", f"{verb} files/{name} ({size} bytes now).")
     if cited:
         # v3 Commit B：file_save 没有 bucket_id 可当 source，用文件路径本身
         # 标识"是这份文件用到了这些记忆"。
         recorded = await _resolve_citations(cited, source=f"file:{name}", location="file_save")
         if recorded:
-            result += f" 已记引用: {','.join(recorded)}。"
+            result += _t(f" 已记引用: {','.join(recorded)}。", f" Citations recorded: {','.join(recorded)}.")
     return result
 
 
 async def _fz_read(name: str, offset: int) -> str:
     path = _fz_safe(name)
     if not os.path.isfile(path):
-        return f"OB-FZ02 文件不存在: files/{name} 。用 file_list 查看现有文件。"
+        return _t(
+            f"OB-FZ02 文件不存在: files/{name} 。用 file_list 查看现有文件。",
+            f"OB-FZ02 file does not exist: files/{name}. Use file_list to see existing files.",
+        )
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
     total = len(text)
     start = max(0, int(offset or 0))
     chunk = text[start:start + _FZ_READ_CHUNK]
-    head = f"[files/{name} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]"
+    head = _t(
+        f"[files/{name} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]",
+        f"[files/{name} has {total} chars total, returning {start}~{start + len(chunk)} this time]",
+    )
     tail = ""
     if start + len(chunk) < total:
-        tail = f"\n[未完,续读请用 offset={start + len(chunk)}]"
+        tail = _t(
+            f"\n[未完,续读请用 offset={start + len(chunk)}]",
+            f"\n[not finished, continue reading with offset={start + len(chunk)}]",
+        )
     # v3 Commit D：三入口之一——file_read 是最通用的文件读取口，任何
     # files/*.md 只要被 supersede 传播标过 derived_freshness，这里都会
     # 提示（精确到"哪一次引用/哪一行"，不是整份文档级模糊警示）。

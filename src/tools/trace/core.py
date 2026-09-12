@@ -31,7 +31,7 @@ import math
 from typing import Optional
 
 from memory_messages import resolved_hint
-from utils import parse_bool, parse_iso_datetime
+from utils import parse_bool, parse_iso_datetime, t as _t
 from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size, check_pinned_quota, resolve_citations
 
@@ -186,7 +186,7 @@ async def trace_core(
     })
 
     if not bucket_id or not bucket_id.strip():
-        return "请提供有效的 bucket_id。"
+        return _t("请提供有效的 bucket_id。", "Please provide a valid bucket_id.")
 
     # --- Delete 模式（F-10：软删除，移入 archive/ + 标 deleted_at）---
     if hard_delete:
@@ -194,24 +194,39 @@ async def trace_core(
             bucket_id, reason=delete_reason or "AI requested test-data cleanup"
         )
         if result.get("ok"):
-            return f"已永久删除测试桶: {bucket_id}"
+            return _t(f"已永久删除测试桶: {bucket_id}", f"Permanently deleted test bucket: {bucket_id}")
         if result.get("error") == "not_erasable_test_data":
-            return "拒绝永久删除：只有创建时明确标记为 test_data 的测试桶可以被物理删除。"
-        return f"永久删除失败: {result.get('error', 'unknown_error')}"
+            return _t(
+                "拒绝永久删除：只有创建时明确标记为 test_data 的测试桶可以被物理删除。",
+                "Refused permanent deletion: only buckets explicitly marked test_data at "
+                "creation can be physically deleted.",
+            )
+        return _t(
+            f"永久删除失败: {result.get('error', 'unknown_error')}",
+            f"Permanent deletion failed: {result.get('error', 'unknown_error')}",
+        )
 
     if delete:
         success = await rt.bucket_mgr.delete(bucket_id)
-        return f"已将记忆桶存入档案（不可在日常召回中浮现）: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+        if success:
+            return _t(
+                f"已将记忆桶存入档案（不可在日常召回中浮现）: {bucket_id}",
+                f"Bucket archived (won't surface in normal recall): {bucket_id}",
+            )
+        return _t(f"未找到记忆桶: {bucket_id}", f"Bucket not found: {bucket_id}")
 
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
-        return f"未找到记忆桶: {bucket_id}"
+        return _t(f"未找到记忆桶: {bucket_id}", f"Bucket not found: {bucket_id}")
 
     meta = bucket.get("metadata", {})
     if 1 <= importance <= 10 and (meta.get("pinned") or meta.get("protected")):
-        return (
+        return _t(
             f"记忆桶 {bucket_id} 是 pinned/protected 核心桶，importance 被锁定为 10，"
-            "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
+            "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。",
+            f"Bucket {bucket_id} is a pinned/protected core bucket, importance is locked "
+            "at 10, not changed this time. Run trace(bucket_id, pinned=0) first, then "
+            "trace(bucket_id, importance=...) separately.",
         )
 
     # --- v3 Commit D：supersede（旧桶正文不改，处置人工，独立操作不跟其它
@@ -219,16 +234,27 @@ async def trace_core(
     # derived_freshness sidecar 传播）---
     if superseded_by:
         if not supersede_type:
-            return "标记 superseded_by 必须同时传 supersede_type（contradiction/state_transition/plan_completed/plan_abandoned 之一）。"
+            return _t(
+                "标记 superseded_by 必须同时传 supersede_type"
+                "（contradiction/state_transition/plan_completed/plan_abandoned 之一）。",
+                "Marking superseded_by requires supersede_type too (one of "
+                "contradiction/state_transition/plan_completed/plan_abandoned).",
+            )
         result = await rt.bucket_mgr.mark_superseded(
             bucket_id, superseded_by=superseded_by,
             supersede_type=supersede_type, effective_at=supersede_effective_at,
         )
         if not result.get("ok"):
-            return f"标记 superseded_by 失败: {result.get('error', 'unknown_error')}"
-        return (
+            return _t(
+                f"标记 superseded_by 失败: {result.get('error', 'unknown_error')}",
+                f"Marking superseded_by failed: {result.get('error', 'unknown_error')}",
+            )
+        return _t(
             f"已标记记忆桶 {bucket_id} 被 {superseded_by} 取代（{supersede_type}）："
-            f"正文未改，同步标记了 {result.get('marked_stale_count', 0)} 处引用为待核实。"
+            f"正文未改，同步标记了 {result.get('marked_stale_count', 0)} 处引用为待核实。",
+            f"Marked bucket {bucket_id} as superseded by {superseded_by} ({supersede_type}): "
+            f"body unchanged, flagged {result.get('marked_stale_count', 0)} references as "
+            "needing review.",
         )
 
     updates: dict = {}
@@ -276,9 +302,11 @@ async def trace_core(
         if seed == 1 and not bucket.get("metadata", {}).get("seed"):
             current = await rt.bucket_mgr.count_seeds()
             if current >= rt.bucket_mgr.SEED_LIMIT:
-                return (
+                return _t(
                     f"seed 已达上限 {rt.bucket_mgr.SEED_LIMIT}。"
-                    "请先 trace(bucket_id, seed=0) 释放一条再设新的。"
+                    "请先 trace(bucket_id, seed=0) 释放一条再设新的。",
+                    f"seed limit reached ({rt.bucket_mgr.SEED_LIMIT}). "
+                    "Free one up with trace(bucket_id, seed=0) before setting a new one.",
                 )
         updates["seed"] = bool(seed)
     if event_at:
@@ -291,7 +319,10 @@ async def trace_core(
             try:
                 parse_iso_datetime(event_at)
             except (ValueError, TypeError):
-                return f"event_at 不是合法的 ISO 8601 时间：{event_at!r}"
+                return _t(
+                    f"event_at 不是合法的 ISO 8601 时间：{event_at!r}",
+                    f"event_at is not a valid ISO 8601 timestamp: {event_at!r}",
+                )
             updates["event_at"] = event_at
     why_remembered = str(why_remembered).strip()
     if why_remembered == "\\clear":
@@ -315,9 +346,12 @@ async def trace_core(
         if cited:
             recorded = await resolve_citations(cited, source=bucket_id, location="trace")
             if recorded:
-                return f"已记引用: {', '.join(recorded)}"
-            return "没有成功记录任何引用（bucket_id 不存在或记账失败）。"
-        return "没有任何字段需要修改。"
+                return _t(f"已记引用: {', '.join(recorded)}", f"Citations recorded: {', '.join(recorded)}")
+            return _t(
+                "没有成功记录任何引用（bucket_id 不存在或记账失败）。",
+                "No citations were recorded (bucket_id doesn't exist or bookkeeping failed).",
+            )
+        return _t("没有任何字段需要修改。", "No fields to change.")
 
     # --- plan 桶：status / content 改变时追加 change_log ---
     if bucket.get("metadata", {}).get("type") == "plan" and ("status" in updates or "content" in updates):
@@ -335,7 +369,7 @@ async def trace_core(
 
     success = await rt.bucket_mgr.update(bucket_id, **updates)
     if not success:
-        return f"修改失败: {bucket_id}"
+        return _t(f"修改失败: {bucket_id}", f"Update failed: {bucket_id}")
 
     # v3 Commit B：trace.meaning_append 是设计定稿"字段白名单"里的强信号之一
     # （跟 hold 追加、citation_credit 同级）。这里精确判断"这次调用是否真的
@@ -372,26 +406,43 @@ async def trace_core(
         k: v for k, v in updates.items()
         if k not in ("content", "meaning_append", "meaning", "media_append", "media")
     }
+    content_replaced = _t("content=已替换", "content=replaced")
+    meaning_appended = _t("meaning=已追加一条", "meaning=appended one entry")
+    digested_hidden = _t(" → 已隐藏，保留但不再浮现", " → hidden, kept but no longer surfaces")
+    digested_unhidden = _t(" → 已取消隐藏，重新参与浮现", " → unhidden, back in the surfacing pool")
+
     changed = ", ".join(f"{k}={v}" for k, v in _display_updates.items())
     if "content" in updates:
-        changed += (", content=已替换" if changed else "content=已替换")
+        changed += (", " + content_replaced if changed else content_replaced)
     if "meaning_append" in updates:
-        changed += (", " if changed else "") + "meaning=已追加一条"
+        changed += (", " if changed else "") + meaning_appended
     if "meaning" in updates:
-        changed += (", " if changed else "") + f"meaning=整体替换({len(updates['meaning'])}条)"
+        changed += (", " if changed else "") + _t(
+            f"meaning=整体替换({len(updates['meaning'])}条)",
+            f"meaning=replaced entirely ({len(updates['meaning'])} entries)",
+        )
     if "media_append" in updates:
-        changed += (", " if changed else "") + f"media=已追加{len(updates['media_append'])}项"
+        changed += (", " if changed else "") + _t(
+            f"media=已追加{len(updates['media_append'])}项",
+            f"media=appended {len(updates['media_append'])} item(s)",
+        )
     if "media" in updates:
-        changed += (", " if changed else "") + f"media=整体替换({len(updates['media'])}项)"
+        changed += (", " if changed else "") + _t(
+            f"media=整体替换({len(updates['media'])}项)",
+            f"media=replaced entirely ({len(updates['media'])} item(s))",
+        )
     if "resolved" in updates:
+        # resolved_hint() 来自 memory_messages.py（不在本轮命名范围内，
+        # 见任务6清单），固定返回中文，这里不做处理。
         changed += f" → {resolved_hint(bool(updates['resolved']))}"
     if "digested" in updates:
-        if updates["digested"]:
-            changed += " → 已隐藏，保留但不再浮现"
-        else:
-            changed += " → 已取消隐藏，重新参与浮现"
+        changed += digested_hidden if updates["digested"] else digested_unhidden
     if cascaded:
-        changed += f" → 同步把 {len(cascaded)} 个关联事件桶也标为已放下（{', '.join(cascaded)}）"
+        changed += _t(
+            f" → 同步把 {len(cascaded)} 个关联事件桶也标为已放下（{', '.join(cascaded)}）",
+            f" → also marked {len(cascaded)} related event bucket(s) as let go "
+            f"({', '.join(cascaded)})",
+        )
     if cited_recorded:
         changed += (", " if changed else "") + f"cited={','.join(cited_recorded)}"
-    return f"已修改记忆桶 {bucket_id}: {changed}"
+    return _t(f"已修改记忆桶 {bucket_id}: {changed}", f"Updated bucket {bucket_id}: {changed}")
