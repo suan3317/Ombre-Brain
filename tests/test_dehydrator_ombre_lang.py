@@ -359,3 +359,60 @@ def test_parse_analysis_missing_domain_falls_back_by_language(tmp_path, monkeypa
     monkeypatch.delenv("OMBRE_LANG", raising=False)
     assert dehy._parse_analysis(raw)["domain"] == ["未分类"]
     dehy._cache_conn.close()
+
+
+# ============================================================
+# 工单 D-4 三期：二期留下的 _format_output 桶头标签
+# （"记忆桶:"/"[主题:]"/"[情感:V/A]"/"[已消化]"）英文化
+# ============================================================
+
+def test_en_format_output_header_has_no_chinese_characters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator(tmp_path)
+    out = dehy._format_output("plain body text", {
+        "name": "First date", "type": "dynamic", "domain": ["romance"],
+        "digested": True, "model_valence": 0.8,
+    })
+    header = out.splitlines()[0]
+    assert not _CJK_RE.search(header)
+    assert header == "💭 Memory: First date [topic:romance] [emotion:V0.5/A0.3] [my perspective:V0.8] [digested]"
+    dehy._cache_conn.close()
+
+
+def test_en_format_output_unnamed_fallback_has_no_chinese_characters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _dehydrator(tmp_path)
+    out = dehy._format_output("plain body text", {"type": "dynamic"})
+    header = out.splitlines()[0]
+    assert not _CJK_RE.search(header)
+    assert "unnamed" in header
+    dehy._cache_conn.close()
+
+
+def test_zh_default_format_output_header_unaffected(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    dehy = _dehydrator(tmp_path)
+    out = dehy._format_output("正文内容", {"name": "普通事", "type": "dynamic", "domain": ["工作"]})
+    assert out.splitlines()[0].startswith("💭 记忆桶: 普通事")
+    dehy._cache_conn.close()
+
+
+# ============================================================
+# 工单 D-4 三期：self.human 未配置时的默认值（"用户"）同样按 OMBRE_LANG
+# 切换——它会原样嵌进 _perspective_rule_en/_zh，不切换就会在英文视角铁律
+# 里冒出一个中文「用户」。
+# ============================================================
+
+def test_en_default_human_fallback_is_english(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = Dehydrator({"buckets_dir": str(tmp_path / "vault")})
+    assert dehy.human == "the user"
+    assert not _CJK_RE.search(_perspective_rule(dehy.human))
+    dehy._cache_conn.close()
+
+
+def test_zh_default_human_fallback_unaffected(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    dehy = Dehydrator({"buckets_dir": str(tmp_path / "vault")})
+    assert dehy.human == "用户"
+    dehy._cache_conn.close()

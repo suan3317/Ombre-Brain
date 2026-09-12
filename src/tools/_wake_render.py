@@ -26,7 +26,7 @@ catalog_line() 目录行，按 token 预算累加；预算不够时不再继续�
 from datetime import datetime
 
 from tools.breath._verbatim import catalog_line
-from utils import count_tokens_approx
+from utils import count_tokens_approx, t as _t
 
 
 def render_catalog_segment(
@@ -51,7 +51,10 @@ def render_catalog_segment(
         used += cost
     remaining = len(pool) - len(lines)
     if remaining > 0:
-        lines.append(f"...还有 {remaining} 条未展示(预算不足)。{overflow_hint}")
+        lines.append(_t(
+            f"...还有 {remaining} 条未展示(预算不足)。{overflow_hint}",
+            f"...{remaining} more not shown (budget insufficient). {overflow_hint}",
+        ))
     return lines
 
 
@@ -63,7 +66,10 @@ def render_file_zone_summary(entries: list, top_n: int = 10, archive_prefix: str
     完整展开用 file_list(folder=archive_prefix)。
     """
     if not entries:
-        return "文件区是空的。用 file_save 存入第一个文件。"
+        return _t(
+            "文件区是空的。用 file_save 存入第一个文件。",
+            "The file zone is empty. Use file_save to store the first file.",
+        )
 
     archived = [e for e in entries if e[0].startswith(archive_prefix)]
     others = [e for e in entries if not e[0].startswith(archive_prefix)]
@@ -77,11 +83,14 @@ def render_file_zone_summary(entries: list, top_n: int = 10, archive_prefix: str
     def _row(e):
         rel, size, mt = e
         when = datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
-        return f"- {rel}  ({size} 字节, 改于 {when})"
+        return _t(f"- {rel}  ({size} 字节, 改于 {when})", f"- {rel}  ({size} bytes, modified {when})")
 
     rows = [_row(e) for e in (top + extra_handoff)]
     if archived:
-        rows.append(f"{archive_prefix} ({len(archived)} 个历史存档,file_list 可展开)")
+        rows.append(_t(
+            f"{archive_prefix} ({len(archived)} 个历史存档,file_list 可展开)",
+            f"{archive_prefix} ({len(archived)} archived, expand with file_list)",
+        ))
 
     total = len(entries)
     shown_count = len(top) + len(extra_handoff)
@@ -90,12 +99,17 @@ def render_file_zone_summary(entries: list, top_n: int = 10, archive_prefix: str
     # handoff/交接的文件如果就这样不出现，等于无标记删减——必须显式点出数量。
     unlisted = total - shown_count - len(archived)
     if unlisted > 0:
-        rows.append(f"...另有 {unlisted} 个文件未展示(不在最近 {top_n} 个之列)。完整列表用 file_list 查看。")
+        rows.append(_t(
+            f"...另有 {unlisted} 个文件未展示(不在最近 {top_n} 个之列)。完整列表用 file_list 查看。",
+            f"...{unlisted} more files not shown (outside the most recent {top_n}). "
+            "See the full list with file_list.",
+        ))
 
-    header = f"文件区共 {total} 个文件(默认显示最近改动的 {len(top)} 个"
+    header = _t(f"文件区共 {total} 个文件(默认显示最近改动的 {len(top)} 个",
+                f"The file zone has {total} files (showing the {len(top)} most recently changed by default")
     if extra_handoff:
-        header += f" + {len(extra_handoff)} 个交接文件"
+        header += _t(f" + {len(extra_handoff)} 个交接文件", f" + {len(extra_handoff)} handoff files")
     if archived:
-        header += "，历史存档已折叠"
-    header += "；完整列表用 file_list 查看):"
+        header += _t("，历史存档已折叠", ", archived history folded")
+    header += _t("；完整列表用 file_list 查看):", "; see the full list with file_list):")
     return header + "\n" + "\n".join(rows)

@@ -35,7 +35,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from utils import clean_llm_json, count_tokens_approx, ombre_lang, parse_bool, positive_float
+from utils import clean_llm_json, count_tokens_approx, ombre_lang, parse_bool, positive_float, t as _t
 
 try:
     from provider_detect import is_gemini_native_host, strip_native_resource_prefix
@@ -471,7 +471,10 @@ class Dehydrator:
         # --- Human display name / 人类一方的称呼 ---
         # 注入脱水/合并的「视角铁律」：原文里人类那一方统一还原为这个名字，
         # 而不是被压成「双方/对方/用户」。与 config.human 同源（前端可改）。
-        self.human = config.get("human", "用户") or "用户"
+        # 工单 D-4 三期：默认值也按 OMBRE_LANG 切换——不这么做的话，en 下
+        # config.human 未配置时，_perspective_rule_en 里会硬编码嵌进一个
+        # 中文「用户」，跟周围的英文说明半中半英。
+        self.human = config.get("human") or _t("用户", "the user")
 
         # --- API availability / 是否有可用的 API ---
         self.api_available = bool(self.api_key)
@@ -940,7 +943,7 @@ class Dehydrator:
         """
         header = ""
         if metadata and isinstance(metadata, dict):
-            name = metadata.get("name", "未命名")
+            name = metadata.get("name", _t("未命名", "unnamed"))
             domains = ", ".join(metadata.get("domain", []))
             valence, arousal = self._clamp_va(metadata)
             # 图标语义与 pulse 一致：📌 只给钉住/保护的核心桶，其余按类型区分，
@@ -959,19 +962,19 @@ class Dehydrator:
                 _icon = "💌"
             else:
                 _icon = "💭"
-            header = f"{_icon} 记忆桶: {name}"
+            header = f"{_icon} {_t('记忆桶', 'Memory')}: {name}"
             if domains:
-                header += f" [主题:{domains}]"
-            header += f" [情感:V{valence:.1f}/A{arousal:.1f}]"
+                header += f" [{_t('主题', 'topic')}:{domains}]"
+            header += f" [{_t('情感', 'emotion')}:V{valence:.1f}/A{arousal:.1f}]"
             # Show model's perspective if available (valence drift)
             model_v = metadata.get("model_valence")
             if model_v is not None:
                 try:
-                    header += f" [我的视角:V{float(model_v):.1f}]"
+                    header += f" [{_t('我的视角', 'my perspective')}:V{float(model_v):.1f}]"
                 except (ValueError, TypeError):
                     pass
             if metadata.get("digested"):
-                header += " [已消化]"
+                header += " [" + _t("已消化", "digested") + "]"
             header += "\n"
 
         # 脱水结果可能是结构化 JSON（core_facts/emotion_state/todos/keywords/summary）。

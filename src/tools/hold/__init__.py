@@ -23,7 +23,7 @@ core（普通存入 + 自动合并）。
 
 from typing import Optional
 
-from utils import parse_bool
+from utils import parse_bool, t as _t
 
 from .. import _runtime as rt
 from .._common import (
@@ -80,7 +80,10 @@ async def dispatch(
     cited = str(cited).strip()
     test_data = parse_bool(test_data, default=False)
     if test_data and (pinned or feel):
-        return "测试数据不能创建为 pinned 或 feel；请使用普通测试桶。"
+        return _t(
+            "测试数据不能创建为 pinned 或 feel；请使用普通测试桶。",
+            "Test data can't be created as pinned or feel; use a plain test bucket.",
+        )
     try:
         importance = int(importance)
     except (TypeError, ValueError, OverflowError):
@@ -118,7 +121,7 @@ async def dispatch(
     await rt.decay_engine.ensure_started()
 
     if not content or not content.strip():
-        return "内容为空，无法存储。"
+        return _t("内容为空，无法存储。", "Content is empty, nothing to store.")
 
     err = check_content_size(content)
     if err:
@@ -144,7 +147,10 @@ async def dispatch(
                 from errors import push_warning  # type: ignore
             except ImportError:
                 from ..errors import push_warning  # type: ignore
-            push_warning("OB-W002", f"hold 入参 valence={valence} 越界，已忽略，回退到自动打标")
+            push_warning("OB-W002", _t(
+                f"hold 入参 valence={valence} 越界，已忽略，回退到自动打标",
+                f"hold argument valence={valence} out of range, ignored, falling back to auto-tagging",
+            ))
         except Exception:
             pass
         valence = -1
@@ -154,7 +160,10 @@ async def dispatch(
                 from errors import push_warning  # type: ignore
             except ImportError:
                 from ..errors import push_warning  # type: ignore
-            push_warning("OB-W002", f"hold 入参 arousal={arousal} 越界，已忽略，回退到自动打标")
+            push_warning("OB-W002", _t(
+                f"hold 入参 arousal={arousal} 越界，已忽略，回退到自动打标",
+                f"hold argument arousal={arousal} out of range, ignored, falling back to auto-tagging",
+            ))
         except Exception:
             pass
         arousal = -1
@@ -169,7 +178,13 @@ async def dispatch(
 
     if feel:
         if not source_bucket or not source_bucket.strip():
-            return "feel 必须指向一条原始记忆（source_bucket 不能为空）。请先用 breath_search(query=...) 找到那条桶的 bucket_id，再传入 source_bucket=id。"
+            return _t(
+                "feel 必须指向一条原始记忆（source_bucket 不能为空）。请先用 breath_search(query=...) "
+                "找到那条桶的 bucket_id，再传入 source_bucket=id。",
+                "feel must point to an original memory (source_bucket can't be empty). "
+                "Use breath_search(query=...) to find that bucket's bucket_id first, "
+                "then pass it as source_bucket=id.",
+            )
         result = await store_feel(
             content=content,
             extra_tags=extra_tags,

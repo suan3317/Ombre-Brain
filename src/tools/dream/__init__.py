@@ -18,6 +18,7 @@ dispatch() 只负责把这三步串起来。
 from typing import Optional
 
 from .. import _runtime as rt
+from utils import t as _t
 from .candidates import collect_candidates, collect_core_context
 from .hints import build_connection_hint, build_crystal_hint
 from .output import format_dream_output
@@ -30,13 +31,16 @@ async def dispatch(window_hours: Optional[int] = 48) -> str:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
         rt.logger.error(f"Dream failed to list buckets: {e}")
-        return "记忆系统暂时无法访问。"
+        return _t("记忆系统暂时无法访问。", "Memory system temporarily unavailable.")
 
     window_hours = max(1, min(int(window_hours or 48), 24 * 14))
     recent = collect_candidates(all_buckets, window_hours)
     core_context = collect_core_context(all_buckets)
     if not recent and not core_context:
-        return f"过去 {window_hours} 小时内没有需要消化的新记忆。"
+        return _t(
+            f"过去 {window_hours} 小时内没有需要消化的新记忆。",
+            f"No new memories to digest from the past {window_hours} hours.",
+        )
 
     connection_hint = await build_connection_hint(recent)
     crystal_hint = await build_crystal_hint(all_buckets)

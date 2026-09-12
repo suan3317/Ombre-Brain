@@ -25,7 +25,7 @@ tools/dream/hints.py — dream 的连接提示与结晶提示
 """
 
 from .. import _runtime as rt
-from utils import strip_wikilinks
+from utils import strip_wikilinks, t as _t
 
 
 async def build_connection_hint(recent: list) -> str:
@@ -49,9 +49,12 @@ async def build_connection_hint(recent: list) -> str:
                         best_sim = sim
                         best_pair = (id_a, id_b)
         if best_pair and best_sim > 0.5:
-            return (
+            return _t(
                 f"\n💭 [{names[best_pair[0]]}] 和 [{names[best_pair[1]]}] "
-                f"似乎有关联 (相似度:{best_sim:.2f})——不替你下结论，你自己想。\n"
+                f"似乎有关联 (相似度:{best_sim:.2f})——不替你下结论，你自己想。\n",
+                f"\n💭 [{names[best_pair[0]]}] and [{names[best_pair[1]]}] "
+                f"seem connected (similarity:{best_sim:.2f}) — not drawing the conclusion "
+                "for you, think it through yourself.\n",
             )
     except Exception as e:
         rt.logger.warning(f"Dream connection hint failed: {e}")
@@ -81,12 +84,17 @@ async def build_crystal_hint(all_buckets: list) -> str:
                 feel_bucket = next((f for f in feels if f["id"] == fid), None)
                 if feel_bucket and not feel_bucket["metadata"].get("pinned"):
                     content_preview = strip_wikilinks(feel_bucket["content"][:80])
-                    return (
+                    return _t(
                         f"\n🔮 你已经写过 {len(similar_feels)+1} 条相似的 feel "
                         f"（围绕「{content_preview}…」）。"
                         f"如果这已经是确信而不只是感受了，"
                         f"你可以用 hold(content=\"...\", pinned=True) 升级它。"
-                        f"不急，你自己决定。\n"
+                        f"不急，你自己决定。\n",
+                        f"\n🔮 You've written {len(similar_feels)+1} similar feels now "
+                        f"(around \"{content_preview}…\"). "
+                        "If this is conviction now, not just a feeling, "
+                        "you can upgrade it with hold(content=\"...\", pinned=True). "
+                        "No rush, your call.\n",
                     )
     except Exception as e:
         rt.logger.warning(f"Dream crystallization hint failed: {e}")

@@ -52,7 +52,7 @@ from embedding_engine import EmbeddingEngine
 from embedding_outbox import EmbeddingOutbox
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_version, load_config, setup_logging
+from utils import get_version, load_config, setup_logging, t as _t
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -1203,9 +1203,12 @@ async def _wake_impl(window_hours: int) -> str:
     # 1) 自我 —— 我是谁
     try:
         i_text = await _t_i.dispatch(read=True, limit=5)
-        parts.append("## 一、自我(I 最近 5 条)\n" + (i_text or "(还没有自我认知条目)"))
+        parts.append(
+            _t("## 一、自我(I 最近 5 条)\n", "## 1. Self (I, last 5 entries)\n")
+            + (i_text or _t("(还没有自我认知条目)", "(no self-knowledge entries yet)"))
+        )
     except Exception as e:
-        parts.append(f"## 一、自我\n(读取失败: {e})")
+        parts.append(_t(f"## 一、自我\n(读取失败: {e})", f"## 1. Self\n(read failed: {e})"))
 
     # 2) 核心记忆 —— 压舱石,只取高重要度。阶段3:改为目录格式,每条一行
     # [bucket_id] 标题 · meaning(无 meaning 则正文首行,截50字);需要全文时
@@ -1219,11 +1222,20 @@ async def _wake_impl(window_hours: int) -> str:
         core_ids = {b["id"] for b in core_buckets}
         core_lines = _wk_render_catalog(
             core_buckets, _WAKE_CORE_BUDGET_TOKENS,
-            overflow_hint="完整列表用 breath_advanced(importance_min=8) 查看。",
+            overflow_hint=_t(
+                "完整列表用 breath_advanced(importance_min=8) 查看。",
+                "See the full list with breath_advanced(importance_min=8).",
+            ),
         )
         if seed_overlap_core:
-            core_lines.append(f"（另有 {seed_overlap_core} 桶已作为 seed 列入下方「继承区」，不重复。）")
-        core_text = "\n".join(core_lines) if core_lines else "(暂无高重要度记忆)"
+            core_lines.append(_t(
+                f"（另有 {seed_overlap_core} 桶已作为 seed 列入下方「继承区」，不重复。）",
+                f"({seed_overlap_core} more already listed as seeds in the Inheritance Zone "
+                "below, not repeated.)",
+            ))
+        core_text = "\n".join(core_lines) if core_lines else _t(
+            "(暂无高重要度记忆)", "(no high-importance memories yet)",
+        )
         # 梦投递段(红线1:一个字不改,原格式原样保留,只挪调用位置——过去经
         # _t_breath.dispatch() 顺路带出,现在核心记忆段改走数据直拼,自己补上
         # 同一次 latest_unread_tail() 调用,拼接方式与 tools/breath/__init__.py
@@ -1241,11 +1253,16 @@ async def _wake_impl(window_hours: int) -> str:
             except Exception as e:
                 logger.warning(f"wake: 梦投递段拼接失败(不影响正文): {e}")
         parts.append(
-            f"## 二、核心记忆(importance>={_WAKE_CORE_IMPORTANCE_MIN},至多 {_WAKE_CORE_LIMIT} 条,目录)\n"
-            "需要全文时用 breath_search(query=...) 拉取。\n" + core_text
+            _t(
+                f"## 二、核心记忆(importance>={_WAKE_CORE_IMPORTANCE_MIN},至多 {_WAKE_CORE_LIMIT} 条,目录)\n"
+                "需要全文时用 breath_search(query=...) 拉取。\n",
+                f"## 2. Core Memory (importance>={_WAKE_CORE_IMPORTANCE_MIN}, up to "
+                f"{_WAKE_CORE_LIMIT} entries, catalog)\n"
+                "Use breath_search(query=...) for the full text.\n",
+            ) + core_text
         )
     except Exception as e:
-        parts.append(f"## 二、核心记忆\n(读取失败: {e})")
+        parts.append(_t(f"## 二、核心记忆\n(读取失败: {e})", f"## 2. Core Memory\n(read failed: {e})"))
 
     # 3) 留言板 —— 上个窗口留下的话
     try:
@@ -1254,8 +1271,10 @@ async def _wake_impl(window_hours: int) -> str:
             with open(bpath, "r", encoding="utf-8", errors="replace") as f:
                 btext = f.read()
             tail = btext[-_WAKE_BOARD_TAIL:]
-            omitted = "(前文省略…)\n" if len(btext) > _WAKE_BOARD_TAIL else ""
-            board_text = "## 三、留言板(files/留言板.md 末尾)\n" + omitted + tail.strip()
+            omitted = _t("(前文省略…)\n", "(earlier text omitted…)\n") if len(btext) > _WAKE_BOARD_TAIL else ""
+            board_text = _t(
+                "## 三、留言板(files/留言板.md 末尾)\n", "## 3. Message Board (end of files/留言板.md)\n",
+            ) + omitted + tail.strip()
             # v3 Commit D：三入口之一——留言板是 wake 里唯一另一处逐字嵌入
             # 文件正文的地方（跟"自我"段一样），同样查 derived_freshness。
             try:
@@ -1266,9 +1285,14 @@ async def _wake_impl(window_hours: int) -> str:
                 board_text += "\n\n" + _staleness_warning(stale_entries)
             parts.append(board_text)
         else:
-            parts.append("## 三、留言板\n(还没有留言。睡前记得给下个窗口的自己留一条: file_save(\"留言板.md\", 内容, append=True))")
+            parts.append(_t(
+                "## 三、留言板\n(还没有留言。睡前记得给下个窗口的自己留一条: "
+                "file_save(\"留言板.md\", 内容, append=True))",
+                "## 3. Message Board\n(No messages yet. Before sleep, remember to leave one "
+                "for the next window's self: file_save(\"留言板.md\", content, append=True))",
+            ))
     except Exception as e:
-        parts.append(f"## 三、留言板\n(读取失败: {e})")
+        parts.append(_t(f"## 三、留言板\n(读取失败: {e})", f"## 3. Message Board\n(read failed: {e})"))
 
     # 4) 最近连续性 —— 刚才在发生什么。阶段3:同样目录化,每桶一行;与核心
     # 记忆段重叠的桶不重复列(已经在二里有目录行了)。dream() 里那段"用第一
@@ -1281,31 +1305,53 @@ async def _wake_impl(window_hours: int) -> str:
         seed_overlap_cont = len({b["id"] for b in candidates} & seed_ids)
         continuity_lines = _wk_render_catalog(
             candidates, _WAKE_CONTINUITY_BUDGET_TOKENS,
-            overflow_hint=f"完整内容用 dream(window_hours={window_hours}) 查看。",
+            overflow_hint=_t(
+                f"完整内容用 dream(window_hours={window_hours}) 查看。",
+                f"See the full content with dream(window_hours={window_hours}).",
+            ),
             exclude_ids=core_ids | seed_ids,
         )
         if overlap:
             # 死配额规则:被跳过不能是"消失",数量必须显式留痕——这些桶不是没有
             # 展示,是已经在上面"核心记忆"段整条列过了,这里不重复列。
-            continuity_lines.append(f"（另有 {overlap} 桶已在上方核心记忆段列出，不重复。）")
+            continuity_lines.append(_t(
+                f"（另有 {overlap} 桶已在上方核心记忆段列出，不重复。）",
+                f"({overlap} more already listed in the Core Memory section above, not repeated.)",
+            ))
         if seed_overlap_cont:
-            continuity_lines.append(f"（另有 {seed_overlap_cont} 桶已作为 seed 列入下方「继承区」，不重复。）")
-        continuity_text = "\n".join(continuity_lines) if continuity_lines else "(窗口内没有变动)"
+            continuity_lines.append(_t(
+                f"（另有 {seed_overlap_cont} 桶已作为 seed 列入下方「继承区」，不重复。）",
+                f"({seed_overlap_cont} more already listed as seeds in the Inheritance Zone "
+                "below, not repeated.)",
+            ))
+        continuity_text = "\n".join(continuity_lines) if continuity_lines else _t(
+            "(窗口内没有变动)", "(no changes in this window)",
+        )
         parts.append(
-            f"## 四、最近 {window_hours} 小时的连续性(目录,共 {len(candidates)} 桶)\n"
-            f"需要全文时用 dream(window_hours={window_hours}) 查看。\n" + continuity_text
+            _t(
+                f"## 四、最近 {window_hours} 小时的连续性(目录,共 {len(candidates)} 桶)\n"
+                f"需要全文时用 dream(window_hours={window_hours}) 查看。\n",
+                f"## 4. Recent Continuity — last {window_hours} hours (catalog, "
+                f"{len(candidates)} buckets)\n"
+                f"Use dream(window_hours={window_hours}) for the full content.\n",
+            ) + continuity_text
         )
     except Exception as e:
-        parts.append(f"## 四、最近连续性\n(读取失败: {e})")
+        parts.append(_t(f"## 四、最近连续性\n(读取失败: {e})", f"## 4. Recent Continuity\n(read failed: {e})"))
 
     # 5) 文件区目录 —— 手边有什么,按需 file_read。阶段3:默认只列最近修改
     # 的 10 个 + handoff/交接文件;历史存档目录折叠成一行摘要。
     try:
         fz_root_path = _fz_root()
         entries = _fz_list_entries(fz_root_path, fz_root_path)
-        parts.append("## 五、文件区目录\n" + _wk_render_files(entries, top_n=_WAKE_FILE_ZONE_TOP_N))
+        parts.append(
+            _t("## 五、文件区目录\n", "## 5. File Zone Directory\n")
+            + _wk_render_files(entries, top_n=_WAKE_FILE_ZONE_TOP_N)
+        )
     except Exception as e:
-        parts.append(f"## 五、文件区目录\n(读取失败: {e})")
+        parts.append(_t(
+            f"## 五、文件区目录\n(读取失败: {e})", f"## 5. File Zone Directory\n(read failed: {e})",
+        ))
 
     # 6) 继承区(v3 Commit A)—— seed:true 的桶,不受 importance 阈值限制。
     # 给下一个空白实例的入场券,跟上面"当前实例工作记忆"的浮现段是两回事
@@ -1313,20 +1359,37 @@ async def _wake_impl(window_hours: int) -> str:
     try:
         seed_lines = _wk_render_catalog(
             seed_buckets, _WAKE_SEED_BUDGET_TOKENS,
-            overflow_hint="完整清单请 file_read 抄引账本或直接核对 seed 桶列表。",
+            overflow_hint=_t(
+                "完整清单请 file_read 抄引账本或直接核对 seed 桶列表。",
+                "For the full list, file_read the citation ledger or check the seed bucket "
+                "list directly.",
+            ),
         )
-        seed_text = "\n".join(seed_lines) if seed_lines else "(还没有 seed 桶——户主逐条圈定后会出现在这里)"
+        seed_text = "\n".join(seed_lines) if seed_lines else _t(
+            "(还没有 seed 桶——户主逐条圈定后会出现在这里)",
+            "(no seed buckets yet — they'll appear here once the owner marks some)",
+        )
         parts.append(
-            f"## 六、继承区(seed,共 {len(seed_buckets)} 条,不占浮现配额)\n"
-            "修改用 trace(bucket_id, seed=0/1)。\n" + seed_text
+            _t(
+                f"## 六、继承区(seed,共 {len(seed_buckets)} 条,不占浮现配额)\n"
+                "修改用 trace(bucket_id, seed=0/1)。\n",
+                f"## 6. Inheritance Zone (seed, {len(seed_buckets)} entries, doesn't count "
+                "toward the surfacing quota)\n"
+                "Change with trace(bucket_id, seed=0/1).\n",
+            ) + seed_text
         )
     except Exception as e:
-        parts.append(f"## 六、继承区\n(读取失败: {e})")
+        parts.append(_t(f"## 六、继承区\n(读取失败: {e})", f"## 6. Inheritance Zone\n(read failed: {e})"))
 
-    header = (
+    header = _t(
         "# 醒来简报\n"
         "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪 → 继承给下一个我的种子。\n"
-        "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n"
+        "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n",
+        "# Waking Briefing\n"
+        "Order: who I am → what matters most → message board → what just happened → "
+        "where things are → seeds inherited for the next me.\n"
+        "Chase details as needed: breath(query=...) to search, file_read for files, "
+        "dream for the full recent picture.\n",
     )
     result = header + "\n\n" + "\n\n".join(parts)
 

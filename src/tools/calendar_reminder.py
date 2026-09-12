@@ -40,10 +40,12 @@ from zoneinfo import ZoneInfo
 
 from . import _runtime as rt
 from .pinboard import calendar_upcoming_impl
+from utils import ombre_lang, t as _t
 
 _DEFAULT_TIMEZONE = "America/Los_Angeles"
 _TIERS = (7, 3, 1, 0)
-_TIER_LABELS = {7: "7天后", 3: "3天后", 1: "明天", 0: "今天"}
+_TIER_LABELS_ZH = {7: "7天后", 3: "3天后", 1: "明天", 0: "今天"}
+_TIER_LABELS_EN = {7: "in 7 days", 3: "in 3 days", 1: "tomorrow", 0: "today"}
 _SENT_RECORD_DIRNAME = "calendar_reminders"
 _SENT_RECORD_FILENAME = "sent.json"
 _STALE_AFTER_DAYS = 30
@@ -160,11 +162,14 @@ async def calendar_reminder_tail() -> str:
         return ""
 
     to_render.sort(key=lambda pair: (-pair[0], pair[1]["date"]))
-    lines = ["## 日历提醒"]
+    lang_en = ombre_lang() == "en"
+    tier_labels = _TIER_LABELS_EN if lang_en else _TIER_LABELS_ZH
+    lines = [_t("## 日历提醒", "## Calendar Reminders")]
     for days_until, event in to_render:
-        title = event.get("title", "(无标题)")
+        title = event.get("title", _t("(无标题)", "(untitled)"))
         category = event.get("category", "")
-        lines.append(f"- [{_TIER_LABELS[days_until]}] {event['date']} {title}（{category}）")
+        cat_suffix = f" ({category})" if lang_en else f"（{category}）"
+        lines.append(f"- [{tier_labels[days_until]}] {event['date']} {title}{cat_suffix}")
     tail = "\n".join(lines)
 
     for key, event_date_str in newly_sent_keys:

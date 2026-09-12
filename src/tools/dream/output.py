@@ -24,7 +24,7 @@ tools/dream/output.py — dream 最终输出格式化
 """
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from utils import strip_wikilinks, count_tokens_approx, t as _t
 
 
 def format_dream_output(
@@ -45,14 +45,21 @@ def format_dream_output(
             if not isinstance(m, dict) or not m.get("path"):
                 continue
             title = m.get("title")
-            label = f"（{title}）" if title and title != m.get("path") else ""
+            if title and title != m.get("path"):
+                label = _t(f"（{title}）", f" ({title})")
+            else:
+                label = ""
             lines.append(f"🖼️ media: {m['path']}{label}")
         return ("\n" + "\n".join(lines)) if lines else ""
 
+    unclassified = _t("未分类", "unclassified")
     parts = []
     for b in recent:
         meta = b["metadata"]
-        resolved_tag = " [已解决]" if meta.get("resolved", False) else " [未解决]"
+        resolved_tag = _t(
+            " [已解决]" if meta.get("resolved", False) else " [未解决]",
+            " [resolved]" if meta.get("resolved", False) else " [unresolved]",
+        )
         domains = ",".join(meta.get("domain", []))
         val = float(meta.get("valence") or 0.5)
         aro = float(meta.get("arousal") or 0.3)
@@ -60,14 +67,16 @@ def format_dream_output(
         last_active = meta.get("last_active", "")
         parts.append(
             f"[{meta.get('name', b['id'])}]{resolved_tag} "
-            f"主题:{domains} V{val:.1f}/A{aro:.1f} "
-            f"创建:{created} 最近活跃:{last_active}\n"
+            + _t(f"主题:{domains}", f"topic:{domains}")
+            + f" V{val:.1f}/A{aro:.1f} "
+            + _t(f"创建:{created} 最近活跃:{last_active}", f"created:{created} last active:{last_active}")
+            + "\n"
             f"ID: {b['id']}"
             f"{_miss_lines(meta)}\n"
             f"{strip_wikilinks(b['content'])}"
         )
 
-    header = (
+    header = _t(
         f"=== Dreaming · 过去 {window_hours} 小时全量记忆（{len(recent)} 个桶）===\n"
         "以下是你最近的记忆。用第一人称想：\n"
         "- 这些东西里有什么在你这里留下了重量？\n"
@@ -76,7 +85,17 @@ def format_dream_output(
         "想完之后：值得放下的用 trace(bucket_id, resolved=1)；\n"
         "有沉淀的用 hold(content=\"...\", feel=True, source_bucket=\"bucket_id\", valence=你的感受) 写下来。\n"
         "valence 是你对这段记忆的感受，不是事件本身的情绪。\n"
-        "没有沉淀就不写，不强迫产出。\n"
+        "没有沉淀就不写，不强迫产出。\n",
+        f"=== Dreaming · Full memory from the past {window_hours} hours ({len(recent)} buckets) ===\n"
+        "Below are your recent memories. Think in first person:\n"
+        "- What in here left weight with you?\n"
+        "- What haven't you worked out yet?\n"
+        "- What can you let go of?\n"
+        "After thinking: things worth letting go of use trace(bucket_id, resolved=1);\n"
+        "things that settled into something use hold(content=\"...\", feel=True, "
+        "source_bucket=\"bucket_id\", valence=your feeling) to write it down.\n"
+        "valence is your feeling about this memory, not the event's own emotion.\n"
+        "If nothing settled, don't write anything — don't force output.\n",
     )
 
     final_text = header + "\n---\n".join(parts)
@@ -89,15 +108,20 @@ def format_dream_output(
             domains = ",".join(meta.get("domain", []))
             core_lines.append(
                 f"📌 [{b['id']}] {meta.get('name', b['id'])} "
-                f"主题:{domains or '未分类'} 重要:{meta.get('importance', '?')}"
-                f"{_miss_lines(meta)}\n"
+                + _t(
+                    f"主题:{domains or '未分类'} 重要:{meta.get('importance', '?')}",
+                    f"topic:{domains or unclassified} importance:{meta.get('importance', '?')}",
+                )
+                + f"{_miss_lines(meta)}\n"
                 f"{strip_wikilinks(b['content']).strip()}"
             )
-        final_text += (
+        final_text += _t(
             "\n\n=== 核心准则参考 ===\n"
-            "这些是 pinned/permanent 桶，只作为梦里的边界与背景，不当作普通待消化事项。\n\n"
-            + "\n---\n".join(core_lines)
-        )
+            "这些是 pinned/permanent 桶，只作为梦里的边界与背景，不当作普通待消化事项。\n\n",
+            "\n\n=== Core Principles for Reference ===\n"
+            "These are pinned/permanent buckets — only boundary and background for the dream, "
+            "not ordinary items to digest.\n\n",
+        ) + "\n---\n".join(core_lines)
 
     final_text += connection_hint + crystal_hint
 
@@ -116,12 +140,16 @@ def format_dream_output(
                 pcreated = pmeta.get("created", "")[:10]
                 pcontent = strip_wikilinks(p["content"]).strip()
                 plan_lines.append(f"[{p['id']}] {pcreated} {pcontent}")
-            final_text += (
+            final_text += _t(
                 "\n\n=== 你的 active plans ===\n"
                 "这些是你当前未完成的计划/承诺。完成了用 trace(bucket_id, status=\"resolved\")，\n"
-                "放弃了用 trace(bucket_id, status=\"abandoned\")，需要修改用 trace(bucket_id, content=\"...\")。\n\n"
-                + "\n".join(plan_lines)
-            )
+                "放弃了用 trace(bucket_id, status=\"abandoned\")，需要修改用 trace(bucket_id, content=\"...\")。\n\n",
+                "\n\n=== Your Active Plans ===\n"
+                "These are your current unfinished plans/commitments. Done: trace(bucket_id, "
+                "status=\"resolved\"),\n"
+                "gave up: trace(bucket_id, status=\"abandoned\"), need to change it: "
+                "trace(bucket_id, content=\"...\").\n\n",
+            ) + "\n".join(plan_lines)
     except Exception as e:
         rt.logger.warning(f"Dream active plans block failed: {e}")
 
@@ -148,18 +176,24 @@ def format_dream_output(
                 else:
                     snippet = fcontent_full.replace("\n", " ")[:40]
                     collapsed_lines.append(f"[{f['id']}] V{fv:.1f} {fcreated} {snippet}…")
-            feel_block = (
+            feel_block = _t(
                 "\n\n=== 你的 feel 历史（全量，旧 feel 按 token 预算折叠）===\n"
                 "这里返回了你过去写下的所有 feel。越新的越完整；老 feel 只留一行跳跳点，防止 token 爆炸。\n"
                 "需要看某个老 feel 全文用 breath_advanced(query=..., domain=\"feel\") 或 trace 访问。\n"
-                "需要编辑用 trace(bucket_id, content=\"...\")；合并重复项可在仪表盘手动操作。\n\n"
-                + "\n".join(full_lines)
-            )
+                "需要编辑用 trace(bucket_id, content=\"...\")；合并重复项可在仪表盘手动操作。\n\n",
+                "\n\n=== Your Feel History (full, old feels folded by token budget) ===\n"
+                "This returns every feel you've ever written. Newer ones are more complete; "
+                "old feels are left as a one-line breadcrumb to avoid a token blowout.\n"
+                "To see an old feel's full text, use breath_advanced(query=..., domain=\"feel\") "
+                "or trace.\n"
+                "To edit, use trace(bucket_id, content=\"...\"); merge duplicates manually on "
+                "the dashboard.\n\n",
+            ) + "\n".join(full_lines)
             if collapsed_lines:
-                feel_block += (
-                    f"\n\n--- 老 feel 摘要（{len(collapsed_lines)} 条，已折叠）---\n"
-                    + "\n".join(collapsed_lines)
-                )
+                feel_block += _t(
+                    f"\n\n--- 老 feel 摘要（{len(collapsed_lines)} 条，已折叠）---\n",
+                    f"\n\n--- Old Feel Summary ({len(collapsed_lines)} entries, folded) ---\n",
+                ) + "\n".join(collapsed_lines)
             final_text += feel_block
     except Exception as e:
         rt.logger.warning(f"Dream feel history failed: {e}")

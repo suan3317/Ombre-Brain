@@ -655,6 +655,21 @@ def ombre_lang() -> str:
     return "en" if (os.environ.get("OMBRE_LANG") or "").strip().lower() == "en" else "zh"
 
 
+def t(zh: str, en: str) -> str:
+    """一行双语文案选择器 / one-line bilingual text picker.
+
+    工单 D-4 三期：tools/breath、tools/hold、tools/dream、_wake_seed/
+    _wake_render、calendar_reminder 里大量面向模型的提示句/标题/错误消息
+    需要按 ombre_lang() 二选一，一个个写 if/else 太啰嗦。调用方两个参数都是
+    普通字符串（f-string 在传参时就已求值完毕，两边都会被求值一次，代价可
+    忽略），按语言开关返回其中一个，不做任何插值/格式化。
+    Both args are already-formatted strings (f-strings evaluate before the
+    call); returns `en` when `ombre_lang() == "en"`, else `zh`. No formatting
+    is done here.
+    """
+    return en if ombre_lang() == "en" else zh
+
+
 def get_owner_name() -> str:
     """当前实例记忆归属者的显示名 / display name of this instance's memory owner.
 

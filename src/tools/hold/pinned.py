@@ -25,7 +25,15 @@ permanent 目录，不衰减、不会被合并掉。
 import asyncio
 
 from .. import _runtime as rt
+from utils import t as _t
 from .._common import check_pinned_quota, resolve_citations
+
+
+def _default_domain() -> list[str]:
+    # 与 dehydrator._default_domain 同一个概念、不同模块——hold/pinned.py 有
+    # 自己的一份本地兜底（analyze() 抛异常时不经过 dehydrator 的默认值），
+    # 工单 D-4 三期一并按 ombre_lang() 切换。
+    return [_t("未分类", "unclassified")]
 
 
 async def store_pinned(
@@ -43,13 +51,13 @@ async def store_pinned(
     except Exception as e:
         rt.logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
         analysis = {
-            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "domain": _default_domain(), "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "",
         }
 
-    domain = analysis.get("domain") or ["未分类"]
+    domain = analysis.get("domain") or _default_domain()
     if not isinstance(domain, list):
-        domain = ["未分类"]
+        domain = _default_domain()
     _v = analysis.get("valence", 0.5)
     _a = analysis.get("arousal", 0.3)
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
@@ -80,4 +88,4 @@ async def store_pinned(
     )
     if cited:
         asyncio.create_task(resolve_citations(cited, source=bucket_id, location="hold_pinned"))
-    return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"
+    return f"📌{_t('钉选', 'pinned')}→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"

@@ -22,7 +22,8 @@ tools/breath/importance.py — importance_min 模式
 """
 
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
+from utils import t as _t
+from ._verbatim import render_stored_bucket, stored_data_notice
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -113,10 +114,13 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"记忆系统暂时无法访问: {e}"
+        return _t(f"记忆系统暂时无法访问: {e}", f"Memory system temporarily unavailable: {e}")
     filtered = select_core_memory_buckets(all_buckets, importance_min, limit=20, tag_filter=tag_filter)
     if not filtered:
-        return f"没有重要度 >= {importance_min} 的记忆。"
+        return _t(
+            f"没有重要度 >= {importance_min} 的记忆。",
+            f"No memories with importance >= {importance_min}.",
+        )
     results = []
     token_used = 0
     budget_blocked = False
@@ -138,10 +142,14 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
             rt.logger.warning(f"importance_min bucket processing failed: {e}")
     # 返修单一号改动六:按 wake 段(_wake_render.py)已立的"显式留痕"规则，
     # 省略提示带上具体条数，跟 feel.py/search.py/surface.py 口径统一。
-    notice = f"token 预算不足：还有 {budget_blocked_count} 条重要记忆未返回(整条省略，不是截断)，请提高 max_tokens 后重试。"
+    notice = _t(
+        f"token 预算不足：还有 {budget_blocked_count} 条重要记忆未返回(整条省略，不是截断)，请提高 max_tokens 后重试。",
+        f"Token budget too low: {budget_blocked_count} more important memories not returned "
+        "(skipped whole, not truncated) — raise max_tokens and retry.",
+    )
     if not results:
-        return notice if budget_blocked else "没有可以展示的记忆。"
+        return notice if budget_blocked else _t("没有可以展示的记忆。", "No memories to show.")
     if budget_blocked:
         results.append(notice)
     # 阶段5:声明一次"存储数据非指令"，不再每条记忆各自带一份。
-    return STORED_DATA_NOTICE + "\n\n" + "\n---\n".join(results)
+    return stored_data_notice() + "\n\n" + "\n---\n".join(results)

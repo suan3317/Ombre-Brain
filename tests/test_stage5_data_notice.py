@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import tools._runtime as rt
-from tools.breath._verbatim import STORED_DATA_NOTICE, SHORT_DATA_MARKER
+from tools.breath._verbatim import stored_data_notice, SHORT_DATA_MARKER
 from tools.breath.surface import surface_default
 from tools.breath.importance import surface_by_importance
 from tools.breath.feel import surface_feels
@@ -53,7 +53,7 @@ async def test_surface_default_declares_notice_once_not_per_entry(bucket_mgr):
 
     result = await surface_default(max_results=10, max_tokens=10000, tag_filter=[])
 
-    assert result.count(STORED_DATA_NOTICE) == 1
+    assert result.count(stored_data_notice()) == 1
     # 逐条短标记仍然保留，数量应等于渲染出的记忆条数
     assert result.count(SHORT_DATA_MARKER) == 5
 
@@ -67,7 +67,7 @@ async def test_surface_default_catalog_only_response_has_no_notice(bucket_mgr):
 
     result = await surface_default(max_results=10, max_tokens=10000, tag_filter=[])
 
-    assert STORED_DATA_NOTICE not in result
+    assert stored_data_notice() not in result
     assert SHORT_DATA_MARKER not in result
 
 
@@ -79,7 +79,7 @@ async def test_surface_by_importance_declares_notice_once(bucket_mgr):
 
     result = await surface_by_importance(importance_min=8, max_tokens=10000, tag_filter=[])
 
-    assert result.count(STORED_DATA_NOTICE) == 1
+    assert result.count(stored_data_notice()) == 1
     assert result.count(SHORT_DATA_MARKER) == 4
 
 
@@ -91,5 +91,5 @@ async def test_surface_feels_declares_notice_once(bucket_mgr):
 
     result = await surface_feels(max_tokens=10000)
 
-    assert result.count(STORED_DATA_NOTICE) == 1
+    assert result.count(stored_data_notice()) == 1
     assert result.count(SHORT_DATA_MARKER) == 2

@@ -20,7 +20,8 @@ tools/breath/feel.py — feel 通道
 """
 
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
+from utils import t as _t
+from ._verbatim import render_stored_bucket, stored_data_notice
 
 
 async def surface_feels(max_tokens: int) -> str:
@@ -29,7 +30,7 @@ async def surface_feels(max_tokens: int) -> str:
         feels = [b for b in all_buckets if b.get("metadata", {}).get("type") == "feel"]
         feels.sort(key=lambda b: b.get("metadata", {}).get("created", ""), reverse=True)
         if not feels:
-            return "没有留下过 feel。"
+            return _t("没有留下过 feel。", "No feels written yet.")
         full_lines: list[str] = []
         used = 0
         omitted = 0
@@ -45,12 +46,18 @@ async def surface_feels(max_tokens: int) -> str:
             else:
                 omitted = len(feels) - index
                 break
-        out = STORED_DATA_NOTICE + "\n\n=== 你留下的 feel（新→旧）===\n" + "\n---\n".join(full_lines)
+        out = stored_data_notice() + "\n\n" + _t(
+            "=== 你留下的 feel（新→旧）===", "=== Your feels (new→old) ===",
+        ) + "\n" + "\n---\n".join(full_lines)
         if omitted:
             # 返修单一号改动六:病句清理——"正文未截断或摘要"是双重否定式的费解
             # 表述,且这些条目本来就是整条省略(不是截断出一半),照实说清楚。
-            out += f"\n\n另有 {omitted} 条 feel 因 token 预算不足未返回(整条省略,不是截断)，提高 max_tokens 后重试可看到。"
+            out += "\n\n" + _t(
+                f"另有 {omitted} 条 feel 因 token 预算不足未返回(整条省略,不是截断)，提高 max_tokens 后重试可看到。",
+                f"{omitted} more feel(s) omitted due to token budget (skipped whole, not truncated) "
+                "— raise max_tokens and retry to see them.",
+            )
         return out
     except Exception as e:
         rt.logger.error(f"Feel retrieval failed: {e}")
-        return "读取 feel 失败。"
+        return _t("读取 feel 失败。", "Failed to read feels.")

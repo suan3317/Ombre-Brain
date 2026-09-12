@@ -30,7 +30,8 @@ import random
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
-from ._verbatim import render_stored_bucket, STORED_DATA_NOTICE
+from utils import t as _t
+from ._verbatim import render_stored_bucket, stored_data_notice
 from decay_engine import band_of
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
@@ -54,7 +55,16 @@ def _enforce_band_order(matches: list) -> list:
         reverse=True,
     )
 
-_SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
+def _semantic_disabled_note() -> str:
+    # 工单 D-4 三期：不能写成模块级常量——那样 _t() 只在模块 import 时算一次，
+    # 生产环境 OMBRE_LANG 在进程启动前就定了没问题，但测试里 monkeypatch 动态
+    # 切换 env 时常量早就冻在旧值上了，见 utils.t() 的用法说明。
+    return _t(
+        "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]",
+        "[Search degraded: semantic index unavailable, using keyword/BM25 only this time.]",
+    )
+
+
 # 返修单一号改动六:病句清理——"未被截断或摘要"是双重否定式的费解表述，
 # 且这条记忆本来就是整条省略(不是截断出一半)，照实说清楚；同时按 wake
 # 段(_wake_render.py)已立的"显式留痕"规则补上省略条数，不再是模糊的
@@ -63,11 +73,17 @@ def _budget_notice(remaining: int) -> str:
     # remaining<=0：命中列表本身已经全部渲染完，是随机"忽然想起来"分支
     # 另外撞了预算(边界情况，说不清切确条数)，不硬凑数字，给通用措辞。
     if remaining > 0:
-        return (
+        return _t(
             f"[token 预算不足：还有 {remaining} 条命中的记忆未返回"
-            f"(整条省略，不是截断)，请提高 max_tokens 后重试。]"
+            f"(整条省略，不是截断)，请提高 max_tokens 后重试。]",
+            f"[Token budget too low: {remaining} more matched memories not returned "
+            "(skipped whole, not truncated) — raise max_tokens and retry.]",
         )
-    return "[token 预算不足：部分内容未返回(整条省略，不是截断)，请提高 max_tokens 后重试。]"
+    return _t(
+        "[token 预算不足：部分内容未返回(整条省略，不是截断)，请提高 max_tokens 后重试。]",
+        "[Token budget too low: some content not returned (skipped whole, not truncated) "
+        "— raise max_tokens and retry.]",
+    )
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -95,7 +111,7 @@ async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], st
     engine = rt.embedding_engine
     if not engine or not getattr(engine, "enabled", False):
         rt.logger.warning("breath semantic search unavailable; using keyword/BM25 only")
-        return {}, _SEMANTIC_DISABLED_NOTE
+        return {}, _semantic_disabled_note()
 
     try:
         strict_search = getattr(engine, "search_similar_strict", None)
@@ -109,7 +125,7 @@ async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], st
             f"breath semantic search failed; using keyword/BM25 only: "
             f"{type(exc).__name__}: {exc}"
         )
-        return {}, _SEMANTIC_DISABLED_NOTE
+        return {}, _semantic_disabled_note()
 
 
 async def surface_search(
@@ -162,7 +178,7 @@ async def surface_search(
                     "breath",
                     {"mode": "exact_id", "matches": 1, "chars": len(rendered)},
                 )
-            return STORED_DATA_NOTICE + "\n\n" + rendered
+            return stored_data_notice() + "\n\n" + rendered
 
     vector_scores, semantic_notice = await _semantic_scores(
         query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
@@ -179,7 +195,7 @@ async def surface_search(
         )
     except Exception as e:
         rt.logger.error(f"Search failed / 检索失败: {e}")
-        return "检索过程出错，请稍后重试。"
+        return _t("检索过程出错，请稍后重试。", "Search failed — please try again shortly.")
 
     matches = [
         b for b in matches
@@ -205,9 +221,9 @@ async def surface_search(
         bucket_id = bucket["id"]
         is_core = meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent"
         if is_core:
-            header = f"📌 [核心准则] [bucket_id:{bucket_id}]"
+            header = f"📌 [{_t('核心准则', 'core principle')}] [bucket_id:{bucket_id}]"
         elif bucket.get("vector_match"):
-            header = f"[语义关联] [bucket_id:{bucket_id}]"
+            header = f"[{_t('语义关联', 'semantic match')}] [bucket_id:{bucket_id}]"
         else:
             header = f"[bucket_id:{bucket_id}]"
         rendered, entry_tokens = render_stored_bucket(bucket, header)
@@ -261,7 +277,9 @@ async def surface_search(
                     drift_results.append(rendered)
                     token_used += entry_tokens
                 if drift_results:
-                    results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
+                    results.append(
+                        _t("--- 忽然想起来 ---", "--- Sudden recall ---") + "\n" + "\n---\n".join(drift_results)
+                    )
         except Exception as e:
             rt.logger.warning(f"Random surfacing failed / 随机浮现失败: {e}")
 
@@ -271,14 +289,17 @@ async def surface_search(
             return f"{semantic_notice}\n{notice}" if semantic_notice else notice
         if rt.fire_webhook:
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
-        empty_text = (
+        empty_text = _t(
             f"没有匹配到「{query}」相关的记忆。\n"
-            "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。"
+            "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。",
+            f"No memories matched \"{query}\".\n"
+            "Try a different keyword, or use breath() to see the current weighted pool; "
+            "feel uses breath_advanced(domain=\"feel\"), letters use letter_read.",
         )
         return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
 
     final_text = "\n---\n".join(results)
-    notices = [STORED_DATA_NOTICE]
+    notices = [stored_data_notice()]
     if semantic_notice:
         notices.append(semantic_notice)
     if budget_blocked:

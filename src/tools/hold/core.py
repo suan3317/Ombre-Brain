@@ -28,7 +28,14 @@ tools/hold/core.py — hold 普通存入分支（含自动合并）
 import asyncio
 
 from .. import _runtime as rt
+from utils import t as _t
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution, resolve_citations
+
+
+def _default_domain() -> list[str]:
+    # 同 pinned.py 的本地兜底：analyze() 抛异常且 dehydrator._default_analysis
+    # 不可用时的最后一道防线，工单 D-4 三期一并按 ombre_lang() 切换。
+    return [_t("未分类", "unclassified")]
 
 
 async def store_core(
@@ -54,16 +61,16 @@ async def store_core(
         )
         default_analysis = getattr(rt.dehydrator, "_default_analysis", None)
         analysis = default_analysis() if callable(default_analysis) else {
-            "domain": ["未分类"],
+            "domain": _default_domain(),
             "valence": 0.5,
             "arousal": 0.3,
             "tags": [],
             "suggested_name": "",
         }
 
-    domain = analysis.get("domain") or ["未分类"]
+    domain = analysis.get("domain") or _default_domain()
     if not isinstance(domain, list):
-        domain = ["未分类"]
+        domain = _default_domain()
     _v = analysis.get("valence", 0.5)
     _a = analysis.get("arousal", 0.3)
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
@@ -88,7 +95,7 @@ async def store_core(
         test_data=test_data,
     )
 
-    action = "合并→" if is_merged else "新建→"
+    action = _t("合并", "merged") + "→" if is_merged else _t("新建", "created") + "→"
     asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
         asyncio.create_task(check_duplicate_for(result_name, content))
@@ -105,5 +112,9 @@ async def store_core(
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"
     if metadata_fallback:
-        result += "\n⚠️ 打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。"
+        result += "\n⚠️ " + _t(
+            "打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。",
+            "Tagging API temporarily unavailable: content saved verbatim, no compression applied; "
+            "metadata falls back to local neutral defaults.",
+        )
     return result
