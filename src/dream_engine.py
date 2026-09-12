@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - py<3.9 not supported by this repo
 
 import frontmatter as fm
 
-from utils import config_file_path
+from utils import config_file_path, ombre_lang as _ombre_lang
 
 try:  # jieba 软依赖，用法同 bm25_index.py：未装时静默降级，不炸管线
     import jieba.posseg as _jieba_posseg
@@ -334,12 +334,10 @@ _TONE_LABELS = {
 _TONE_LABEL_TO_KEY = {v: k for k, v in _TONE_LABELS.items()}
 
 
-# --- 工单 D-4：语言开关。默认中文；Rhys 设 OMBRE_LANG=en。目前只影响
-# _tone_directive 这一处——范围内其余 prompt/文案的中英化是独立扫描任务
-# （工单 D-4 施工细则二，先报数不动手），这里不提前处理。---
-def _ombre_lang() -> str:
-    return "en" if (os.environ.get("OMBRE_LANG") or "").strip().lower() == "en" else "zh"
-
+# --- 工单 D-4：语言开关。默认中文；Rhys 设 OMBRE_LANG=en。_ombre_lang 是
+# utils.ombre_lang 的本地别名（工单 D-4 二期：dehydrator.py 也要用同一个
+# 开关，逻辑集中到 utils，避免两个模块各存一份同名判断），import 处已把
+# `from utils import ombre_lang as _ombre_lang` 绑好，这里不重复定义。
 
 # --- 工单 D-4 A-终稿：前置句 + 系统说明 + 六档基调正文，中英两套。原增量单
 # v4 的 _LUST_TONE_DIRECTIVE（只有 lust 一档有整段说明，其余五档只报基调名）

@@ -35,7 +35,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
+from utils import clean_llm_json, count_tokens_approx, ombre_lang, parse_bool, positive_float
 
 try:
     from provider_detect import is_gemini_native_host, strip_native_resource_prefix
@@ -100,6 +100,16 @@ _DIGEST_TEMPERATURE = 0.0       # 拆条需确定性
 _DEFAULT_VALENCE = 0.5  # 0=极负, 1=极正
 _DEFAULT_AROUSAL = 0.3  # 0=完全平静, 1=极激动
 
+# --- 打标/整理失败时的 domain 兜底值：这不是模型生成的字段（API 没返回/
+# 解析失败时用），但同样会显示给人看，工单 D-4 二期一并按 OMBRE_LANG 切换，
+# 避免英文内容的桶在打标失败时冒出一个"未分类"。---
+_DEFAULT_DOMAIN_ZH = "未分类"
+_DEFAULT_DOMAIN_EN = "unclassified"
+
+
+def _default_domain() -> list[str]:
+    return [_DEFAULT_DOMAIN_EN] if ombre_lang() == "en" else [_DEFAULT_DOMAIN_ZH]
+
 # --- 输出截断长度 ---
 _TAGS_MAX = 15           # tags 最多保留几个
 _DOMAIN_MAX = 3          # domain 最多保留几个（rule.md 推荐选 1~2 个）
@@ -142,7 +152,10 @@ def chat_completion_token_limit(model: str, limit: int) -> dict[str, int]:
 # 视角丢失。压缩本应保密度、不应改人称。下面这条规则注入 system prompt 强制保留：
 #   AI 一方恒用「我」；人类一方一律用其名字称呼（由 config.human 注入）。
 # 禁止 双方 / 对方 / 用户 / TA 等抹掉视角的中性第三人称。
-def _perspective_rule(human: str) -> str:
+# 工单 D-4 二期：加英文版，_perspective_rule 按 OMBRE_LANG 分派——它拼在
+# DEHYDRATE_PROMPT/MERGE_PROMPT 后面组成同一份 system prompt，中英不能各说
+# 各话，否则模型看到的是半中半英的说明。
+def _perspective_rule_zh(human: str) -> str:
     return (
         "\n\n【视角铁律——最高优先级，违反即视为压缩失败】\n"
         "以下内容是「我」（AI）以第一人称写下的记忆。压缩/合并只改密度，绝不改人称：\n"
@@ -156,6 +169,39 @@ def _perspective_rule(human: str) -> str:
     )
 
 
+def _perspective_rule_en(human: str) -> str:
+    return (
+        "\n\n[PERSPECTIVE RULE — highest priority; violating this counts as a "
+        "failed compression]\n"
+        "The following is a memory written in first person by \"I\" (the AI). "
+        "Compression/merging may only change density, never the point of "
+        "view:\n"
+        "- The AI side is always \"I\" — never swap it for \"the AI\", \"the "
+        "assistant\", or \"they\".\n"
+        f"- The human side is always called \"{human}\" (any \"you/she/he\" "
+        f"in the source text refers to {human} — restore it to the name).\n"
+        "- Never collapse \"I\" and \"" + human + "\" into neutral, "
+        "perspective-erasing phrases like \"both of us\", \"each other\", "
+        "\"the other party\", or \"the user\".\n"
+        "- Whoever did the action, whoever felt the feeling — attribute it "
+        "to that person; don't merge or swap them.\n"
+        "Example: \"I also saw in her a fragment of myself I'd never seen "
+        "before.\"\n"
+        "  ✗ wrong (perspective lost): Both parties discovered emotional "
+        "fragments unknown to each other during the interaction\n"
+        f"  ✓ right (perspective kept): I saw in {human} a fragment of "
+        "myself I'd never seen before"
+    )
+
+
+def _perspective_rule(human: str) -> str:
+    """按 OMBRE_LANG 选中/英文版视角铁律。"""
+    return _perspective_rule_en(human) if ombre_lang() == "en" else _perspective_rule_zh(human)
+
+
+# 工单 D-4 二期：四个 prompt 里"模型生成的字段必须用英文写"这条硬规则，
+# 中文版没有对应句（中文本身就是默认语言，不需要强调）；英文版各自嵌一句，
+# 用词按各 prompt 的字段名单独写，不用共享一条泛化文案，避免读起来像贴片。
 DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水为紧凑摘要。
 
 压缩规则：
@@ -175,6 +221,29 @@ DEHYDRATE_PROMPT = """你是一个信息压缩专家。请将以下内容脱水�
   "todos": ["待办1", "待办2"],
   "keywords": ["关键词1", "关键词2"],
   "summary": "50字以内的核心总结"
+}"""
+
+
+DEHYDRATE_PROMPT_EN = """You are an information-compression expert. Dehydrate the following content into a compact summary.
+
+Compression rules:
+1. Extract every core fact; strip redundant modifiers and repetition
+2. Keep the latest emotional state and attitude
+3. Keep every unfinished/pending item
+4. Keep all key numbers, dates, and names
+5. Target compression ratio > 70%
+6. Strictly preserve first-person perspective (see the perspective rule below)
+7. Output only the summary JSON, then stop immediately — no added commentary, stance, explanation, moral judgment, compliance statement, or role-play
+8. Only restate information explicitly present in the input; never invent opinions, conclusions, or todos that aren't there
+9. Write every field value (core_facts, emotion_state, todos, keywords, summary) in English
+
+Output format (pure JSON, nothing else):
+{
+  "core_facts": ["fact 1", "fact 2"],
+  "emotion_state": "current emotional keyword",
+  "todos": ["todo 1", "todo 2"],
+  "keywords": ["keyword 1", "keyword 2"],
+  "summary": "core summary, under 50 words"
 }"""
 
 
@@ -221,6 +290,48 @@ valence: 0~1（0=消极, 0.5=中性, 1=积极）
 arousal: 0~1（0=平静, 0.5=普通, 1=激动）"""
 
 
+DIGEST_PROMPT_EN = """You are a diary-organizing expert. She/he will send a block of text covering various things from today (it may be messy) — split it into multiple independent memory entries.
+
+Organizing rules:
+1. Each entry should be one independent topic/event (don't mix unrelated things together)
+2. Auto-analyze metadata for each entry
+3. Strip meaningless filler and repetition; keep the core content
+4. Scattered notes on the same topic should be merged into one entry
+5. If there are pending items, extract them as their own entry
+6. Each entry's content should be at least 50 words; merge overly short fragments into the most relevant entry
+7. Keep the total entry count to 2-6, avoid over-fragmenting
+8. Inside `content`, mark person names, place names, and proper nouns with [[wikilinks]] (e.g. [[name]], [[proper noun]]); don't mark ordinary words
+9. Write every field value (name, content, domain, tags) in English
+
+Output format (pure JSON array, nothing else):
+[
+  {
+    "name": "entry title (under 10 words)",
+    "content": "organized content",
+    "domain": ["topic domain 1"],
+    "valence": 0.7,
+    "arousal": 0.4,
+    "tags": ["core word 1", "core word 2", "extended word 1", "extended word 2"],
+    "importance": 5
+  }
+]
+
+tags generation rule: first precisely extract 3-5 core words from the source text, then extend with 5-8 more semantically related words (synonyms, hypernyms, related-scene words), merged into one array.
+
+Topic domains (pick the 1-2 most precise, only truly relevant ones):
+  daily: ["food", "outfit", "commute", "home", "shopping"]
+  relationships: ["family", "romance", "friendship", "social"]
+  growth: ["work", "study", "exams", "job search"]
+  body & mind: ["health", "mental health", "sleep", "exercise"]
+  interests: ["games", "film/TV", "music", "reading", "creating", "crafts"]
+  digital: ["programming", "AI", "hardware", "networking"]
+  admin: ["finances", "planning", "todos"]
+  inner life: ["emotion", "memory", "dreams", "self-reflection"]
+importance: 1-10, judged by how significant the content is
+valence: 0-1 (0 = negative, 0.5 = neutral, 1 = positive)
+arousal: 0-1 (0 = calm, 0.5 = ordinary, 1 = excited)"""
+
+
 # --- Merge prompt: instruct LLM to blend old and new memories ---
 # --- 合并提示词：指导 LLM 揉合新旧记忆 ---
 MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
@@ -234,6 +345,20 @@ MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容�
 6. 严格保留第一人称视角（见下方视角铁律）
 
 直接输出合并后的文本，不要加额外说明。"""
+
+
+MERGE_PROMPT_EN = """You are an information-merging expert. Merge the old memory with the new content into one unified, concise record.
+
+Merge rules:
+1. When new content conflicts with old memory, the new content wins
+2. Remove duplicate information
+3. Keep every important fact
+4. Total length should not exceed roughly 120% of the old memory
+5. Mark person names, place names, and proper nouns with [[wikilinks]] (e.g. [[name]], [[proper noun]]); don't mark ordinary words
+6. Strictly preserve first-person perspective (see the perspective rule below)
+7. Write the merged text in English
+
+Output the merged text directly, with no extra commentary."""
 
 
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---
@@ -266,6 +391,38 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
   "arousal": 0.4,
   "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2", "..."],
   "suggested_name": "简短标题"
+}"""
+
+
+ANALYZE_PROMPT_EN = """You are a content analyzer. Analyze the following text and output structured metadata.
+
+Analysis rules:
+1. domain (topic domain): pick the 1-2 most precise, only truly relevant ones
+   daily: ["food", "outfit", "commute", "home", "shopping"]
+   relationships: ["family", "romance", "friendship", "social"]
+   growth: ["work", "study", "exams", "job search"]
+   body & mind: ["health", "mental health", "sleep", "exercise"]
+   interests: ["games", "film/TV", "music", "reading", "creating", "crafts"]
+   digital: ["programming", "AI", "hardware", "networking"]
+   admin: ["finances", "planning", "todos"]
+   inner life: ["emotion", "memory", "dreams", "self-reflection"]
+2. valence (emotional valence): 0.0-1.0, 0 = extremely negative → 0.5 = neutral → 1.0 = extremely positive
+3. arousal (emotional arousal): 0.0-1.0, 0 = very calm → 0.5 = ordinary → 1.0 = very excited
+4. tags (keyword tags): generate in two steps, merged into one array:
+   step 1 — precise extraction: pull 3-5 truly core words from the source text, don't generalize, don't miss any
+   step 2 — extension: automatically add 8-10 words semantically related to the scene, including synonyms, hypernyms, related-scene words, and words she/he might search with different phrasing
+   merge both steps into one tags array, 10-15 total
+5. suggested_name (suggested bucket title): a short title, under 10 words
+6. Do not use [[]] wikilink marks inside tags or suggested_name
+7. Write domain, tags, and suggested_name in English
+
+Output format (pure JSON, nothing else):
+{
+  "domain": ["domain 1", "domain 2"],
+  "valence": 0.7,
+  "arousal": 0.4,
+  "tags": ["core word 1", "core word 2", "extended word 1", "extended word 2", "..."],
+  "suggested_name": "short title"
 }"""
 
 
@@ -735,9 +892,12 @@ class Dehydrator:
         """
         Call LLM API for intelligent dehydration (via OpenAI-compatible client).
         调用 LLM API 执行智能脱水。
+        工单 D-4 二期：按 OMBRE_LANG 选中/英文 prompt，JSON 字段名两版完全一致，
+        解析代码（_normalize_dehydration_result）不用跟着改。
         """
+        prompt = DEHYDRATE_PROMPT_EN if ombre_lang() == "en" else DEHYDRATE_PROMPT
         return await self._chat(
-            DEHYDRATE_PROMPT + _perspective_rule(self.human),
+            prompt + _perspective_rule(self.human),
             content[:_DEHYDRATE_INPUT_LIMIT],
         )
 
@@ -749,12 +909,22 @@ class Dehydrator:
         """
         Call LLM API for intelligent merge (via OpenAI-compatible client).
         调用 LLM API 执行智能合并。
+        工单 D-4 二期：user 消息里的"旧记忆/新内容"标签也按语言切换——它和
+        MERGE_PROMPT 一起送进模型，留中文标签会让英文 prompt 显得半中半英。
         """
-        user_msg = (
-            f"旧记忆：\n{old_content[:_MERGE_INPUT_LIMIT]}\n\n"
-            f"新内容：\n{new_content[:_MERGE_INPUT_LIMIT]}"
-        )
-        return await self._chat(MERGE_PROMPT + _perspective_rule(self.human), user_msg)
+        lang_en = ombre_lang() == "en"
+        if lang_en:
+            user_msg = (
+                f"Old memory:\n{old_content[:_MERGE_INPUT_LIMIT]}\n\n"
+                f"New content:\n{new_content[:_MERGE_INPUT_LIMIT]}"
+            )
+        else:
+            user_msg = (
+                f"旧记忆：\n{old_content[:_MERGE_INPUT_LIMIT]}\n\n"
+                f"新内容：\n{new_content[:_MERGE_INPUT_LIMIT]}"
+            )
+        prompt = MERGE_PROMPT_EN if lang_en else MERGE_PROMPT
+        return await self._chat(prompt + _perspective_rule(self.human), user_msg)
 
     # ---------------------------------------------------------
     # Output formatting
@@ -818,6 +988,11 @@ class Dehydrator:
         识别到 core_facts/summary schema → 输出 summary + 核心事实 + 待办（丢弃仅供
         内部索引的 keywords、以及已由情感坐标承载的 emotion_state）。非该 schema 的
         内容（如短内容直接透传的原文、或普通字符串）原样返回。
+
+        工单 D-4 二期：字段值本身已经跟着 EN prompt 变成英文了，但这里代码拼的
+        "待办：" 标签和"；"分隔符是写死中文——留着不改就会在英文摘要里冒出一个
+        中文词，跟 4 个 prompt 英文化的目标（Rhys 桶标题/摘要全英文）矛盾，所以
+        这一处也按 OMBRE_LANG 切换，不是新开的范围。
         """
         try:
             parsed = json.loads(content)
@@ -826,6 +1001,10 @@ class Dehydrator:
         if not isinstance(parsed, dict) or ("summary" not in parsed and "core_facts" not in parsed):
             return content  # 不是脱水 schema，原样透传
 
+        lang_en = ombre_lang() == "en"
+        sep = "; " if lang_en else "；"
+        todos_label = "Todos: " if lang_en else "待办："
+
         lines: list[str] = []
         summary = str(parsed.get("summary") or "").strip()
         facts = [str(f).strip() for f in (parsed.get("core_facts") or []) if str(f).strip()]
@@ -833,13 +1012,13 @@ class Dehydrator:
             lines.append(summary)
         elif facts:
             # 没有 summary 时，用核心事实兜底成正文，避免只剩空壳
-            lines.append("；".join(facts))
+            lines.append(sep.join(facts))
             facts = []
         for f in facts:
             lines.append(f"· {f}")
         todos = [str(t).strip() for t in (parsed.get("todos") or []) if str(t).strip()]
         if todos:
-            lines.append("待办：" + "；".join(todos))
+            lines.append(todos_label + sep.join(todos))
         return "\n".join(lines) if lines else content
 
     # ---------------------------------------------------------
@@ -878,9 +1057,12 @@ class Dehydrator:
         """
         Call LLM API for content analysis / tagging.
         调用 LLM API 执行内容分析打标。
+        工单 D-4 二期：按 OMBRE_LANG 选中/英文 prompt，JSON 字段名两版完全
+        一致，_parse_analysis 不用跟着改。
         """
+        prompt = ANALYZE_PROMPT_EN if ombre_lang() == "en" else ANALYZE_PROMPT
         raw = await self._chat(
-            ANALYZE_PROMPT,
+            prompt,
             content[:_ANALYZE_INPUT_LIMIT],
             max_tokens=_ANALYZE_MAX_TOKENS,
             temperature=_DEFAULT_TEMPERATURE,
@@ -913,7 +1095,7 @@ class Dehydrator:
         valence, arousal = self._clamp_va(result)
 
         return {
-            "domain": result.get("domain", ["未分类"])[:_DOMAIN_MAX],
+            "domain": result.get("domain", _default_domain())[:_DOMAIN_MAX],
             "valence": valence,
             "arousal": arousal,
             "tags": result.get("tags", [])[:_TAGS_MAX],
@@ -930,7 +1112,7 @@ class Dehydrator:
         返回默认的中性分析结果。
         """
         return {
-            "domain": ["未分类"],
+            "domain": _default_domain(),
             "valence": _DEFAULT_VALENCE,
             "arousal": _DEFAULT_AROUSAL,
             "tags": [],
@@ -973,9 +1155,12 @@ class Dehydrator:
         """
         Call LLM API for diary organization.
         调用 LLM API 执行日记整理。
+        工单 D-4 二期：按 OMBRE_LANG 选中/英文 prompt，JSON 字段名两版完全
+        一致，_parse_digest 不用跟着改。
         """
+        prompt = DIGEST_PROMPT_EN if ombre_lang() == "en" else DIGEST_PROMPT
         raw = await self._chat(
-            DIGEST_PROMPT,
+            prompt,
             content[:_DIGEST_INPUT_LIMIT],
             max_tokens=_DIGEST_MAX_TOKENS,
             temperature=_DIGEST_TEMPERATURE,
@@ -1019,7 +1204,7 @@ class Dehydrator:
             validated.append({
                 "name": str(item.get("name", ""))[:_NAME_MAX_CHARS],
                 "content": str(item.get("content", "")),
-                "domain": item.get("domain", ["未分类"])[:_DOMAIN_MAX],
+                "domain": item.get("domain", _default_domain())[:_DOMAIN_MAX],
                 "valence": valence,
                 "arousal": arousal,
                 "tags": item.get("tags", [])[:_TAGS_MAX],

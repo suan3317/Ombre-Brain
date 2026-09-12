@@ -642,6 +642,19 @@ def get_ai_name() -> str:
     return os.environ.get("AI_NAME", "").strip() or "AI"
 
 
+def ombre_lang() -> str:
+    """面向人的文案语言开关 / user-facing text language switch.
+
+    取自环境变量 `OMBRE_LANG`，默认 "zh"，设为 "en"（大小写不敏感）时切换
+    英文——目前用于 dream_engine 的基调/残句/梦尾标签，以及 dehydrator 的
+    脱水/合并/打标/日记整理 4 个 prompt（工单 D-4 一期+二期）。集中放在
+    utils 里，避免 dream_engine 和 dehydrator 各自维护一份同名判断逻辑。
+    Read from `OMBRE_LANG`; defaults to "zh", "en" (case-insensitive) switches
+    to English-language prompts and user-facing text.
+    """
+    return "en" if (os.environ.get("OMBRE_LANG") or "").strip().lower() == "en" else "zh"
+
+
 def get_owner_name() -> str:
     """当前实例记忆归属者的显示名 / display name of this instance's memory owner.
 
