@@ -52,7 +52,7 @@ from embedding_engine import EmbeddingEngine
 from embedding_outbox import EmbeddingOutbox
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_version, load_config, setup_logging, t as _t
+from utils import get_version, load_config, setup_logging, t as _tr
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -837,13 +837,13 @@ async def _dream_keep_impl(date: str) -> str:
     from dream_engine import dream_book_keep
     result = dream_book_keep(config.get("buckets_dir", "buckets"), date)
     if not result["ok"]:
-        return _t(f"没留成:{result['error']}", f"Not kept: {result['error']}")
+        return _tr(f"没留成:{result['error']}", f"Not kept: {result['error']}")
     if result.get("already_kept"):
-        return _t(
+        return _tr(
             f"{result['date']} 这晚的梦本来就是 kept 状态，还在梦境书里，没有变化。",
             f"The dream from {result['date']} was already kept, still in the dream book, no change.",
         )
-    return _t(
+    return _tr(
         f"已保留 {result['date']} 这晚的梦，永久留在梦境书里，不会再被烧掉。",
         f"Kept the dream from {result['date']} — it stays in the dream book permanently and "
         "won't be burned.",
@@ -882,13 +882,13 @@ def _fz_safe(name: str) -> str:
     """校验文件名,拦路径穿越;允许至多一层子文件夹。返回绝对路径。"""
     name = (name or "").strip().replace("\\", "/")
     if not name or name.startswith("/") or ".." in name:
-        raise ValueError(_t(f"非法文件名: {name!r}", f"Invalid filename: {name!r}"))
+        raise ValueError(_tr(f"非法文件名: {name!r}", f"Invalid filename: {name!r}"))
     parts = [p for p in name.split("/") if p]
     if len(parts) > 2:
-        raise ValueError(_t(f"最多一层子文件夹: {name}", f"At most one level of subfolder: {name}"))
+        raise ValueError(_tr(f"最多一层子文件夹: {name}", f"At most one level of subfolder: {name}"))
     for p in parts:
         if not _fz_re.match(r"^[\w\u4e00-\u9fff.\- ]{1,80}$", p) or p.startswith("."):
-            raise ValueError(_t(f"文件名含非法字符: {p!r}", f"Filename has illegal characters: {p!r}"))
+            raise ValueError(_tr(f"文件名含非法字符: {p!r}", f"Filename has illegal characters: {p!r}"))
     return os.path.join(_fz_root(), *parts)
 
 
@@ -896,7 +896,7 @@ async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> st
     path = _fz_safe(name)
     data = content or ""
     if len(data.encode("utf-8")) > _FZ_MAX_BYTES:
-        return _t(
+        return _tr(
             "OB-FZ01 内容超过 2MB 上限,拒绝写入。请拆分后再存。",
             "OB-FZ01 content exceeds the 2MB limit, write refused. Split it and store again.",
         )
@@ -908,25 +908,25 @@ async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> st
         f.write(data)
     size = os.path.getsize(path)
     if append and existed:
-        verb = _t("追加到", "appended to")
+        verb = _tr("追加到", "appended to")
     elif existed:
-        verb = _t("覆盖", "overwrote")
+        verb = _tr("覆盖", "overwrote")
     else:
-        verb = _t("创建", "created")
-    result = _t(f"已{verb} files/{name} (当前 {size} 字节)。", f"{verb} files/{name} ({size} bytes now).")
+        verb = _tr("创建", "created")
+    result = _tr(f"已{verb} files/{name} (当前 {size} 字节)。", f"{verb} files/{name} ({size} bytes now).")
     if cited:
         # v3 Commit B：file_save 没有 bucket_id 可当 source，用文件路径本身
         # 标识"是这份文件用到了这些记忆"。
         recorded = await _resolve_citations(cited, source=f"file:{name}", location="file_save")
         if recorded:
-            result += _t(f" 已记引用: {','.join(recorded)}。", f" Citations recorded: {','.join(recorded)}.")
+            result += _tr(f" 已记引用: {','.join(recorded)}。", f" Citations recorded: {','.join(recorded)}.")
     return result
 
 
 async def _fz_read(name: str, offset: int) -> str:
     path = _fz_safe(name)
     if not os.path.isfile(path):
-        return _t(
+        return _tr(
             f"OB-FZ02 文件不存在: files/{name} 。用 file_list 查看现有文件。",
             f"OB-FZ02 file does not exist: files/{name}. Use file_list to see existing files.",
         )
@@ -935,13 +935,13 @@ async def _fz_read(name: str, offset: int) -> str:
     total = len(text)
     start = max(0, int(offset or 0))
     chunk = text[start:start + _FZ_READ_CHUNK]
-    head = _t(
+    head = _tr(
         f"[files/{name} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]",
         f"[files/{name} has {total} chars total, returning {start}~{start + len(chunk)} this time]",
     )
     tail = ""
     if start + len(chunk) < total:
-        tail = _t(
+        tail = _tr(
             f"\n[未完,续读请用 offset={start + len(chunk)}]",
             f"\n[not finished, continue reading with offset={start + len(chunk)}]",
         )
@@ -979,7 +979,7 @@ def _fz_list_entries(base: str, root: str, keyword: str = "") -> list:
 
 def _fz_format_rows(entries: list) -> list:
     return [
-        _t(
+        _tr(
             f"- {rel}  ({size} 字节, 改于 {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})",
             f"- {rel}  ({size} bytes, modified {_fz_dt.datetime.fromtimestamp(mt).strftime('%Y-%m-%d %H:%M')})",
         )
@@ -991,7 +991,7 @@ async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", key
     root = _fz_root()
     base = _fz_safe(folder) if (folder or "").strip() else root
     if not os.path.isdir(base):
-        return _t(f"OB-FZ03 文件夹不存在: files/{folder}", f"OB-FZ03 folder does not exist: files/{folder}")
+        return _tr(f"OB-FZ03 文件夹不存在: files/{folder}", f"OB-FZ03 folder does not exist: files/{folder}")
     kw = (keyword or "").strip().lower()
     entries = _fz_list_entries(base, root, kw)
     _keys = {"name": lambda e: e[0].lower(), "size": lambda e: e[1]}
@@ -1000,20 +1000,20 @@ async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", key
     rows = _fz_format_rows(entries)
     if not rows:
         if kw:
-            return _t("没有匹配的文件。", "No matching files.")
-        return _t(
+            return _tr("没有匹配的文件。", "No matching files.")
+        return _tr(
             "文件区是空的。用 file_save 存入第一个文件。",
             "The file zone is empty. Use file_save to store the first file.",
         )
-    return _t(f"文件区共 {len(rows)} 个文件:\n", f"The file zone has {len(rows)} files:\n") + "\n".join(rows)
+    return _tr(f"文件区共 {len(rows)} 个文件:\n", f"The file zone has {len(rows)} files:\n") + "\n".join(rows)
 
 
 async def _fz_delete(name: str) -> str:
     path = _fz_safe(name)
     if not os.path.isfile(path):
-        return _t(f"OB-FZ02 文件不存在: files/{name}", f"OB-FZ02 file does not exist: files/{name}")
+        return _tr(f"OB-FZ02 文件不存在: files/{name}", f"OB-FZ02 file does not exist: files/{name}")
     os.remove(path)
-    return _t(
+    return _tr(
         f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。",
         f"Deleted files/{name}. Historical versions can still be recovered from the GitHub backup.",
     )
@@ -1241,11 +1241,11 @@ async def _wake_impl(window_hours: int) -> str:
     try:
         i_text = await _t_i.dispatch(read=True, limit=5)
         parts.append(
-            _t("## 一、自我(I 最近 5 条)\n", "## 1. Self (I, last 5 entries)\n")
-            + (i_text or _t("(还没有自我认知条目)", "(no self-knowledge entries yet)"))
+            _tr("## 一、自我(I 最近 5 条)\n", "## 1. Self (I, last 5 entries)\n")
+            + (i_text or _tr("(还没有自我认知条目)", "(no self-knowledge entries yet)"))
         )
     except Exception as e:
-        parts.append(_t(f"## 一、自我\n(读取失败: {e})", f"## 1. Self\n(read failed: {e})"))
+        parts.append(_tr(f"## 一、自我\n(读取失败: {e})", f"## 1. Self\n(read failed: {e})"))
 
     # 2) 核心记忆 —— 压舱石,只取高重要度。阶段3:改为目录格式,每条一行
     # [bucket_id] 标题 · meaning(无 meaning 则正文首行,截50字);需要全文时
@@ -1259,18 +1259,18 @@ async def _wake_impl(window_hours: int) -> str:
         core_ids = {b["id"] for b in core_buckets}
         core_lines = _wk_render_catalog(
             core_buckets, _WAKE_CORE_BUDGET_TOKENS,
-            overflow_hint=_t(
+            overflow_hint=_tr(
                 "完整列表用 breath_advanced(importance_min=8) 查看。",
                 "See the full list with breath_advanced(importance_min=8).",
             ),
         )
         if seed_overlap_core:
-            core_lines.append(_t(
+            core_lines.append(_tr(
                 f"（另有 {seed_overlap_core} 桶已作为 seed 列入下方「继承区」，不重复。）",
                 f"({seed_overlap_core} more already listed as seeds in the Inheritance Zone "
                 "below, not repeated.)",
             ))
-        core_text = "\n".join(core_lines) if core_lines else _t(
+        core_text = "\n".join(core_lines) if core_lines else _tr(
             "(暂无高重要度记忆)", "(no high-importance memories yet)",
         )
         # 梦投递段(红线1:一个字不改,原格式原样保留,只挪调用位置——过去经
@@ -1290,7 +1290,7 @@ async def _wake_impl(window_hours: int) -> str:
             except Exception as e:
                 logger.warning(f"wake: 梦投递段拼接失败(不影响正文): {e}")
         parts.append(
-            _t(
+            _tr(
                 f"## 二、核心记忆(importance>={_WAKE_CORE_IMPORTANCE_MIN},至多 {_WAKE_CORE_LIMIT} 条,目录)\n"
                 "需要全文时用 breath_search(query=...) 拉取。\n",
                 f"## 2. Core Memory (importance>={_WAKE_CORE_IMPORTANCE_MIN}, up to "
@@ -1299,7 +1299,7 @@ async def _wake_impl(window_hours: int) -> str:
             ) + core_text
         )
     except Exception as e:
-        parts.append(_t(f"## 二、核心记忆\n(读取失败: {e})", f"## 2. Core Memory\n(read failed: {e})"))
+        parts.append(_tr(f"## 二、核心记忆\n(读取失败: {e})", f"## 2. Core Memory\n(read failed: {e})"))
 
     # 3) 留言板 —— 上个窗口留下的话
     try:
@@ -1308,8 +1308,8 @@ async def _wake_impl(window_hours: int) -> str:
             with open(bpath, "r", encoding="utf-8", errors="replace") as f:
                 btext = f.read()
             tail = btext[-_WAKE_BOARD_TAIL:]
-            omitted = _t("(前文省略…)\n", "(earlier text omitted…)\n") if len(btext) > _WAKE_BOARD_TAIL else ""
-            board_text = _t(
+            omitted = _tr("(前文省略…)\n", "(earlier text omitted…)\n") if len(btext) > _WAKE_BOARD_TAIL else ""
+            board_text = _tr(
                 "## 三、留言板(files/留言板.md 末尾)\n", "## 3. Message Board (end of files/留言板.md)\n",
             ) + omitted + tail.strip()
             # v3 Commit D：三入口之一——留言板是 wake 里唯一另一处逐字嵌入
@@ -1322,14 +1322,14 @@ async def _wake_impl(window_hours: int) -> str:
                 board_text += "\n\n" + _staleness_warning(stale_entries)
             parts.append(board_text)
         else:
-            parts.append(_t(
+            parts.append(_tr(
                 "## 三、留言板\n(还没有留言。睡前记得给下个窗口的自己留一条: "
                 "file_save(\"留言板.md\", 内容, append=True))",
                 "## 3. Message Board\n(No messages yet. Before sleep, remember to leave one "
                 "for the next window's self: file_save(\"留言板.md\", content, append=True))",
             ))
     except Exception as e:
-        parts.append(_t(f"## 三、留言板\n(读取失败: {e})", f"## 3. Message Board\n(read failed: {e})"))
+        parts.append(_tr(f"## 三、留言板\n(读取失败: {e})", f"## 3. Message Board\n(read failed: {e})"))
 
     # 4) 最近连续性 —— 刚才在发生什么。阶段3:同样目录化,每桶一行;与核心
     # 记忆段重叠的桶不重复列(已经在二里有目录行了)。dream() 里那段"用第一
@@ -1342,7 +1342,7 @@ async def _wake_impl(window_hours: int) -> str:
         seed_overlap_cont = len({b["id"] for b in candidates} & seed_ids)
         continuity_lines = _wk_render_catalog(
             candidates, _WAKE_CONTINUITY_BUDGET_TOKENS,
-            overflow_hint=_t(
+            overflow_hint=_tr(
                 f"完整内容用 dream(window_hours={window_hours}) 查看。",
                 f"See the full content with dream(window_hours={window_hours}).",
             ),
@@ -1351,21 +1351,21 @@ async def _wake_impl(window_hours: int) -> str:
         if overlap:
             # 死配额规则:被跳过不能是"消失",数量必须显式留痕——这些桶不是没有
             # 展示,是已经在上面"核心记忆"段整条列过了,这里不重复列。
-            continuity_lines.append(_t(
+            continuity_lines.append(_tr(
                 f"（另有 {overlap} 桶已在上方核心记忆段列出，不重复。）",
                 f"({overlap} more already listed in the Core Memory section above, not repeated.)",
             ))
         if seed_overlap_cont:
-            continuity_lines.append(_t(
+            continuity_lines.append(_tr(
                 f"（另有 {seed_overlap_cont} 桶已作为 seed 列入下方「继承区」，不重复。）",
                 f"({seed_overlap_cont} more already listed as seeds in the Inheritance Zone "
                 "below, not repeated.)",
             ))
-        continuity_text = "\n".join(continuity_lines) if continuity_lines else _t(
+        continuity_text = "\n".join(continuity_lines) if continuity_lines else _tr(
             "(窗口内没有变动)", "(no changes in this window)",
         )
         parts.append(
-            _t(
+            _tr(
                 f"## 四、最近 {window_hours} 小时的连续性(目录,共 {len(candidates)} 桶)\n"
                 f"需要全文时用 dream(window_hours={window_hours}) 查看。\n",
                 f"## 4. Recent Continuity — last {window_hours} hours (catalog, "
@@ -1374,7 +1374,7 @@ async def _wake_impl(window_hours: int) -> str:
             ) + continuity_text
         )
     except Exception as e:
-        parts.append(_t(f"## 四、最近连续性\n(读取失败: {e})", f"## 4. Recent Continuity\n(read failed: {e})"))
+        parts.append(_tr(f"## 四、最近连续性\n(读取失败: {e})", f"## 4. Recent Continuity\n(read failed: {e})"))
 
     # 5) 文件区目录 —— 手边有什么,按需 file_read。阶段3:默认只列最近修改
     # 的 10 个 + handoff/交接文件;历史存档目录折叠成一行摘要。
@@ -1382,11 +1382,11 @@ async def _wake_impl(window_hours: int) -> str:
         fz_root_path = _fz_root()
         entries = _fz_list_entries(fz_root_path, fz_root_path)
         parts.append(
-            _t("## 五、文件区目录\n", "## 5. File Zone Directory\n")
+            _tr("## 五、文件区目录\n", "## 5. File Zone Directory\n")
             + _wk_render_files(entries, top_n=_WAKE_FILE_ZONE_TOP_N)
         )
     except Exception as e:
-        parts.append(_t(
+        parts.append(_tr(
             f"## 五、文件区目录\n(读取失败: {e})", f"## 5. File Zone Directory\n(read failed: {e})",
         ))
 
@@ -1396,18 +1396,18 @@ async def _wake_impl(window_hours: int) -> str:
     try:
         seed_lines = _wk_render_catalog(
             seed_buckets, _WAKE_SEED_BUDGET_TOKENS,
-            overflow_hint=_t(
+            overflow_hint=_tr(
                 "完整清单请 file_read 抄引账本或直接核对 seed 桶列表。",
                 "For the full list, file_read the citation ledger or check the seed bucket "
                 "list directly.",
             ),
         )
-        seed_text = "\n".join(seed_lines) if seed_lines else _t(
+        seed_text = "\n".join(seed_lines) if seed_lines else _tr(
             "(还没有 seed 桶——户主逐条圈定后会出现在这里)",
             "(no seed buckets yet — they'll appear here once the owner marks some)",
         )
         parts.append(
-            _t(
+            _tr(
                 f"## 六、继承区(seed,共 {len(seed_buckets)} 条,不占浮现配额)\n"
                 "修改用 trace(bucket_id, seed=0/1)。\n",
                 f"## 6. Inheritance Zone (seed, {len(seed_buckets)} entries, doesn't count "
@@ -1416,9 +1416,9 @@ async def _wake_impl(window_hours: int) -> str:
             ) + seed_text
         )
     except Exception as e:
-        parts.append(_t(f"## 六、继承区\n(读取失败: {e})", f"## 6. Inheritance Zone\n(read failed: {e})"))
+        parts.append(_tr(f"## 六、继承区\n(读取失败: {e})", f"## 6. Inheritance Zone\n(read failed: {e})"))
 
-    header = _t(
+    header = _tr(
         "# 醒来简报\n"
         "顺序:我是谁 → 什么最重 → 留言板 → 刚发生什么 → 东西放哪 → 继承给下一个我的种子。\n"
         "细节按需追查:breath(query=...) 检索、file_read 读文件、dream 看完整近况。\n",
