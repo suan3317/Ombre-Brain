@@ -146,7 +146,8 @@ dream:
   # 不填任何真实值，留空表示不做替换（默认行为不变）。
   # 示例（不要直接照抄）：dreamer_aliases: ["老公", "封燧", "Flint", "Fable"]
   dreamer_aliases: []
-  leak_ngram: 10                  # n-gram 防泄漏闸：与 source 原文连续重合≥此字数即判泄漏
+  leak_ngram: 10                  # n-gram 防泄漏闸（中文，字符级）：与 source 原文连续重合≥此字数即判泄漏
+  leak_ngram_word_en: 6           # 工单 D-4 补丁：leak 闸英文分支（OMBRE_LANG=en，词级）：连续重合≥此词数即判泄漏
 
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。

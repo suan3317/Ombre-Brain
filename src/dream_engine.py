@@ -87,7 +87,15 @@ _DEFAULT_NOISE_TIERS = [0.70, 0.25, 0.05]  # 掺1-2条 / 过半 / 纯噪音
 _DEFAULT_DARKROOM_PROB = 0.10
 _DEFAULT_RESOLVED0_PROB = 0.10
 _DEFAULT_EXPIRE_HOURS = 48
-_DEFAULT_LEAK_NGRAM = 10                # n-gram 防泄漏闸阈值（返修单 v3 改动一）
+_DEFAULT_LEAK_NGRAM = 10                # n-gram 防泄漏闸阈值（返修单 v3 改动一），中文字符级，一字不动
+# 工单 D-4 补丁：英文分支改词级 n-gram（空格分词+小写），字符级阈值 10 对英文
+# 不成立——常见短语本身就有 10-11 个字符，会跟任何不相关的英文源文本频繁
+# 撞车（Rhys(en) 一晚 4 发全被拦，重合长度 10/11）。改用连续词数计门槛：日常
+# 英文散文里连续 6 个词完全相同、顺序不变，基本只可能是真的抄了原文。
+# 校准（gemini-2.5-flash-lite，温度 1.0，现行 prompt，30 条沙箱样本，对同一批
+# 生成结果分别跑旧/新规则）：旧字符阈值 10 命中 30/30（≈100%，复现了 Rhys 的
+# 报告）；新词级阈值 6 命中 1/30（≈3.3%）。
+_DEFAULT_LEAK_NGRAM_WORD_EN = 6
 # 没有单独的 _DEFAULT_MODEL 常量：dream.model 默认 null，未配置时直接沿用
 # dehydrator 自己的模型（同一 API key/endpoint 才能保证调得通）。K/F 的部署
 # 默认 OMBRE_COMPRESS_MODEL=gemini-2.5-flash-lite，null 就已经是 README 想要的
@@ -136,12 +144,17 @@ _NOISE_GROWTH_TEMPERATURE = 1.0
 # 局部退化成词表"的产物；返修单 v3 改回逐段判定，但用动词检测区分合法
 # 混沌短句（含动词/是完整场景描述）和非法词表（连续裸名词顿号/逗号串联）。 ---
 _PROSE_BARE_NOUN_MAX_CHARS = 12       # 片段长于这个字数，不太可能是裸名词
-_PROSE_BARE_NOUN_RUN_THRESHOLD = 3    # 连续这么多个裸名词片段 → 判定为非法词表
+# 工单 D-4 补丁：K(zh, sonnet) 一晚 4 发全被本闸拦（segments 7-9, chars
+# 446-615），3→4。校准（gemini-2.5-flash-lite，温度 1.0，现行 prompt，80 条
+# 沙箱样本）：旧阈值 3 命中 7/80（≈8.75%），新阈值 4 命中 0/80。
+_PROSE_BARE_NOUN_RUN_THRESHOLD = 4    # 连续这么多个裸名词片段 → 判定为非法词表
 
 # --- D-3 D.5（v4.3~v4.5）：结尾专项补闸。原方案把结尾阈值收紧到 2 连，用
 # 12 条历史真实 kept 梦正文验收时打中 1 条误杀（F 8-06：焦虑碎片"病危、肝癌、
 # 离婚"是合法的意象并置，不是词表泄漏，见工单 D-3 v4.6 验收记录）——按 Silvia
-# 指令退回阈值，只保留"分隔符放宽"这一半：阈值维持跟中段判定一致的 3 连，
+# 指令退回阈值，只保留"分隔符放宽"这一半：阈值维持跟中段判定一致，不单独
+# 拆开（工单 D-4 补丁沿用同一个不变式：Silvia 2026-09-13 确认，tail 继续
+# 绑定 main 同步提到 4，不重新拆出一个更低的 tail 值，避免重新踩 F 8-06 的坑），
 # 但结尾额外用更宽的分隔符（含空格/斜杠/项目符号等常见清单分隔，不止顿号/
 # 逗号）扫一遍，专门补空格/项目符号这类不会被中段判定的窄分隔符正则切开的
 # 结尾清单形态。---
@@ -248,10 +261,13 @@ def _is_prose_like(text: str) -> bool:
     return True
 
 
-def _longest_common_substring_len(a: str, b: str) -> int:
-    """经典 DP：a、b 的最长公共连续子串长度。只在 n-gram 防泄漏闸已经命中
-    交集之后才调用（见 DreamEngine._detect_source_leak），用于给日志算一个
-    更准确的"重合长度"，不参与命中判定本身（判定走更快的 set 交集）。"""
+def _longest_common_substring_len(a, b) -> int:
+    """经典 DP：a、b 的最长公共连续子串（游程）长度。只在 n-gram 防泄漏闸已经
+    命中交集之后才调用（见 DreamEngine._detect_source_leak_zh/_en），用于给日志
+    算一个更准确的"重合长度"，不参与命中判定本身（判定走更快的 set 交集）。
+    a/b 既可以是字符串（中文路径，逐字符比）也可以是 list[str]（工单 D-4 补丁：
+    英文词级 leak 闸传分词后的词序列，逐词比）——算法本身只依赖索引和相等
+    比较，对两种序列类型通用，不用另写一份。"""
     if not a or not b:
         return 0
     prev = [0] * (len(b) + 1)
@@ -267,6 +283,16 @@ def _longest_common_substring_len(a: str, b: str) -> int:
                     best = v
         prev = curr
     return best
+
+
+# --- 工单 D-4 补丁：leak 闸英文分支用的分词。只按空格/常见撇号词形切，够
+# 用即可——这里不追求语言学精确，只求跟英文散文的自然断词一致，不用 nltk
+# 之类的重依赖。---
+_LEAK_WORD_RE_EN = re.compile(r"[A-Za-z']+")
+
+
+def _tokenize_words_en(text: str) -> list[str]:
+    return [w.lower() for w in _LEAK_WORD_RE_EN.findall(text or "")]
 
 
 # --- 工单 D-4 一期：pov 闸英文分支。中文路径（数"我"/首句她他开头）一字
@@ -930,6 +956,7 @@ class DreamEngine:
         self.resolved0_prob = float(dream_cfg.get("resolved0_prob", _DEFAULT_RESOLVED0_PROB))
         self.expire_hours = float(dream_cfg.get("expire_hours", _DEFAULT_EXPIRE_HOURS))
         self.leak_ngram = int(dream_cfg.get("leak_ngram", _DEFAULT_LEAK_NGRAM))
+        self.leak_ngram_word_en = int(dream_cfg.get("leak_ngram_word_en", _DEFAULT_LEAK_NGRAM_WORD_EN))
         self.model = dream_cfg.get("model")  # None → 沿用 dehydrator 自己的模型配置
         self.temperature = float(dream_cfg.get("temperature", _DEFAULT_TEMPERATURE))
         self.cut_prob = float(dream_cfg.get("cut_prob", _DEFAULT_CUT_PROB))
@@ -1334,6 +1361,7 @@ class DreamEngine:
             "给你的意象词互不相关，让它们在句子里并置、相撞，不许编成合理的故事；"
             "允许场景毫无过渡地硬切——一句话写着写着换了场景、一个人说着话变成另一个人、"
             "一句话写到一半停住——但切换前后仍然是完整句子，不是词语拼贴；"
+            "不要连续并列三个以上名词，每个片段都要有动作或状态；"
             f"情绪要连贯，情节不需要。{_tone_directive(tone)}"
             f"长度 150-400 字，1-3 段连续散文，禁止任何形式的分行列表或编号。"
             f"{_NO_TRAILING_LIST_DIRECTIVE}\n"
@@ -1367,6 +1395,8 @@ class DreamEngine:
             "can become someone else's, a sentence can stop halfway — but "
             "before and after each cut it must still be a complete "
             "sentence, not a collage of words; "
+            "don't string together more than three nouns in a row — every "
+            "fragment needs a verb or a state; "
             f"emotion should stay continuous even when the plot doesn't. {_tone_directive(tone)}"
             f"Length 120-300 words, 1-3 paragraphs of continuous prose, no "
             f"line-broken lists or numbering of any kind. "
@@ -1402,7 +1432,8 @@ class DreamEngine:
             "允许动作有因果。画面要完整，像真的发生过。\n"
             f"混沌段（1-3 个）：把这些素材词（仅供打散当燃料，不是要输出的格式，"
             f"不许原样列出、分行罗列、写成清单体）意象并置、互不相关地嵌进段落——"
-            f"{chaos_section}。禁因果连接词，禁解释，允许一句话写到一半停住。\n"
+            f"{chaos_section}。禁因果连接词，禁解释，允许一句话写到一半停住；"
+            "不要连续并列三个以上名词，每个片段都要有动作或状态。\n"
             "段与段之间：硬切，零过渡，禁止说明段落之间的关系。后一个清晰段可以"
             "续接前一个清晰段的情节，也可以只是沾一点边然后飘走。\n"
             "全局：禁止收尾、禁止点题、禁止把所有意象统一成一个通顺的故事。"
@@ -1429,7 +1460,9 @@ class DreamEngine:
             f"break apart, not a format to output — never as a raw list, "
             f"one per line, or a catalogue) get juxtaposed, unrelated, "
             f"embedded in the prose — {chaos_section}. No causal "
-            "connectors, no explaining, a sentence may stop halfway.\n"
+            "connectors, no explaining, a sentence may stop halfway; don't "
+            "string together more than three nouns in a row — every "
+            "fragment needs a verb or a state.\n"
             "Between passages: hard cut, zero transition, never explain "
             "how passages relate. The next clear passage may continue the "
             "previous one's plot, or just brush against it and drift "
@@ -1448,10 +1481,20 @@ class DreamEngine:
     # 不在这里重试。
     # ---------------------------------------------------------
     def _detect_source_leak(self, raw: str, materials: list[dict]) -> int:
-        """n-gram 防泄漏闸（改动一，最高优先）：raw 与本次全部 source（桶原文 +
-        暗房底片原文，不含噪音词——噪音本来就该原样出现）连续字符重合检测。
-        判定走 set 交集（O(n+m)，平时零成本）；只在真命中时才跑一次 DP 算精确
-        长度供日志用。返回最长重合长度，<leak_ngram 时调用方不处置。"""
+        """n-gram 防泄漏闸（改动一，最高优先）派发：中文走字符级（不动），
+        英文走词级（工单 D-4 补丁）。返回值单位随语言而变——中文是字符数，
+        英文是词数，调用方（_validate_generation）按对应阈值比较，不能跨语言
+        混用同一个数字。"""
+        if _ombre_lang() == "en":
+            return self._detect_source_leak_en(raw, materials)
+        return self._detect_source_leak_zh(raw, materials)
+
+    def _detect_source_leak_zh(self, raw: str, materials: list[dict]) -> int:
+        """中文分支（返修单 v3 改动一，工单 D-4 补丁未改动）：raw 与本次全部
+        source（桶原文 + 暗房底片原文，不含噪音词——噪音本来就该原样出现）
+        连续字符重合检测。判定走 set 交集（O(n+m)，平时零成本）；只在真命中时
+        才跑一次 DP 算精确长度供日志用。返回最长重合字符数，<leak_ngram 时
+        调用方不处置。"""
         if not raw:
             return 0
         n = max(1, self.leak_ngram)
@@ -1467,20 +1510,50 @@ class DreamEngine:
                 return max(n, _longest_common_substring_len(raw, source_text))
         return 0
 
+    def _detect_source_leak_en(self, raw: str, materials: list[dict]) -> int:
+        """英文分支（工单 D-4 补丁）：字符级 n-gram 在英文下不成立——常见短语
+        本身就有 10-11 个字符，会跟任何不相关的英文源文本频繁撞车（Rhys(en)
+        一晚 4 发全被拦，重合长度 10/11，见工单校准记录）。改用词级 n-gram：
+        空格分词、小写、连续 leak_ngram_word_en 个词完全相同才算重合，判定逻辑
+        跟中文分支一样先走 set 交集、真命中才跑 DP。返回最长重合词数（不是
+        字符数），<leak_ngram_word_en 时调用方不处置。"""
+        if not raw:
+            return 0
+        n = max(1, self.leak_ngram_word_en)
+        raw_words = _tokenize_words_en(raw)
+        if len(raw_words) < n:
+            return 0
+        raw_grams = {tuple(raw_words[i:i + n]) for i in range(len(raw_words) - n + 1)}
+        for m in materials:
+            source_text = (m.get("text") or "")[:_LEAK_CHECK_SOURCE_CHAR_LIMIT]
+            source_words = _tokenize_words_en(source_text)
+            if len(source_words) < n:
+                continue
+            source_grams = {tuple(source_words[i:i + n]) for i in range(len(source_words) - n + 1)}
+            if not raw_grams.isdisjoint(source_grams):
+                return max(n, _longest_common_substring_len(raw_words, source_words))
+        return 0
+
     def _validate_generation(self, raw: str, materials: list[dict]) -> str | None:
         """三道闸依次判：命中即返回失败原因（不落盘的调用方靠这个决定要不要
         重试）；全部通过返回 None。日志各自记必要的排障信息，绝不记正文本身
-        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度）。
+        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度/词数）。
 
         工单 D-4 一期：word_list 闸在 OMBRE_LANG=en 下直接跳过——
         _is_prose_like 靠 jieba 中文分词做动词检测，且裸名词字符阈值是按
         中文密度校准的，两者都不适用英文（判断见工单施工细则三），一期先
         跳过、不硬套一个不可靠的英文近似规则；跳过原因打一行 info 日志。
-        leak 闸语言无关（字符级 n-gram），中文路径一字不动。pov 闸的中英
+        leak 闸工单 D-4 补丁前语言无关（字符级 n-gram），补丁后英文改词级、
+        阈值单位也变了（词数不是字符数），中文路径一字不动。pov 闸的中英
         分支在 _has_first_person_pov 内部，这里调用方式不变。"""
         leak_len = self._detect_source_leak(raw, materials)
-        if leak_len >= self.leak_ngram:
-            logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}")
+        lang_en = _ombre_lang() == "en"
+        leak_threshold = self.leak_ngram_word_en if lang_en else self.leak_ngram
+        if leak_len >= leak_threshold:
+            if lang_en:
+                logger.warning(f"dream: 泄漏拦截(en 词级)，重合词数={leak_len}")
+            else:
+                logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}")
             return "leak"
         if _ombre_lang() == "en":
             logger.info(

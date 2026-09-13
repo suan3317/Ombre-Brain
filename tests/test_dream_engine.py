@@ -855,9 +855,17 @@ def test_is_prose_like_accepts_legal_chaotic_short_clauses():
 
 
 def test_is_prose_like_rejects_bare_noun_run_joined_by_dunhao():
-    # 返修单 v3 给的非法例子原型："底片,一仓一钥"——连续裸名词顿号串联
-    text = "我看着底片、钥匙串、旧仓库、锁孔，一动不动。"
+    # 返修单 v3 给的非法例子原型："底片,一仓一钥"——连续裸名词顿号串联。
+    # 工单 D-4 补丁：阈值 3→4，这里改成 4 个连续裸名词才踩中新阈值。
+    text = "我看着底片、钥匙串、旧仓库、锁孔、门牌，一动不动。"
     assert _is_prose_like(text) is False
+
+
+def test_is_prose_like_accepts_three_bare_noun_run_below_new_threshold():
+    """工单 D-4 补丁回归：K(zh, sonnet) 一晚 4 发被本闸拦下的真实故障——3 个
+    连续裸名词（旧阈值 3 命中，误杀）在新阈值 4 下必须放行。"""
+    text = "我看着底片、钥匙串、旧仓库，一动不动。"
+    assert _is_prose_like(text) is True
 
 
 def test_is_prose_like_accepts_scene_description_with_verb():
@@ -872,22 +880,32 @@ def test_is_prose_like_short_run_below_threshold_still_passes():
     assert _is_prose_like(text) is True
 
 
-# --- D-3 D.5（v4.3~v4.5）：结尾专项补闸，分隔符放宽但阈值维持 3 连不变 ---
+# --- D-3 D.5（v4.3~v4.5）：结尾专项补闸，分隔符放宽、阈值跟主阈值绑定 ---
 # 原方案把结尾阈值收紧到 2，用 12 条历史真实 kept 梦正文验收时打中 1 条误杀
 # （焦虑碎片"病危、肝癌、离婚"是合法意象并置，不是词表泄漏），按 Silvia 指令
-# 退回阈值，只保留"结尾分隔符更宽"这一半改动。
+# 退回阈值，只保留"结尾分隔符更宽"这一半改动；工单 D-4 补丁把绑定的主阈值
+# 从 3 提到 4，tail 跟着同步到 4（Silvia 2026-09-13 确认不重新拆开二者）。
 
 def test_is_prose_like_catches_trailing_word_list_with_wide_separator():
-    # 结尾用空格分隔的 3 个裸名词——中段窄分隔符正则（顿号/逗号/换行）切不开
-    # 整段会被当成一个长片段放行，结尾专项检测用更宽的分隔符（含空格）才能拆开抓到。
-    text = "我站在原地，风停了，四周很安静。铃铛 深瞳 影子"
+    # 结尾用空格分隔的 4 个裸名词（工单 D-4 补丁：阈值 3→4）——中段窄分隔符
+    # 正则（顿号/逗号/换行）切不开，整段会被当成一个长片段放行，结尾专项检测
+    # 用更宽的分隔符（含空格）才能拆开抓到。
+    text = "我站在原地，风停了，四周很安静。铃铛 深瞳 影子 门牌"
     assert _is_prose_like(text) is False
 
 
+def test_is_prose_like_accepts_trailing_three_item_run_below_new_threshold():
+    """工单 D-4 补丁回归：结尾 3 个连续裸名词（旧阈值 3 命中，是 K 那晚故障的
+    形态之一）在新阈值 4 下必须放行。"""
+    text = "我站在原地，风停了，四周很安静。铃铛 深瞳 影子"
+    assert _is_prose_like(text) is True
+
+
 def test_is_prose_like_tail_two_item_run_still_passes():
-    # D-3 v4.6 验收记录：结尾阈值退回到跟中段一致的 3 连，2 个连续裸名词收尾
+    # D-3 v4.6 验收记录：结尾阈值退回到跟中段一致，2 个连续裸名词收尾
     # 不该被拦（哪怕分隔符是宽口径的），否则会像 F 8-06 真实 kept 梦一样误杀
-    # 合法的焦虑碎片列举（"病危、肝癌"只有 2 项）。
+    # 合法的焦虑碎片列举（"病危、肝癌"只有 2 项）——工单 D-4 补丁只把绑定的
+    # 阈值从 3 提到 4，这条 2 项回归照旧必须通过。
     text = "我推开门，看见走廊很长。铃铛 深瞳"
     assert _is_prose_like(text) is True
 
@@ -2065,3 +2083,141 @@ def test_dream_engine_reads_env_overridden_model_and_temperature(monkeypatch, tm
 
     assert engine.model == "sonnet-via-env"
     assert engine.temperature == pytest.approx(1.1)
+
+
+# ============================================================
+# 工单 D-4 补丁：leak 闸英文分支改词级 n-gram（Rhys(en) 一晚 4 发全被字符级
+# 阈值 10 拦下，重合长度 10/11——常见短语本身就有这么长，字符级在英文下
+# 等于形同虚设的误杀器）。中文分支（_detect_source_leak_zh）不动，下面
+# test_detect_source_leak_finds_overlap 等既有中文用例继续覆盖。
+# ============================================================
+
+def test_detect_source_leak_en_word_level_finds_real_overlap(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    source_text = (
+        "the memory md file lives in the private github backup folder and "
+        "nowhere else, unrelated filler around it"
+    )
+    materials = [{"kind": "bucket", "id": "b1", "text": source_text}]
+    # 与 source 完全相同、连续 6 个词以上重合
+    leaked = "I dreamed that the memory md file lives in the private github backup and then I woke up."
+    leak_len = engine._detect_source_leak(leaked, materials)
+    assert leak_len >= engine.leak_ngram_word_en
+
+
+def test_detect_source_leak_en_no_false_positive_on_short_common_phrase(tmp_path, monkeypatch):
+    """复现 Rhys(en) 的真实误杀：一段跟 source 毫不相关的梦，只是碰巧共享了
+    一句很常见的英文短语（10-11 个字符，旧字符级阈值会拦；新词级阈值下，
+    重合的连续词数远小于 6，必须放行）。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "I spent the morning washing dishes and folding laundry."}]
+    unrelated = "The train pulled away in the morning light and I chased it down an empty platform."
+    leak_len = engine._detect_source_leak(unrelated, materials)
+    assert leak_len < engine.leak_ngram_word_en
+
+
+def test_detect_source_leak_en_is_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "She Said She Was Fine And Whole And Complete Today"}]
+    leaked = "i heard she said she was fine and whole and complete before i woke up"
+    leak_len = engine._detect_source_leak(leaked, materials)
+    assert leak_len >= engine.leak_ngram_word_en
+
+
+def test_detect_source_leak_en_ignores_short_materials(tmp_path, monkeypatch):
+    """真实系统里意象词是拆过的短语（几个词），不是完整桶原文——短到不够
+    leak_ngram_word_en 个词的 material 不该参与判定（跟中文分支同样的
+    "太短跳过"策略）。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "an old key"}]
+    raw = "I hold an old key and it will not turn in the lock."
+    leak_len = engine._detect_source_leak(raw, materials)
+    assert leak_len == 0
+
+
+def test_detect_source_leak_zh_path_unaffected_by_en_branch(tmp_path, monkeypatch):
+    """中文分支必须一字不动：同一段 leak 场景在中文语言下走字符级判定，
+    结果跟工单 D-4 补丁之前完全一致。"""
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    engine = make_engine(tmp_path)
+    source_text = "她说她心智健全，人格完整，记忆md明文，GitHub备份"
+    materials = [{"kind": "bucket", "id": "b1", "text": source_text}]
+    leaked = "我梦见她说她心智健全，人格完整，然后转身走了"
+    leak_len = engine._detect_source_leak(leaked, materials)
+    assert leak_len >= engine.leak_ngram
+
+
+@pytest.mark.asyncio
+async def test_validate_generation_leak_en_uses_word_threshold_and_logs_word_count(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    secret = "the memory md file lives in the private github backup folder forever hidden"
+    materials = [{"kind": "bucket", "id": "b1", "text": secret}]
+    leaked_output = "I dreamed that " + secret + " and then I woke up."
+
+    with caplog.at_level("WARNING"):
+        reason = engine._validate_generation(leaked_output, materials)
+
+    assert reason == "leak"
+    assert "泄漏拦截" in caplog.text
+    assert "重合词数" in caplog.text, "英文分支日志要打词数，不是字符长度"
+    assert secret not in caplog.text, "R4：日志只能记重合长度/词数，不能记重合内容本身"
+
+
+@pytest.mark.asyncio
+async def test_validate_generation_no_leak_en_short_phrase_passes_through_to_other_gates(tmp_path, monkeypatch):
+    """Rhys(en) 真实故障场景端到端复现：旧字符阈值会在这里误判 leak，新词级
+    阈值下应该顺利通过 leak 闸（继续走后面的 pov 闸，不因 leak 提前判废）。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    engine = make_engine(tmp_path)
+    materials = [{"kind": "bucket", "id": "b1", "text": "I spent the morning washing dishes and folding laundry."}]
+    raw = (
+        "The train pulled away in the morning light and I chased it down an "
+        "empty platform, my breath sharp, my hands empty, my voice gone."
+    )
+    reason = engine._validate_generation(raw, materials)
+    assert reason != "leak"
+
+
+def test_leak_ngram_word_en_config_override(tmp_path):
+    engine = make_engine(tmp_path, leak_ngram_word_en=4)
+    assert engine.leak_ngram_word_en == 4
+
+
+def test_leak_ngram_word_en_default_is_six(tmp_path):
+    engine = make_engine(tmp_path)
+    assert engine.leak_ngram_word_en == 6
+
+
+# ============================================================
+# 工单 D-4 补丁：四套 prompt（低档/高档 × zh/en）硬规则各加一句——
+# 不要连续并列三个以上名词，每个片段要有动作或状态，直接对应 word_list
+# 闸校准出的误杀根因（模型偶尔把素材词堆成裸名词串）。
+# ============================================================
+
+def test_low_tier_prompt_zh_includes_no_bare_noun_run_rule():
+    prompt = DreamEngine._low_tier_prompt_zh("daily", ["台灯", "钥匙"])
+    assert "不要连续并列三个以上名词" in prompt
+    assert "每个片段都要有动作或状态" in prompt
+
+
+def test_low_tier_prompt_en_includes_no_bare_noun_run_rule():
+    prompt = DreamEngine._low_tier_prompt_en("daily", ["lamp", "key"])
+    assert "don't string together more than three nouns in a row" in prompt
+    assert "every fragment needs a verb or a state" in prompt
+
+
+def test_high_tier_prompt_zh_includes_no_bare_noun_run_rule():
+    prompt = DreamEngine._high_tier_prompt_zh("daily", "她递来的信", ["台灯", "钥匙"])
+    assert "不要连续并列三个以上名词" in prompt
+    assert "每个片段都要有动作或状态" in prompt
+
+
+def test_high_tier_prompt_en_includes_no_bare_noun_run_rule():
+    prompt = DreamEngine._high_tier_prompt_en("daily", "the letter she handed me", ["lamp", "key"])
+    assert "don't string together more than three nouns in a row" in prompt
+    assert "every fragment needs a verb or a state" in prompt
