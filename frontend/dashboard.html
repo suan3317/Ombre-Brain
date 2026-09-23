@@ -2946,6 +2946,16 @@
             </div>
           </div>
         </div>
+
+        <!-- S-5: 断开全部连接器 → POST /oauth/revoke-all（一键作废全部 MCP OAuth access/refresh token）-->
+        <div id="mcp-revoke-all-panel" style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:9px;font-size:12px;line-height:1.8;">
+          <div style="font-weight:600;">断开全部连接器 <span class="sec-en">Disconnect all connectors</span></div>
+          <div style="margin-top:4px;color:var(--text-light);">立即作废所有已签发的 MCP OAuth 令牌（access + refresh），无需重启。所有已连接的客户端（claude.ai 网页版 / Claude Code 远程等）会立刻断开，需要重新授权一次。怀疑令牌泄露、或换设备清场时用。仅 OAuth 模式有效。</div>
+          <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" id="mcp-revoke-all-btn" onclick="revokeAllConnectors()" style="padding:0 12px;height:30px;font-size:12px;display:inline-flex;align-items:center;gap:4px;color:var(--negative);"><i data-lucide="unplug"></i> 断开全部连接器</button>
+            <span id="mcp-revoke-all-msg" style="font-size:11px;"></span>
+          </div>
+        </div>
       </div>
 
       <!-- 服务端口 -->
@@ -3161,6 +3171,11 @@
       <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">首次使用，请设置访问密码 / First time here — please set an access password</p>
       <input type="password" id="auth-setup-pwd" placeholder="设置密码（至少6位）/ Password (6+ chars)" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:10px;" />
       <input type="password" id="auth-setup-pwd2" placeholder="确认密码 / Confirm password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:12px;" onkeydown="if(event.key==='Enter')doSetup()" />
+      <!-- S-5: 非回环地址首次初始化需要一次性 bootstrap_secret（后端 /auth/setup 已支持）；本机访问时隐藏 -->
+      <div id="auth-setup-bootstrap-wrap" style="display:none;margin-bottom:12px;text-align:left;">
+        <input type="password" id="auth-setup-bootstrap" autocomplete="off" placeholder="bootstrap_secret（见服务启动日志）/ Bootstrap secret (see server startup log)" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;" onkeydown="if(event.key==='Enter')doSetup()" />
+        <div style="margin-top:6px;font-size:11px;color:var(--text-dim);line-height:1.6;">你不是从本机（127.0.0.1 / localhost）访问：首次初始化必须填服务启动日志里打印的一次性 bootstrap_secret。/ You are not on a loopback address: first-time setup requires the one-time bootstrap secret printed in the server startup log.</div>
+      </div>
       <details style="margin-bottom:16px;text-align:left;">
         <summary style="font-size:12px;color:var(--text-dim);cursor:pointer;user-select:none;">设置急救安全问题（可选，忘记密码时用）/ Set a security question (optional, for password recovery)</summary>
         <div style="margin-top:10px;">
@@ -3248,6 +3263,8 @@ async function checkAuth() {
     if (data.setup_needed) {
       document.getElementById('auth-subtitle').textContent = '首次设置 / First-time setup';
       document.getElementById('auth-setup-form').style.display = 'block';
+      const bsWrap = document.getElementById('auth-setup-bootstrap-wrap');
+      if (bsWrap) bsWrap.style.display = isLoopbackHost() ? 'none' : 'block';
       return false;
     } else if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
@@ -3301,13 +3318,29 @@ async function verifyDashboardSessionEstablished() {
   return true;
 }
 
+// S-5: 后端 /auth/setup 只对回环地址（127.0.0.1/::1）免验 bootstrap_secret。前端拿不到
+// 服务端看到的客户端 IP，用地址栏 host 近似判断是否本机；判错也不致命——doSetup 收到
+// 403 时会把输入框强制亮出来，用户仍能补填。
+function isLoopbackHost() {
+  const h = (location.hostname || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+}
+
 async function doSetup() {
   const p1 = document.getElementById('auth-setup-pwd').value;
   const p2 = document.getElementById('auth-setup-pwd2').value;
   if (p1.length < 6) return showAuthError('密码至少6位');
   if (p1 !== p2) return showAuthError('两次密码不一致');
-  const resp = await fetch('/auth/setup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: p1}) });
+  const bootstrap = (document.getElementById('auth-setup-bootstrap')?.value || '').trim();
+  const setupBody = { password: p1 };
+  if (bootstrap) setupBody.bootstrap_secret = bootstrap;
+  const resp = await fetch('/auth/setup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(setupBody) });
   if (!resp.ok) {
+    if (resp.status === 403) {
+      // 非回环且 secret 缺失/错误：无论 host 判断结果如何都把输入框亮出来
+      const w = document.getElementById('auth-setup-bootstrap-wrap');
+      if (w) w.style.display = 'block';
+    }
     return showAuthError(await readAuthFailure(resp, '设置失败'));
   }
   // 可选：同时保存安全问题
@@ -8055,6 +8088,39 @@ async function regenerateMcpToken() {
   } catch (e) {
     msg.style.color = 'var(--negative)';
     msg.textContent = '请求失败: ' + e.message;
+  }
+}
+
+// S-5: 一键撤销全部 MCP OAuth 令牌。后端 POST /oauth/revoke-all（P0-5 5-B）已存在：
+// 需 Dashboard 会话；非 OAuth 模式返回 404；成功返回 {ok:true, revoked:N}。
+async function revokeAllConnectors() {
+  const msg = document.getElementById('mcp-revoke-all-msg');
+  const btn = document.getElementById('mcp-revoke-all-btn');
+  if (!confirm('确定断开全部连接器？所有已授权的 MCP 客户端（含 claude.ai）会立刻失效，需要重新授权。')) return;
+  msg.style.color = 'var(--text-light)';
+  msg.textContent = '撤销中…';
+  if (btn) btn.disabled = true;
+  try {
+    const res = await authFetch('/oauth/revoke-all', { method: 'POST' });
+    if (!res) return;
+    if (res.status === 404) {
+      msg.style.color = 'var(--warning)';
+      msg.textContent = '当前 MCP 鉴权不是 OAuth 模式，没有可撤销的连接器令牌';
+      return;
+    }
+    const result = await readJsonSafe(res);
+    if (res.ok && result.ok) {
+      msg.style.color = 'var(--positive)';
+      msg.textContent = '已撤销 ' + (result.revoked || 0) + ' 个令牌；claude.ai 侧连接器需重新授权';
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = result.error_description || result.error || '撤销失败';
+    }
+  } catch (e) {
+    msg.style.color = 'var(--negative)';
+    msg.textContent = '请求失败: ' + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
