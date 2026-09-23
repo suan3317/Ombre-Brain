@@ -115,6 +115,10 @@ _BUCKET_SAMPLE_BONANZA_MAX = 6
 _IMAGERY_WORDS_MIN = 5
 _IMAGERY_WORDS_MAX = 8
 _IMAGERY_WORD_MAX_CHARS = 6
+# 工单 D-4 六期：英文意象词按词数判，不按字符——"a cold door handle" 是 4 个词
+# 18 个字符，按 _IMAGERY_WORD_MAX_CHARS*2 的字符闸会被整行误杀。prompt 目标
+# ≤3 词，代码层过滤放宽到 ×2（与中文 6 字目标 / 12 字过滤的容差比例一致）。
+_IMAGERY_WORD_MAX_WORDS_EN = 3
 _IMAGERY_EXTRACT_INPUT_LIMIT = 2000
 _IMAGERY_EXTRACT_MAX_TOKENS = 300
 _IMAGERY_EXTRACT_TEMPERATURE = 0.3   # 拆词是机械抽取，不需要 1.3 的疯
@@ -123,6 +127,27 @@ _NAMED_PHRASE_MAX_CHARS = 10         # extract prompt 给模型的目标上限�
 # 直接丢弃不硬凑——不再截断到 10 字，允许 10-12 字之间的干净短语原样通过。
 _NAMED_PHRASE_HARD_DISCARD_CHARS = 12
 _NAMED_PHRASE_FORBIDDEN_PUNCT_RE = re.compile(r"[。，,、；;！？!?]")
+# 工单 D-4 六期：英文具名短语同样按词数——prompt 目标 ≤6 词，代码层兜底 >8 词
+# 丢弃；英文句号 "." 在中文闸里不算句读，英文闸单独补上（撇号 ' 和连字符放行）。
+_NAMED_PHRASE_MAX_WORDS_EN = 6
+_NAMED_PHRASE_HARD_DISCARD_WORDS_EN = 8
+_NAMED_PHRASE_FORBIDDEN_PUNCT_EN_RE = re.compile(r"[.,;:!?。，、；！？]")
+# 工单 D-4 六期：英文正则退化方案用的功能词表（只用于剔除，不追求完备）。
+_EN_FALLBACK_CHUNK_MAX_WORDS = 3
+_EN_FALLBACK_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+_EN_FALLBACK_STOPWORDS = frozenset("""
+a an the and or but nor so yet for of to in on at by with from into onto over under
+about after before between through during without within along across against
+i me my mine myself you your yours yourself he him his himself she her hers herself
+it its itself we us our ours ourselves they them their theirs themselves
+this that these those there here who whom whose which what when where why how
+is am are was were be been being have has had having do does did doing done
+will would shall should can could may might must ought
+not no only just very too also then than as if because while until unless
+up down out off again once more most some any all each every both few many much
+own same other such s t ve re ll d m
+today tonight yesterday tomorrow
+""".split())
 
 # --- 混噪音 ---
 _NOISE_LOW_TIER_MIN = 1
@@ -136,6 +161,7 @@ _NOISE_PURE_TIER_MAX = 10
 _NOISE_GROWTH_COUNT = 30
 _NOISE_GROWTH_MAX_TOKENS = 600
 _NOISE_GROWTH_TEMPERATURE = 1.0
+_NOISE_GROWTH_MAX_WORDS_EN = 9   # 工单 D-4 六期：英文每条上限（对应中文 14 字）
 
 # --- 生成结果形状校验：发现过便宜小模型在高 temperature 下把打乱的意象词
 # 原样续写成清单（词表），而不是散文。这是生成失败的一种形式，同样按
@@ -519,6 +545,13 @@ def _validate_named_phrase(candidate: str) -> str:
     candidate = (candidate or "").strip()
     if not candidate:
         return ""
+    if _ombre_lang() == "en":
+        # 工单 D-4 六期：英文按词数兜底，12 字符的中文闸会把任何英文短语整条杀掉。
+        if len(candidate.split()) > _NAMED_PHRASE_HARD_DISCARD_WORDS_EN:
+            return ""
+        if _NAMED_PHRASE_FORBIDDEN_PUNCT_EN_RE.search(candidate):
+            return ""
+        return candidate
     if len(candidate) > _NAMED_PHRASE_HARD_DISCARD_CHARS:
         return ""
     if _NAMED_PHRASE_FORBIDDEN_PUNCT_RE.search(candidate):
@@ -975,7 +1008,9 @@ class DreamEngine:
         self._running = False
         self._tz = _tzinfo(self.timezone_name)
 
-        self._seed_imagery: list[str] | None = None  # 懒加载缓存
+        # 懒加载缓存，按语言分槽（工单 D-4 六期：zh/en 种子库是两个文件，
+        # 同一进程内 OMBRE_LANG 变化时不能串用）。
+        self._seed_imagery: dict[str, list[str]] = {}
 
         # D-1R 心跳：nightly_dream() 每次被调用（无论结果）即更新，供
         # GET /api/dream-book 暴露，用来区分"任务没跑"（长期不动）和
@@ -1011,12 +1046,18 @@ class DreamEngine:
         return os.path.join(self.buckets_dir, "darkroom")
 
     def _imagery_extra_path(self) -> str:
+        """运行时噪音增量库路径。工单 D-4 六期：按语言分文件——en 写
+        imagery_extra_en.json，zh 文件名与内容一字不动，两边互不污染。"""
         path = os.path.join(self.buckets_dir, "dream")
         os.makedirs(path, exist_ok=True)
-        return os.path.join(path, "imagery_extra.json")
+        name = "imagery_extra_en.json" if _ombre_lang() == "en" else "imagery_extra.json"
+        return os.path.join(path, name)
 
     def _seed_imagery_path(self) -> str:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "dream_data", "noise_imagery.json")
+        """噪音种子库路径。工单 D-4 六期：en 读 noise_imagery_en.json（anchors +
+        generated 同结构），zh 仍读 noise_imagery.json。"""
+        name = "noise_imagery_en.json" if _ombre_lang() == "en" else "noise_imagery.json"
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "dream_data", name)
 
     # ---------------------------------------------------------
     # §1.2 抽素材
@@ -1134,7 +1175,12 @@ class DreamEngine:
         return unique, named_phrases
 
     async def _extract_imagery_one(self, text: str, allow_named_phrase: bool) -> tuple[list[str], str]:
-        if allow_named_phrase:
+        lang_en = _ombre_lang() == "en"
+        if lang_en:
+            # 工单 D-4 六期：Rhys(en) 的梦正文夹大量中文词（夜归/发烧/布洛芬），
+            # 根因就是这里的拆词 prompt 仍是中文——模型照着 prompt 的语言吐词。
+            system = self._extract_imagery_system_en(allow_named_phrase)
+        elif allow_named_phrase:
             system = (
                 "从下面文本中提取两类内容：\n"
                 "1. 5-8 个意象词：具体名词、动作、感官描述（颜色/气味/触感/声音）。"
@@ -1170,14 +1216,56 @@ class DreamEngine:
                     if not named_phrase:
                         named_phrase = _validate_named_phrase(m.group(1))
                     continue
-            if len(ln) <= _IMAGERY_WORD_MAX_CHARS * 2:
+            if lang_en:
+                # 英文按词数过滤（见 _IMAGERY_WORD_MAX_WORDS_EN 注释），顺手去掉
+                # 模型偶尔带上的行尾句点/逗号。
+                ln = ln.rstrip(".,")
+                if ln and len(ln.split()) <= _IMAGERY_WORD_MAX_WORDS_EN * 2:
+                    words.append(ln)
+            elif len(ln) <= _IMAGERY_WORD_MAX_CHARS * 2:
                 words.append(ln)
         return words[:_IMAGERY_WORDS_MAX], named_phrase
 
     @staticmethod
+    def _extract_imagery_system_en(allow_named_phrase: bool) -> str:
+        """工单 D-4 六期：拆意象 system prompt 英文版，结构与中文版一一对应
+        （具名短语一条/暗房不提具名短语），数值口径改为词数。"""
+        if allow_named_phrase:
+            return (
+                "Extract two kinds of content from the text below:\n"
+                f"1. {_IMAGERY_WORDS_MIN}-{_IMAGERY_WORDS_MAX} imagery words: concrete nouns, "
+                "actions, sensory details (color / smell / touch / sound). No abstract words, "
+                f"no full sentences. One per line, each at most {_IMAGERY_WORD_MAX_WORDS_EN} words.\n"
+                "2. At most 1 named phrase (optional; leave it out if there is none): a noun "
+                "phrase that contains a person's name, a form of address, a proper noun or a "
+                "private name. It may carry one verb, but it must never be a full sentence and "
+                "must not contain any punctuation (no period, comma, semicolon). At most "
+                f"{_NAMED_PHRASE_MAX_WORDS_EN} words, e.g. \"the work order she handed me\" or "
+                "\"the darkroom negative\". Do not force this line if the text has no proper name.\n"
+                "Output the imagery words one per line as usual; put the named phrase on its own "
+                "separate line prefixed with \"NAMED: \", at most one such line.\n"
+                "Answer in English only."
+            )
+        # 暗房底片：只要意象词，prompt 里完全不提具名短语（返修单 v3 改动二，同中文）。
+        return (
+            f"From the text below, extract only {_IMAGERY_WORDS_MIN}-{_IMAGERY_WORDS_MAX} imagery "
+            "words: concrete nouns, actions, sensory details (color / smell / touch / sound). "
+            "No abstract words, no full sentences. One per line, each at most "
+            f"{_IMAGERY_WORD_MAX_WORDS_EN} words.\n"
+            "Answer in English only."
+        )
+
+    @staticmethod
     def _extract_imagery_fallback(text: str) -> list[str]:
-        """拆词 API 彻底失败时的正则退化方案：抽 2-6 字连续汉字片段当名词性短语用。"""
-        chunks = re.findall(r"[一-鿿]{2,6}", text)
+        """拆词 API 彻底失败时的正则退化方案。zh：抽 2-6 字连续汉字片段当名词性
+        短语用。en（工单 D-4 六期）：抽 1-3 词的名词性片段。两条路径互为兜底：
+        当前语言抽不到（比如 en 模式下桶正文全是中文）就换另一条再试，不许空手。"""
+        primary, secondary = (
+            (DreamEngine._fallback_chunks_en, DreamEngine._fallback_chunks_zh)
+            if _ombre_lang() == "en"
+            else (DreamEngine._fallback_chunks_zh, DreamEngine._fallback_chunks_en)
+        )
+        chunks = primary(text) or secondary(text)
         random.shuffle(chunks)
         seen = set()
         out = []
@@ -1189,20 +1277,58 @@ class DreamEngine:
                 break
         return out
 
+    @staticmethod
+    def _fallback_chunks_zh(text: str) -> list[str]:
+        return re.findall(r"[一-鿿]{2,6}", text)
+
+    @staticmethod
+    def _fallback_chunks_en(text: str) -> list[str]:
+        """英文退化抽取：按词切分、剔除功能词（冠词/代词/介词/助动词/连词），
+        剩下的实词按原文相邻关系连成片段，再切成 1-3 词的小块——相邻实词
+        大概率是名词短语（"cold door handle"），不做词性标注也能拿到可用素材。
+        全部是功能词时退而求其次，任何 ≥3 字母的词都收，保证不空手。"""
+        tokens = [t.lower() for t in _EN_FALLBACK_TOKEN_RE.findall(text)]
+        if not tokens:
+            return []
+        runs: list[list[str]] = []
+        cur: list[str] = []
+        for tok in tokens:
+            if tok in _EN_FALLBACK_STOPWORDS or len(tok) < 2:
+                if cur:
+                    runs.append(cur)
+                    cur = []
+                continue
+            cur.append(tok)
+        if cur:
+            runs.append(cur)
+        chunks: list[str] = []
+        for run in runs:
+            i = 0
+            while i < len(run):
+                size = random.randint(1, _EN_FALLBACK_CHUNK_MAX_WORDS)
+                chunks.append(" ".join(run[i:i + size]))
+                i += size
+        if chunks:
+            return chunks
+        return [t for t in tokens if len(t) >= 3]
+
     # ---------------------------------------------------------
     # §1.4 混噪音
     # ---------------------------------------------------------
     def _load_seed_imagery(self) -> list[str]:
-        if self._seed_imagery is not None:
-            return self._seed_imagery
+        lang = _ombre_lang()
+        cached = self._seed_imagery.get(lang)
+        if cached is not None:
+            return cached
         try:
             with open(self._seed_imagery_path(), "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._seed_imagery = list(data.get("anchors", [])) + list(data.get("generated", []))
+            seeds = list(data.get("anchors", [])) + list(data.get("generated", []))
         except Exception as e:
             logger.warning(f"dream: 读噪音种子库失败: {e}")
-            self._seed_imagery = []
-        return self._seed_imagery
+            seeds = []
+        self._seed_imagery[lang] = seeds
+        return seeds
 
     def _load_extra_imagery(self) -> list[str]:
         path = self._imagery_extra_path()
@@ -1261,14 +1387,28 @@ class DreamEngine:
         if last_month == month_key:
             return  # 本月已经长过了
 
-        system = (
-            "生成 30 条零上下文的梦境噪音意象，每条一行，不超过 14 个字，"
-            "只写一个具体名词/场景 + 一处不对劲。禁止抽象词（时间/命运/孤独/永恒/记忆/灵魂），"
-            "禁止'像/仿佛/宛如'，禁止诗歌腔，禁止恐怖片俗套（血/鬼/尸），不要编号，不要解释。"
-        )
+        if _ombre_lang() == "en":
+            # 工单 D-4 六期：增量库按语言分文件，prompt 也分语言，否则英文实例
+            # 每月往 en 增量库里长 30 条中文。
+            system = (
+                f"Generate {_NOISE_GROWTH_COUNT} zero-context dream noise images, one per line, "
+                f"each at most {_NOISE_GROWTH_MAX_WORDS_EN} words. Each line is one concrete noun or "
+                "scene plus one thing that is wrong with it, nothing more. No abstract words "
+                "(time / fate / loneliness / eternity / memory / soul), no similes (like / as if / "
+                "as though), no poetic register, no horror clichés (blood / ghost / corpse), "
+                "no numbering, no explanations."
+            )
+            user_msg = f"Generate {_NOISE_GROWTH_COUNT}."
+        else:
+            system = (
+                "生成 30 条零上下文的梦境噪音意象，每条一行，不超过 14 个字，"
+                "只写一个具体名词/场景 + 一处不对劲。禁止抽象词（时间/命运/孤独/永恒/记忆/灵魂），"
+                "禁止'像/仿佛/宛如'，禁止诗歌腔，禁止恐怖片俗套（血/鬼/尸），不要编号，不要解释。"
+            )
+            user_msg = "生成30条"
         try:
             raw = await self.dehydrator.raw_chat(
-                system, "生成30条",
+                system, user_msg,
                 max_tokens=_NOISE_GROWTH_MAX_TOKENS,
                 temperature=_NOISE_GROWTH_TEMPERATURE,
                 model=self.model,

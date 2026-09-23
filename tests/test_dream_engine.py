@@ -9,6 +9,7 @@
 """
 import os
 import re
+import json
 import random
 import datetime as dt
 from pathlib import Path
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import dream_engine as dream_engine_module  # noqa: E402
 from dream_engine import (  # noqa: E402
     DreamEngine, _EMOTION_RESIDUE_POOL, _DEFAULT_TONE_WEIGHTS, _is_prose_like,
-    _WRITE_REQUEST,
+    _WRITE_REQUEST, _IMAGERY_WORDS_MIN,
     dream_book_dir, dream_book_path, dream_book_id, list_dream_book_entries,
     dream_book_keep, dream_book_delete, burn_expired_dreams,
 )
@@ -49,6 +50,9 @@ def _freeze_dream_engine_clock(monkeypatch):
 
 _IMAGERY_SYSTEM_MARKER = "提取两类内容"
 _GROWTH_SYSTEM_MARKER = "梦境噪音意象"
+# 工单 D-4 六期：en 下拆意象/月度自增 prompt 全英文，假 dehydrator 按英文标记分流
+_IMAGERY_SYSTEM_MARKER_EN = "imagery words"
+_GROWTH_SYSTEM_MARKER_EN = "dream noise images"
 
 # 一句干净的、第一人称、没有因果连接词、没有收尾点题的梦境文本，供各测试复用
 _CLEAN_DREAM_TEXT = (
@@ -95,6 +99,11 @@ def make_fake_dehydrator(dream_text=_CLEAN_DREAM_TEXT, raise_on_generate=False, 
             return f"台灯\n钥匙\n楼梯\n手表\n雨声{named_line}"
         if _GROWTH_SYSTEM_MARKER in system:
             return "\n".join(f"噪音意象{i}" for i in range(30))
+        if _IMAGERY_SYSTEM_MARKER_EN in system:
+            named_line = "\nNAMED: the letter she handed me" if named_phrase else ""
+            return f"desk lamp\nkeys\nstaircase\nwristwatch\nrain on glass{named_line}"
+        if _GROWTH_SYSTEM_MARKER_EN in system:
+            return "\n".join(f"noise image {i}" for i in range(30))
         if raise_on_generate:
             raise RuntimeError("模拟生成失败")
         return dream_text
@@ -2221,3 +2230,253 @@ def test_high_tier_prompt_en_includes_no_bare_noun_run_rule():
     prompt = DreamEngine._high_tier_prompt_en("daily", "the letter she handed me", ["lamp", "key"])
     assert "don't string together more than three nouns in a row" in prompt
     assert "every fragment needs a verb or a state" in prompt
+
+
+# ============================================================
+# 工单 D-4 六期：梦的材料英文化——拆意象 prompt / 正则退化 / 噪音池按语言分家
+# ============================================================
+
+def _make_dump_dehydrator(reply: str):
+    """记录每次 raw_chat 的 system，并固定返回 reply。"""
+    calls = []
+
+    async def dump_raw_chat(system, user, *, max_tokens=None, temperature=None, model=None):
+        calls.append({"system": system, "user": user})
+        return reply
+
+    class DumpDehydrator:
+        api_available = True
+        raw_chat = staticmethod(dump_raw_chat)
+
+    fd = DumpDehydrator()
+    fd.calls = calls  # type: ignore[attr-defined]
+    return fd
+
+
+@pytest.mark.asyncio
+async def test_d4_6_en_extract_prompt_has_no_chinese_for_bucket_and_darkroom(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _make_dump_dehydrator("desk lamp\nkeys\nNAMED: the letter she handed me")
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    materials = [
+        {"kind": "bucket", "id": "b1", "text": "Came home late with a fever."},
+        {"kind": "darkroom", "id": "d1", "text": "A negative I never developed."},
+    ]
+    await engine.extract_imagery(materials)
+
+    assert len(dehy.calls) == 2
+    bucket_system, darkroom_system = dehy.calls[0]["system"], dehy.calls[1]["system"]
+    for system in (bucket_system, darkroom_system):
+        assert not _CJK_RE.search(system), system
+    assert "NAMED" in bucket_system
+    assert "NAMED" not in darkroom_system, "暗房 prompt 不得提具名短语（同中文路径）"
+    assert "at most 3 words" in bucket_system
+    assert "At most 6 words" in bucket_system
+
+
+@pytest.mark.asyncio
+async def test_d4_6_en_extract_filters_by_word_count_not_chars(tmp_path, monkeypatch):
+    """英文行按词数过滤：'a cold door handle' 18 个字符按旧的 12 字符闸会被误杀。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    reply = "\n".join([
+        "a cold door handle",                       # 4 词 18 字符：必须保留
+        "rain.",                                    # 行尾句点去掉
+        "the long corridor that keeps going on and on forever",  # 10 词：丢弃
+        "NAMED: the letter she handed me",
+    ])
+    engine = make_engine(tmp_path, dehydrator=_make_dump_dehydrator(reply))
+    words, named = await engine.extract_imagery([{"kind": "bucket", "id": "b1", "text": "x y z"}])
+
+    assert set(words) == {"a cold door handle", "rain"}
+    assert named == ["the letter she handed me"]
+
+
+@pytest.mark.parametrize("candidate, expected", [
+    ("the letter she handed me", "the letter she handed me"),
+    ("the darkroom negative", "the darkroom negative"),
+    ("She handed me the letter.", ""),                        # 英文句号在 en 闸里算句读
+    ("the very long phrase that runs on past eight words", ""),  # >8 词丢弃
+    ("Rhys's late-night walk", "Rhys's late-night walk"),    # 撇号/连字符放行
+])
+def test_d4_6_en_named_phrase_validator_uses_word_count(monkeypatch, candidate, expected):
+    from dream_engine import _validate_named_phrase
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    assert _validate_named_phrase(candidate) == expected
+
+
+@pytest.mark.asyncio
+async def test_d4_6_zh_extract_prompt_and_char_filter_unchanged(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    reply = "台灯\n这是一个超过十二个字的很长很长的句子行\nNAMED: 她递来的信"
+    dehy = _make_dump_dehydrator(reply)
+    engine = make_engine(tmp_path, dehydrator=dehy)
+    words, named = await engine.extract_imagery([{"kind": "bucket", "id": "b1", "text": "楼下的猫"}])
+
+    assert _IMAGERY_SYSTEM_MARKER in dehy.calls[0]["system"]
+    assert "不超过 6 个字" in dehy.calls[0]["system"]
+    assert "Answer in English" not in dehy.calls[0]["system"], "zh prompt 不得混入英文版"
+    assert words == ["台灯"]
+    assert named == ["她递来的信"]
+
+
+def test_d4_6_fallback_en_input_yields_english_chunks(monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = ("Came home late tonight with a fever and took an ibuprofen tablet. "
+            "The pork from Shaanxi was still on the counter next to my transit pass.")
+    out = DreamEngine._extract_imagery_fallback(text)
+
+    assert out, "英文退化方案不许空手"
+    assert len(out) == _IMAGERY_WORDS_MIN
+    for chunk in out:
+        assert not _CJK_RE.search(chunk)
+        assert 1 <= len(chunk.split()) <= 3, chunk
+        assert chunk == chunk.lower()
+    for chunk in out:
+        assert chunk.split()[0] not in {"the", "a", "an", "with", "and", "my"}, chunk
+
+
+def test_d4_6_fallback_en_all_stopwords_still_not_empty(monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    out = DreamEngine._extract_imagery_fallback("and then it was the same again")
+    assert out, "全是功能词也要退而求其次收 ≥3 字母的词，不许空手"
+    assert all(not _CJK_RE.search(c) for c in out)
+
+
+def test_d4_6_fallback_en_mode_with_chinese_only_text_falls_through_to_zh(monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    out = DreamEngine._extract_imagery_fallback("楼下的猫又跑到窗台上晒太阳了")
+    assert out, "en 模式下正文全中文时换 zh 路径兜底，不许空手"
+
+
+def test_d4_6_fallback_zh_unchanged(monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    out = DreamEngine._extract_imagery_fallback("楼下的猫又跑到窗台上晒太阳了今天很暖和")
+    assert out
+    assert all(re.fullmatch(r"[一-鿿]{2,6}", c) for c in out)
+
+
+def test_d4_6_noise_pool_en_loads_english_seed_file_zh_untouched(tmp_path, monkeypatch):
+    engine = make_engine(tmp_path)
+
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    assert engine._seed_imagery_path().endswith("noise_imagery_en.json")
+    assert os.path.basename(engine._imagery_extra_path()) == "imagery_extra_en.json"
+    en_pool = engine._noise_pool()
+    assert len(en_pool) >= 60
+    assert all(not _CJK_RE.search(x) for x in en_pool)
+    assert "a door that opens downward" in en_pool
+
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    assert engine._seed_imagery_path().endswith(os.sep + "noise_imagery.json")
+    assert os.path.basename(engine._imagery_extra_path()) == "imagery_extra.json"
+    zh_pool = engine._noise_pool()
+    assert "一扇往下开的门" in zh_pool, "zh 种子库文件名与内容不动"
+    assert all(_CJK_RE.search(x) for x in zh_pool)
+    # 同一 engine 实例内两套缓存互不串用
+    assert not set(en_pool) & set(zh_pool)
+
+
+def test_d4_6_en_seed_file_shape_mirrors_zh():
+    seed_dir = os.path.join(os.path.dirname(dream_engine_module.__file__), "dream_data")
+    with open(os.path.join(seed_dir, "noise_imagery_en.json"), encoding="utf-8") as f:
+        en = json.load(f)
+    with open(os.path.join(seed_dir, "noise_imagery.json"), encoding="utf-8") as f:
+        zh = json.load(f)
+    assert set(en) == set(zh) == {"_comment", "anchors", "generated"}
+    assert len(en["anchors"]) + len(en["generated"]) == 60
+    lines = en["anchors"] + en["generated"]
+    assert len(set(lines)) == len(lines), "英文种子库不得有重复条"
+    for line in lines:
+        assert not _CJK_RE.search(line), line
+        assert 1 <= len(line.split()) <= 9, line
+        assert not re.search(r"\b(like|as if|as though)\b", line), line
+        assert not re.search(r"\b(blood|ghost|corpse)\b", line), line
+
+
+@pytest.mark.asyncio
+async def test_d4_6_growth_en_prompt_english_and_writes_en_file_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    dehy = _make_dump_dehydrator("\n".join(f"{i+1}. a chair with {i} legs" for i in range(30)))
+    engine = make_engine(tmp_path, dehydrator=dehy)
+
+    await engine.maybe_grow_noise_library(dt.date(2026, 10, 1))
+
+    assert len(dehy.calls) == 1
+    assert not _CJK_RE.search(dehy.calls[0]["system"])
+    assert not _CJK_RE.search(dehy.calls[0]["user"])
+    en_path = os.path.join(str(tmp_path), "dream", "imagery_extra_en.json")
+    zh_path = os.path.join(str(tmp_path), "dream", "imagery_extra.json")
+    assert os.path.isfile(en_path)
+    assert not os.path.exists(zh_path), "en 自增不得碰 zh 增量库文件"
+    with open(en_path, encoding="utf-8") as f:
+        data = json.load(f)
+    assert data["last_grown_month"] == "2026-10"
+    assert len(data["items"]) == 30
+    assert data["items"][0] == "a chair with 0 legs", "编号前缀要剥掉"
+    assert all(x in engine._noise_pool() for x in data["items"])
+
+
+@pytest.mark.asyncio
+async def test_d4_6_growth_zh_prompt_and_file_unchanged(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMBRE_LANG", raising=False)
+    dehy = _make_dump_dehydrator("\n".join(f"噪音意象{i}" for i in range(30)))
+    engine = make_engine(tmp_path, dehydrator=dehy)
+
+    await engine.maybe_grow_noise_library(dt.date(2026, 10, 1))
+
+    assert _GROWTH_SYSTEM_MARKER in dehy.calls[0]["system"]
+    assert dehy.calls[0]["user"] == "生成30条"
+    assert os.path.isfile(os.path.join(str(tmp_path), "dream", "imagery_extra.json"))
+    assert not os.path.exists(os.path.join(str(tmp_path), "dream", "imagery_extra_en.json"))
+
+
+@pytest.mark.asyncio
+async def test_d4_6_end_to_end_english_bucket_material_words_have_no_chinese(tmp_path, monkeypatch):
+    """目标验收：OMBRE_LANG=en + 一条英文桶，走完整管线，喂给生成步的
+    material_words（记忆意象 + 噪音）里不得出现任何汉字——这正是 Rhys 梦里
+    夹"夜归/发烧/布洛芬"的那条通路。"""
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    english_dream = (
+        "I walk down a hallway that keeps stretching. My hand finds a cold "
+        "door handle. I push it open and the room behind it is my old "
+        "kitchen, except the light is wrong. I hear someone call my name "
+        "from somewhere I can't place, and my feet keep moving anyway."
+    )
+    dehy = make_fake_dehydrator(dream_text=english_dream)
+    cfg = {
+        "buckets_dir": str(tmp_path),
+        "dream": {"enabled": True, "dream_prob": 1.0,
+                  "memory_levels": [1.0, 0.0, 0.0, 0.0], "cut_prob": 0.0},
+    }
+    bucket_mgr = FakeBucketMgr([{
+        "id": "b_en",
+        "content": "Came home late tonight with a fever and took an ibuprofen tablet before bed.",
+        "metadata": {"resolved": True},
+    }])
+    engine = DreamEngine(cfg, bucket_mgr, dehy)
+
+    captured: dict = {}
+    original_generate = engine.generate_dream
+
+    async def spy_generate(material_words, named_phrases, tone, level):
+        captured["material_words"] = list(material_words)
+        captured["named_phrases"] = list(named_phrases)
+        return await original_generate(material_words, named_phrases, tone, level)
+
+    monkeypatch.setattr(engine, "generate_dream", spy_generate)
+
+    result = await engine.nightly_dream()
+
+    assert result["dreamed"] is True
+    assert captured["material_words"], "生成步必须拿到素材"
+    for w in captured["material_words"]:
+        assert not _CJK_RE.search(w), f"material_words 混入汉字: {w!r}"
+    for p in captured["named_phrases"]:
+        assert not _CJK_RE.search(p), f"named_phrases 混入汉字: {p!r}"
+    # 生成 system prompt 是 material_words 的最终去向，一并核对
+    gen_calls = [c for c in dehy.calls if c["user"] == "Write this dream."]
+    assert gen_calls
+    assert not _CJK_RE.search(gen_calls[0]["system"])
+    post = fm.load(result["path"])
+    assert not _CJK_RE.search(str(post.content))
+
