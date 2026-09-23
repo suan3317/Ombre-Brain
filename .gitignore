@@ -66,3 +66,6 @@ frontend/dashboard-preview.html
 # so its generated Cargo.lock is not a release lockfile.
 kernel/rust/**/target/
 kernel/rust/ombre-kernel/Cargo.lock
+
+# 归档链 dry-run 对比脚本与本地报告（工单 归档链dryrun对比_20260809），按工单要求不合入主干
+scripts/
