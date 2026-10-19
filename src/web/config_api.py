@@ -56,6 +56,19 @@ logger = sh.logger
 _MAX_PROVIDER_KEY_CHARS = 8192
 _MAX_PROVIDER_URL_CHARS = 2048
 _MAX_PROVIDER_FORMAT_CHARS = 64
+
+# /api/models 的 sentinel → 对应 sh.config 分区（小单 S-6）
+_USE_CURRENT_SENTINELS = {
+    "__use_current__": "dehydration",
+    "__use_current_embed__": "embedding",
+}
+
+
+def _norm_provider_url(url: str) -> str:
+    """比较 base_url 用：去空白、去尾部斜杠。"""
+    return str(url or "").strip().rstrip("/")
+
+
 _MAX_ENV_VALUE_CHARS = 8192
 
 
@@ -337,6 +350,12 @@ def register(mcp) -> None:
             dehy = sh.config.setdefault("dehydration", {})
             for key in ("model", "base_url", "max_tokens", "temperature", "api_format", "timeout_seconds"):
                 if key in d:
+                    if key == "base_url" and str(dehy.get("base_url", "") or "") != str(d[key] or ""):
+                        # S-6：base_url 变更后再点「测试」会把服务器 key 送到新地址，留痕
+                        logger.warning(
+                            "[config] dehydration.base_url changed: %s -> %s",
+                            dehy.get("base_url", "") or "(empty)", d[key] or "(empty)",
+                        )
                     dehy[key] = d[key]
                     updated.append(f"dehydration.{key}")
             if "api_key" in d and d["api_key"]:
@@ -772,18 +791,24 @@ def register(mcp) -> None:
         ):
             return JSONResponse({"ok": False, "error": "provider configuration is too large"}, status_code=400)
 
-        # Sentinel "__use_current__": use server-side key from dehydration config
-        if api_key == "__use_current__":
-            api_key = sh.config.get("dehydration", {}).get("api_key", "")
-            if not base_url:
-                base_url = sh.config.get("dehydration", {}).get("base_url", "")
-            if not api_format or api_format == "openai_compat":
-                api_format = sh.config.get("dehydration", {}).get("api_format", "openai_compat")
-        # Sentinel "__use_current_embed__": use server-side key from embedding config
-        if api_key == "__use_current_embed__":
-            api_key = sh.config.get("embedding", {}).get("api_key", "")
-            if not base_url:
-                base_url = sh.config.get("embedding", {}).get("base_url", "")
+        # Sentinel "__use_current__" / "__use_current_embed__"：用服务器端已保存的 key。
+        # 小单 S-6：走 sentinel 时 base_url / api_format 一律取配置、忽略请求体——
+        # 否则登上 dashboard 就能让服务器把 Bearer <真key> 发到任意外部地址。
+        # 请求体带了与配置不同的 base_url → 400（必须先保存 base_url，或自填 key）。
+        if api_key in _USE_CURRENT_SENTINELS:
+            section = _USE_CURRENT_SENTINELS[api_key]
+            cfg = sh.config.get(section, {}) or {}
+            cfg_base_url = str(cfg.get("base_url", "") or "").strip()
+            if base_url and _norm_provider_url(base_url) != _norm_provider_url(cfg_base_url):
+                return JSONResponse(
+                    {"ok": False, "error": "使用服务器 key 时不接受自定义 base_url：请先「保存」base_url，或在输入框填入自己的 API Key"},
+                    status_code=400,
+                )
+            api_key = str(cfg.get("api_key", "") or "")
+            base_url = cfg_base_url
+            api_format = str(cfg.get("api_format", "") or "openai_compat").strip().lower()
+            if section == "embedding" and api_format == "gemini":
+                api_format = "gemini_embed"  # embedding 配置里的 gemini → 列 embedContent 模型
 
         if not api_key:
             return JSONResponse({"ok": False, "error": "需要 api_key（请先保存 API Key 或在输入框填入）"}, status_code=400)
@@ -943,6 +968,7 @@ def register(mcp) -> None:
 
         written: list[str] = []
         errors: list[str] = []
+        base_url_changed: list[str] = []  # S-6：本次改了哪些 *_BASE_URL
 
         for var, val in updates.items():
             if var not in _ENV_CONFIG_FIELDS:
@@ -970,6 +996,16 @@ def register(mcp) -> None:
             meta = _ENV_CONFIG_FIELDS[var]
             if meta["in_memory"]:
                 section, key = meta["in_memory"]
+                if key == "base_url":
+                    # S-6：改 base_url 与「测试连接」是两步，改完再测同样会把服务器 key
+                    # 送到新地址。行为不拦，但必须 WARNING 留痕（URL 不是秘密，不脱敏）。
+                    _old_url = str((sh.config.get(section) or {}).get("base_url", "") or "")
+                    if _old_url != value:
+                        logger.warning(
+                            "[env-config] %s base_url changed: %s -> %s",
+                            var, _old_url or "(empty)", value or "(empty)",
+                        )
+                        base_url_changed.append(var)
                 sh.config.setdefault(section, {})[key] = value
 
             # 2. 更新 os.environ
@@ -1052,6 +1088,8 @@ def register(mcp) -> None:
             "env_file": sh._project_env_path(),
             "note": "已同时更新进程内 sh.config 和 config.yaml 文件。敏感字段（API key）重启后仍有效。",
         }
+        if base_url_changed:
+            response["base_url_changed"] = base_url_changed
         if errors:
             response["warnings"] = errors
         return JSONResponse(response)

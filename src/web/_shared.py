@@ -690,6 +690,12 @@ def _create_session() -> str:
     return token
 
 
+def _active_session_count() -> int:
+    """未过期的 dashboard 会话数（S-6：供 /auth/status 与登录日志显示）。"""
+    now = time.time()
+    return sum(1 for exp in _sessions.values() if exp > now)
+
+
 def _is_authenticated(request: Request) -> bool:
     token = request.cookies.get("ombre_session")
     if not token:

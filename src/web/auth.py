@@ -131,10 +131,15 @@ def register(mcp) -> None:
     async def auth_status(request: Request) -> Response:
         """Return auth state (authenticated, setup_needed)."""
         from starlette.responses import JSONResponse
-        return JSONResponse({
-            "authenticated": sh._is_authenticated(request),
+        authed = sh._is_authenticated(request)
+        payload: dict = {
+            "authenticated": authed,
             "setup_needed": sh._is_setup_needed(),
-        })
+        }
+        if authed:
+            # S-6：让她一眼看到不止一个人登着。只对已登录者返回。
+            payload["active_sessions"] = sh._active_session_count()
+        return JSONResponse(payload)
 
     @mcp.custom_route("/auth/setup", methods=["POST"])
     async def auth_setup_endpoint(request: Request) -> Response:
@@ -210,6 +215,11 @@ def register(mcp) -> None:
         if sh._verify_any_password(password):
             sh._record_login_success(request)
             token = sh._create_session()
+            # S-6：失败早有日志，成功也留痕（带限流用的 client key）
+            sh.logger.info(
+                f"[auth] login success: client {sh._client_key(request)}, "
+                f"active sessions {sh._active_session_count()}"
+            )
             resp = JSONResponse({"ok": True})
             sh._set_session_cookie(resp, token, request)
             return resp

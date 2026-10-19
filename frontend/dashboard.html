@@ -2371,6 +2371,10 @@
         <div id="settings-env-notice" style="display:none;font-size:12px;color:var(--warning);margin-bottom:8px;">
           <svg class="icon icon-warn" aria-hidden="true"><use href="#i-warn"></use></svg> 当前使用环境变量 OMBRE_DASHBOARD_PASSWORD，请直接修改环境变量。
         </div>
+        <div id="settings-session-info" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
+          当前活跃会话 / Active sessions：<b id="settings-session-count">—</b>
+          <span style="opacity:.8;">（含本次登录；比你自己登着的设备多 → 立刻改密码，旧会话会全部失效）</span>
+        </div>
         <div id="settings-pwd-form">
           <div class="config-row"><label>当前密码</label><input type="password" id="settings-current-pwd" placeholder="当前密码" /></div>
           <div class="config-row"><label>新密码</label><input type="password" id="settings-new-pwd" placeholder="新密码（至少6位）" /></div>
@@ -3268,6 +3272,7 @@ async function checkAuth() {
       return false;
     } else if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
+      applySessionCount(data);
       return true;
     } else {
       document.getElementById('auth-subtitle').textContent = '请输入访问密码 / Enter access password';
@@ -3278,6 +3283,14 @@ async function checkAuth() {
     document.getElementById('auth-overlay').style.display = 'none';
     return true;
   }
+}
+
+// S-6：/auth/status 登录态下带 active_sessions，显示在设置页密码块
+function applySessionCount(data) {
+  var el = document.getElementById('settings-session-count');
+  if (!el || !data || typeof data.active_sessions !== 'number') return;
+  el.textContent = String(data.active_sessions);
+  el.style.color = data.active_sessions > 1 ? 'var(--warning)' : '';
 }
 
 function showAuthError(msg) {
@@ -3306,6 +3319,7 @@ async function verifyDashboardSessionEstablished() {
     if (resp.ok) {
       const data = await resp.json();
       sessionReady = data.authenticated === true;
+      applySessionCount(data);
     }
   } catch (_) { /* 统一在下方显示可操作的会话错误 */ }
   if (!sessionReady) {
@@ -6976,7 +6990,7 @@ async function saveEnvConfig() {
     if (!r) return;
     var d = await readJsonSafe(r);
     if (d && d.ok) {
-      statusEl.innerHTML = '<span style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 已保存：' + esc((d.updated || []).join(', ')) + (d.warnings && d.warnings.length ? '<br><span style="color:var(--negative)">' + esc(d.warnings.join('; ')) + '</span>' : '') + '</span>';
+      statusEl.innerHTML = '<span style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 已保存：' + esc((d.updated || []).join(', ')) + '</span>' + envBaseUrlChangedNote(d) + (d.warnings && d.warnings.length ? '<br><span style="color:var(--negative)">' + esc(d.warnings.join('; ')) + '</span>' : '');
       refreshEnvConfig();  // 刷新显示新的脱敏值
     } else {
       statusEl.innerHTML = '<span style="color:var(--negative)">保存失败：' + esc(d && d.error ? d.error : '未知错误') + '</span>';
@@ -6984,6 +6998,12 @@ async function saveEnvConfig() {
   } catch (e) {
     statusEl.innerHTML = '<span style="color:var(--negative)">请求失败：' + esc(e.message) + '</span>';
   }
+}
+
+// S-6：后端 /api/env-config 返回 base_url_changed 时在保存提示里明示（改完再点测试会把服务器 key 送到新地址）
+function envBaseUrlChangedNote(d) {
+  if (!d || !d.base_url_changed || !d.base_url_changed.length) return '';
+  return '<br><span style="color:var(--warning)">已变更 base_url：' + esc(d.base_url_changed.join(', ')) + '</span>';
 }
 
 async function _saveEnvKeys(updates, msgElId) {
@@ -6998,7 +7018,7 @@ async function _saveEnvKeys(updates, msgElId) {
     if (!r) return;
     var d = await readJsonSafe(r);
     if (d && d.ok) {
-      if (msgEl) msgEl.innerHTML = '<span style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 已保存</span>';
+      if (msgEl) msgEl.innerHTML = '<span style="color:var(--positive,#7EAD68)">' + _SV.ok + ' 已保存</span>' + envBaseUrlChangedNote(d);
       refreshEnvConfig();
       refreshEmbInfo();
     } else {
