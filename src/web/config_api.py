@@ -699,20 +699,48 @@ def register(mcp) -> None:
         # Use current runtime config (api_key may have been updated in-memory)
         dehyd = sh.config.get("dehydration", {})
         model = dehyd.get("model", "")
-        base_url = dehyd.get("base_url", "")
+        base_url = str(dehyd.get("base_url", "") or "")
         api_key = dehyd.get("api_key", "")
+        api_format = str(dehyd.get("api_format", "") or "openai_compat").strip().lower()
         if not api_key:
             return JSONResponse({"ok": False, "error": "未设置 API Key"}, status_code=400)
         try:
             import httpx as _httpx
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}],
-                **chat_completion_token_limit(model, 5),
-            }
-            async with _httpx.AsyncClient(timeout=15) as client:
-                r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
+            # 2026-11-02(Rio 首配事故):此前写死 Bearer + /chat/completions,不看 api_format,
+            # 选 anthropic / gemini 时测试按钮必然假阴性(打 api.anthropic.com/chat/completions 404,
+            # 或拿 Anthropic key 去敲 DeepSeek 401)。现与 dehydrator 三条真实路径一一对应:
+            # 同样的 URL、同样的鉴权头、同样不带 temperature。
+            if api_format == "anthropic":
+                ant_base = base_url.rstrip("/") if base_url else "https://api.anthropic.com"
+                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+                payload = {
+                    "model": model,
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }
+                async with _httpx.AsyncClient(timeout=15) as client:
+                    r = await client.post(f"{ant_base}/v1/messages", json=payload, headers=headers)
+            elif api_format == "gemini":
+                from provider_detect import strip_native_resource_prefix as _strip_prefix
+                model_id = _strip_prefix(model)
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 5},
+                }
+                async with _httpx.AsyncClient(timeout=15) as client:
+                    r = await client.post(url, params={"key": api_key}, json=payload)
+            else:
+                if not base_url:
+                    return JSONResponse({"ok": False, "error": "openai_compat 格式需要 base_url"}, status_code=400)
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    **chat_completion_token_limit(model, 5),
+                }
+                async with _httpx.AsyncClient(timeout=15) as client:
+                    r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
             if r.status_code in (200, 201):
                 return JSONResponse({"ok": True, "message": "API Key 有效 ✓"})
             else:

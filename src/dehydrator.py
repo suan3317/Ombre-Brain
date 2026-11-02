@@ -723,12 +723,16 @@ class Dehydrator:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        # 2026-11-02(Rio 首配事故):Claude 4.6+ / 5.x 原生 Messages API 对非默认
+        # temperature 直接 400 `temperature is deprecated for this model`(Haiku 5.5
+        # 实测),且 anthropic-version 2026-10-21 起所有型号都拒绝。脱水走原生格式时
+        # 不再下发 temperature——config 里的 temperature 只对 openai_compat / gemini 生效。
+        del temperature  # 显式声明:该参数在原生 Anthropic 路径上被忽略
         payload: dict = {
             "model": model if model else self.model,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "system": system,
             "messages": [{"role": "user", "content": user}],
-            "temperature": temperature if temperature is not None else self.temperature,
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             r = await client.post(url, headers=headers, json=payload)
