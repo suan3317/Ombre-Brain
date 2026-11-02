@@ -32,6 +32,7 @@ class FakeMCP:
 def _fake_httpx(monkeypatch, calls, body=None):
     class Response:
         status_code = 200
+        text = ""
 
         def json(self):
             return body or {}
@@ -82,7 +83,8 @@ async def test_probe_anthropic_uses_messages_endpoint_and_x_api_key(monkeypatch)
     assert kwargs["headers"]["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in kwargs["headers"]
     assert kwargs["json"]["model"] == "claude-haiku-5-5"
-    assert kwargs["json"]["max_tokens"] == 5
+    assert kwargs["json"]["max_tokens"] == 64
+    assert kwargs["json"]["output_config"] == {"effort": "low"}
     assert "temperature" not in kwargs["json"]
 
 
@@ -117,7 +119,15 @@ async def test_probe_openai_compat_keeps_bearer_chat_completions(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_anthropic_omits_temperature(tmp_path, monkeypatch):
     calls = []
-    _fake_httpx(monkeypatch, calls, body={"content": [{"type": "text", "text": "ok"}]})
+    # Haiku 5.5 实测:思考开启时 content[0] 是 thinking 块,text 在后面,且可能拆成多块。
+    _fake_httpx(monkeypatch, calls, body={
+        "stop_reason": "end_turn",
+        "content": [
+            {"type": "thinking", "thinking": ""},
+            {"type": "text", "text": "o"},
+            {"type": "text", "text": "k"},
+        ],
+    })
     d = Dehydrator({
         "dehydration": {
             "api_key": "sk-ant-probe", "api_format": "anthropic",
@@ -132,4 +142,50 @@ async def test_chat_anthropic_omits_temperature(tmp_path, monkeypatch):
     assert url == "https://api.anthropic.com/v1/messages"
     assert "temperature" not in kwargs["json"]
     assert kwargs["json"]["max_tokens"] == 7
+    assert kwargs["json"]["output_config"] == {"effort": "low"}
     assert kwargs["headers"]["x-api-key"] == "sk-ant-probe"
+
+
+@pytest.mark.asyncio
+async def test_chat_anthropic_retries_without_output_config_on_legacy_400(tmp_path, monkeypatch):
+    """旧型号不认 output_config → 400 一次,去掉该字段重试成功。"""
+    calls = []
+    responses = [
+        (400, '{"type":"error","error":{"type":"invalid_request_error","message":"output_config: Extra inputs are not permitted"}}', {}),
+        (200, "", {"stop_reason": "end_turn", "content": [{"type": "text", "text": "legacy-ok"}]}),
+    ]
+
+    class Response:
+        def __init__(self, status, text, body):
+            self.status_code, self.text, self._body = status, text, body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            assert self.status_code < 400
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def post(self, url, **kwargs):
+            # 被测代码会就地 pop payload,记录快照而不是引用
+            calls.append((url, {**kwargs, "json": dict(kwargs["json"])}))
+            return Response(*responses.pop(0))
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    d = Dehydrator({
+        "dehydration": {"api_key": "k", "api_format": "anthropic", "base_url": "", "model": "claude-haiku-4-5"},
+        "buckets_dir": str(tmp_path),
+    })
+    assert await d._chat_anthropic("sys", "user") == "legacy-ok"
+    assert len(calls) == 2
+    assert "output_config" in calls[0][1]["json"]
+    assert "output_config" not in calls[1][1]["json"]

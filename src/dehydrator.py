@@ -733,16 +733,32 @@ class Dehydrator:
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "system": system,
             "messages": [{"role": "user", "content": user}],
+            # Claude 4.6+ 默认自适应思考,思考 token 计入 max_tokens:Rio 实测 1024 预算
+            # 被思考吃掉 654,正文 JSON 截断(stop_reason=max_tokens)。脱水是抽取任务,
+            # effort=low 压低思考开销。不支持 output_config 的旧型号(Sonnet/Haiku 4.5)
+            # 会 400,下面去掉该字段重试一次。
+            "output_config": {"effort": "low"},
         }
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             r = await client.post(url, headers=headers, json=payload)
+            if r.status_code == 400 and "output_config" in r.text:
+                payload.pop("output_config", None)
+                r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
         data = r.json()
-        content = data.get("content", [])
-        if not content:
-            return ""
-        first = content[0]
-        return first.get("text", "") if isinstance(first, dict) else ""
+        if data.get("stop_reason") == "max_tokens":
+            logger.warning(
+                "[dehydrator] Anthropic 响应因 max_tokens=%s 截断(thinking_tokens=%s),"
+                "JSON 可能不完整;考虑调大 dehydration.max_tokens",
+                payload["max_tokens"],
+                ((data.get("usage") or {}).get("output_tokens_details") or {}).get("thinking_tokens"),
+            )
+        # 思考开启时 content[0] 是 thinking 块(text 为空),只拼 text 块。
+        return "".join(
+            block.get("text", "")
+            for block in data.get("content", []) or []
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
 
     @staticmethod
     def _strip_md_fence(raw: str) -> str:

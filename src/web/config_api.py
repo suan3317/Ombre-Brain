@@ -713,13 +713,19 @@ def register(mcp) -> None:
             if api_format == "anthropic":
                 ant_base = base_url.rstrip("/") if base_url else "https://api.anthropic.com"
                 headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+                # 思考型号的思考 token 计入 max_tokens,探针给 64 的余量;effort=low 与
+                # dehydrator._chat_anthropic 一致,旧型号 400 时去掉重试。
                 payload = {
                     "model": model,
-                    "max_tokens": 5,
+                    "max_tokens": 64,
                     "messages": [{"role": "user", "content": "hi"}],
+                    "output_config": {"effort": "low"},
                 }
                 async with _httpx.AsyncClient(timeout=15) as client:
                     r = await client.post(f"{ant_base}/v1/messages", json=payload, headers=headers)
+                    if r.status_code == 400 and "output_config" in r.text:
+                        payload.pop("output_config", None)
+                        r = await client.post(f"{ant_base}/v1/messages", json=payload, headers=headers)
             elif api_format == "gemini":
                 from provider_detect import strip_native_resource_prefix as _strip_prefix
                 model_id = _strip_prefix(model)
