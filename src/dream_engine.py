@@ -120,7 +120,11 @@ _IMAGERY_WORD_MAX_CHARS = 6
 # ≤3 词，代码层过滤放宽到 ×2（与中文 6 字目标 / 12 字过滤的容差比例一致）。
 _IMAGERY_WORD_MAX_WORDS_EN = 3
 _IMAGERY_EXTRACT_INPUT_LIMIT = 2000
-_IMAGERY_EXTRACT_MAX_TOKENS = 300
+# 工单 D-5(2026-11-02):原生 Anthropic 路径下思考 token 计入 max_tokens,
+# claude-sonnet-5-5 即使 effort=low 也能把 300 整个吃光(flint 强制梦实测
+# thinking_tokens=300,该份素材抽不出意象)。输出本身只有几个词,预算只是给思考
+# 留余量,不会让产出变长。噪音生长同理 600→1024。
+_IMAGERY_EXTRACT_MAX_TOKENS = 1024
 _IMAGERY_EXTRACT_TEMPERATURE = 0.3   # 拆词是机械抽取，不需要 1.3 的疯
 _NAMED_PHRASE_MAX_CHARS = 10         # extract prompt 给模型的目标上限（返修单 v2 改动二）
 # 代码层兜底（返修单 v3 改动二）：抽回的短语超过这个字数、或含句读符号的，
@@ -159,7 +163,7 @@ _NOISE_PURE_TIER_MAX = 10
 
 # --- 月度自增噪音库 ---
 _NOISE_GROWTH_COUNT = 30
-_NOISE_GROWTH_MAX_TOKENS = 600
+_NOISE_GROWTH_MAX_TOKENS = 1024
 _NOISE_GROWTH_TEMPERATURE = 1.0
 _NOISE_GROWTH_MAX_WORDS_EN = 9   # 工单 D-4 六期：英文每条上限（对应中文 14 字）
 
