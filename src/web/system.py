@@ -1413,6 +1413,52 @@ async def build_system_diagnostics() -> dict[str, Any]:
         action="如长期停止，请重启服务并查看日志" if not decay_running else "",
     ))
 
+    # U-1 第 1 条(上游 08243d1):核心准则每次 breath 无条件全量注入,但它和
+    # breath 的 token 预算是两个互不知情的配置。准则一多一长,就会有几条静静
+    # 装不下——使用者感知到的只是"它今天怎么什么都没想起来",不会想到去查
+    # breath_max_tokens。这个检查把那条看不见的线画出来。
+    try:
+        pinned_report = await _pinned_budget_report()
+    except Exception as exc:
+        checks.append(_check(
+            "pinned_token_budget",
+            "核心准则预算",
+            "warning",
+            f"无法核对核心准则的 token 预算：{type(exc).__name__}",
+        ))
+    else:
+        required = pinned_report["required_tokens"]
+        limit = pinned_report["limit_tokens"]
+        count = pinned_report["pinned_count"]
+        if not count:
+            pin_status, pin_message, pin_action = "ok", "没有核心准则，不占预算", ""
+        elif required > limit:
+            pin_status = "error"
+            pin_message = (
+                f"{count} 条核心准则的目录行需要约 {required} token，"
+                f"超过 breath_max_tokens={limit}，会有准则返回不出来"
+            )
+            pin_action = "调高 surfacing.breath_max_tokens，或精简/取消部分核心准则"
+        elif required > limit * 0.8:
+            pin_status = "warning"
+            pin_message = (
+                f"{count} 条核心准则的目录行已占用约 {required}/{limit} token，"
+                "再加或再长就会有准则返回不出来"
+            )
+            pin_action = "考虑调高 surfacing.breath_max_tokens"
+        else:
+            pin_status = "ok"
+            pin_message = f"{count} 条核心准则的目录行约占 {required}/{limit} token"
+            pin_action = ""
+        checks.append(_check(
+            "pinned_token_budget",
+            "核心准则预算",
+            pin_status,
+            pin_message,
+            details=pinned_report,
+            action=pin_action,
+        ))
+
     summary = {"ok": 0, "warning": 0, "error": 0}
     for item in checks:
         status = item.get("status")
@@ -1422,6 +1468,53 @@ async def build_system_diagnostics() -> dict[str, Any]:
         "ok": summary["error"] == 0,
         "summary": summary,
         "checks": checks,
+    }
+
+
+async def _pinned_budget_report() -> dict[str, Any]:
+    """量一下核心准则段渲染出来要多少 token，和 breath 的预算比一比。
+
+    口径跟 tools/breath/surface.py 的核心准则段一致：pinned / protected /
+    type=permanent 都算，letter 与 anchor 不算；默认 breath 渲染的是目录行，
+    所以 required_tokens 按目录行计，full_text_tokens 另给全文的总量参考。
+    """
+    from tools.breath._verbatim import catalog_line, render_stored_bucket
+    from utils import count_tokens_approx
+
+    surfacing = sh.config.get("surfacing", {}) or {}
+    limit = int(surfacing.get("breath_max_tokens") or 10000)
+    buckets = await sh.bucket_mgr.list_all()
+    pinned = []
+    for b in buckets:
+        meta = (b.get("metadata") or {})
+        if not (meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent"):
+            continue
+        if meta.get("type") == "letter" or meta.get("anchor"):
+            continue
+        pinned.append(b)
+    required = 0
+    largest = 0
+    full_text = 0
+    for bucket in pinned:
+        try:
+            cost = count_tokens_approx(catalog_line(bucket, prefix="📌 "))
+            _, full_cost = render_stored_bucket(
+                bucket, f"📌 [核心准则] [bucket_id:{bucket.get('id', '')}]"
+            )
+        except Exception:
+            continue
+        required += cost
+        full_text += full_cost
+        largest = max(largest, cost)
+    return {
+        "pinned_count": len(pinned),
+        "required_tokens": required,
+        "full_text_tokens": full_text,
+        "limit_tokens": limit,
+        "largest_entry_tokens": largest,
+        "max_pinned": int(
+            (sh.config.get("limits", {}) or {}).get("max_pinned") or 20
+        ),
     }
 
 

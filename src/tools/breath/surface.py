@@ -61,6 +61,18 @@ def _budget_notice(remaining: int) -> str:
         "Token budget too low: some surfaced memories not returned "
         "(skipped whole, not truncated), raise max_tokens to see them.",
     )
+# U-1 第 1 条(上游 08243d1 思路):核心准则装不下时单独提示,不再借用
+# _budget_notice 把它说成"浮现记忆未返回"。required=全部核心准则渲染总计,
+# limit=本次 max_tokens,omitted=没装下的条数;修法写在句尾。
+def _pin_budget_notice(required: int, limit: int, omitted: int) -> str:
+    return _t(
+        f"token 预算不足：核心准则 required≈{required} tokens（全部核心准则渲染总计），"
+        f"limit={limit} tokens，omitted={omitted} 条没能返回；"
+        "调高 surfacing.breath_max_tokens 或精简核心准则。",
+        f"Token budget too low: core principles required≈{required} tokens "
+        f"(all core principles rendered), limit={limit} tokens, omitted={omitted} not returned; "
+        "raise surfacing.breath_max_tokens or trim the core principles.",
+    )
 # 阶段4:核心准则段在 full_text=True 时保证至少这么多条全文，其余仍是目录行；
 # 与 Yinglianchun fork 的 core_limit=3 默认一致。
 _CORE_LIMIT = 3
@@ -127,6 +139,14 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     token_budget = max_tokens
     budget_blocked = False
     budget_blocked_count = 0
+    # U-1 第 1 条(上游 08243d1):过去这里一条核心准则装不下就置 budget_blocked
+    # 并 break,下面的普通浮现循环是 `candidates if not budget_blocked else []`,
+    # 久未浮现/偶遇也看同一个标志——结果是"少了一条准则"被放大成"今天什么都
+    # 想不起来"。现在核心准则只记自己的 pinned_omitted(跳过这条,后面更短的
+    # 照常试),budget_blocked 只归普通浮现段管。一条准则太大和还剩多少预算
+    # 是两件事。
+    pinned_omitted = 0
+    pinned_required = 0
     for i, b in enumerate(pinned_buckets):
         try:
             if b["id"] in full_text_ids:
@@ -142,10 +162,10 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
             else:
                 rendered = catalog_line(b, prefix="📌 ")
                 entry_tokens = count_tokens_approx(rendered)
+            pinned_required += entry_tokens
             if entry_tokens > token_budget:
-                budget_blocked = True
-                budget_blocked_count = len(pinned_buckets) - i
-                break
+                pinned_omitted += 1
+                continue
             pinned_results.append(rendered)
             token_budget -= entry_tokens
         except Exception as e:
@@ -311,7 +331,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     candidates.sort(key=_effective_rank, reverse=True)
 
     dynamic_results = []
-    for i, b in enumerate(candidates if not budget_blocked else []):
+    for i, b in enumerate(candidates):
         try:
             score = _effective_rank(b)
             header = f"[{_t('权重', 'weight')}:{score:.2f}] [bucket_id:{b['id']}]"
@@ -336,6 +356,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
     if not pinned_results and not dynamic_results:
         if budget_blocked:
             return _budget_notice(budget_blocked_count)
+        if pinned_omitted:
+            return _pin_budget_notice(pinned_required, max_tokens, pinned_omitted)
         if rt.mark_op:
             rt.mark_op("breath_empty")
         stats = await rt.bucket_mgr.get_stats()
@@ -460,6 +482,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list, f
         parts.append(_t("=== 久未浮现 ===\n", "=== Long Dormant ===\n") + "\n---\n".join(passive_results))
     if dream_results:
         parts.append(_t("=== 偶然想起 ===\n", "=== Chance Recall ===\n") + "\n---\n".join(dream_results))
+    if pinned_omitted:
+        parts.append(_pin_budget_notice(pinned_required, max_tokens, pinned_omitted))
     if budget_blocked:
         parts.append(_budget_notice(budget_blocked_count))
     return "\n\n".join(parts)
