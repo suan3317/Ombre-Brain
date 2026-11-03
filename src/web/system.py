@@ -1482,7 +1482,7 @@ async def _pinned_budget_report() -> dict[str, Any]:
     from utils import count_tokens_approx
 
     surfacing = sh.config.get("surfacing", {}) or {}
-    limit = int(surfacing.get("breath_max_tokens") or 10000)
+    limit = int(surfacing.get("breath_max_tokens") or 20000)
     buckets = await sh.bucket_mgr.list_all()
     pinned = []
     for b in buckets:

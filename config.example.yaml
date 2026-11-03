@@ -185,7 +185,7 @@ matching:
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
   breath_max_results: 10          # 1-50, hard cap of buckets returned per breath (stage4 slimdown: was 20)
-  breath_max_tokens: 10000        # 500-20000, total token cap per breath
+  breath_max_tokens: 20000        # 500-20000, total token cap per breath; must fit up to limits.max_pinned core rules first, then ordinary surfacing
   feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
   # 返修单一号改动三:浮现权重下限。低于这个 decay_engine 分数的桶不进默认
   # 浮现候选池(breath_search / breath_advanced 的检索路径不受限,想找还是能找到)。

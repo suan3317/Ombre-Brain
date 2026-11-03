@@ -219,7 +219,7 @@ def register(mcp) -> None:
             },
             "surfacing": {
                 "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
-                "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 10000),
+                "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 20000),
                 "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 6000),
                 "min_weight": float(sh.config.get("surfacing", {}).get("min_weight", 2.5)),
             },
