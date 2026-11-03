@@ -340,3 +340,85 @@ async def test_management_body_limit_preserves_large_upload_routes(path):
 
     assert calls == [path]
     assert sent[0]["status"] == 204
+
+
+# ============================================================ A-1 追加 3:相册上传 12MB
+
+async def _run_management_limit(path, *, body_len, max_bytes, chunk=256 * 1024, **kw):
+    """用真实分块 body(不靠 Content-Length)走一遍 ManagementRequestBodyLimitMiddleware。"""
+    calls = []
+    sent = []
+
+    async def app(scope, receive, send):
+        got = 0
+        while True:
+            m = await receive()
+            got += len(m.get("body", b""))
+            if not m.get("more_body", False):
+                break
+        calls.append((scope["path"], got))
+        await send({"type": "http.response.start", "status": 201, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = ManagementRequestBodyLimitMiddleware(app, max_bytes=max_bytes, **kw)
+    remaining = body_len
+
+    async def receive():
+        nonlocal remaining
+        n = min(chunk, remaining)
+        remaining -= n
+        return {"type": "http.request", "body": b"x" * n, "more_body": remaining > 0}
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware({"type": "http", "method": "POST", "path": path, "headers": []}, receive, send)
+    return calls, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/album", "/api/album/ingest"])
+async def test_album_upload_paths_accept_4_5mb_under_4mb_management_limit(path):
+    """Rio 11-03 的 413:4.5MB 图走 ingest 要能过,普通管理上限 4MB 不动。"""
+    four_mb = 4 * 1024 * 1024
+    body = int(4.5 * 1024 * 1024)
+    calls, sent = await _run_management_limit(path, body_len=body, max_bytes=four_mb)
+    assert calls == [(path, body)]
+    assert sent[0]["status"] == 201
+
+
+@pytest.mark.asyncio
+async def test_album_upload_paths_still_reject_above_12mb():
+    four_mb = 4 * 1024 * 1024
+    calls, sent = await _run_management_limit("/api/album/ingest", body_len=13 * 1024 * 1024, max_bytes=four_mb)
+    assert calls == []
+    assert sent[0]["status"] == 413
+    assert b"12582912" in sent[1]["body"]
+
+
+@pytest.mark.asyncio
+async def test_other_management_routes_keep_4mb_limit():
+    """放宽只对相册两条路径;PATCH /api/album/{id}、/auth/login 等仍是 4MB。"""
+    four_mb = 4 * 1024 * 1024
+    for path in ("/auth/login", "/api/album/abc123", "/api/letters"):
+        calls, sent = await _run_management_limit(path, body_len=int(4.5 * 1024 * 1024), max_bytes=four_mb)
+        assert calls == [], path
+        assert sent[0]["status"] == 413, path
+        assert b"4194304" in sent[1]["body"], path
+
+
+@pytest.mark.asyncio
+async def test_album_limit_never_tighter_than_management_limit():
+    """配置把相册值调得比管理上限还小,只回落到管理上限,不会把相册卡得更紧。"""
+    calls, sent = await _run_management_limit(
+        "/api/album", body_len=3000, max_bytes=4096, max_album_upload_bytes=1024
+    )
+    assert calls == [("/api/album", 3000)]
+    assert sent[0]["status"] == 201
+    # 管理上限 0 = 不限,相册路径也跟着不限
+    calls, sent = await _run_management_limit(
+        "/api/album/ingest", body_len=13 * 1024 * 1024, max_bytes=0
+    )
+    assert calls == [("/api/album/ingest", 13 * 1024 * 1024)]
+    assert sent[0]["status"] == 201
+

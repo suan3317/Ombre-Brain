@@ -21,6 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from utils import parse_bool
 from web.request_limits import (
+    DEFAULT_MAX_ALBUM_UPLOAD_BYTES,
     MCPRequestBodyLimitMiddleware,
     ManagementRequestBodyLimitMiddleware,
     is_mcp_auth_exempt_path,
@@ -45,6 +46,8 @@ class HTTPRuntimeSettings:
     auth_required: bool
     max_request_bytes: int
     max_management_request_bytes: int = DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES
+    # A-1 追加 3:相册图片上传(/api/album、/api/album/ingest)单独的请求体上限,默认 12MB。
+    max_album_upload_bytes: int = DEFAULT_MAX_ALBUM_UPLOAD_BYTES
     # "oauth" (default) or "token" — only consulted when auth_required is True.
     # Mutually exclusive: see MCPAuthMiddleware and web/oauth.py's route 404s.
     auth_mode: str = "oauth"
@@ -73,6 +76,10 @@ class HTTPRuntimeSettings:
             "max_management_request_bytes",
             DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
         )
+        max_album_upload_bytes = body_limit(
+            "max_album_upload_bytes",
+            DEFAULT_MAX_ALBUM_UPLOAD_BYTES,
+        )
         auth_mode = str(config.get("mcp_auth_mode", "oauth")).strip().lower()
         if auth_mode not in ("oauth", "token"):
             auth_mode = "oauth"
@@ -82,6 +89,7 @@ class HTTPRuntimeSettings:
             ),
             max_request_bytes=max_request_bytes,
             max_management_request_bytes=max_management_request_bytes,
+            max_album_upload_bytes=max_album_upload_bytes,
             auth_mode=auth_mode,
         )
 
@@ -470,6 +478,7 @@ def build_http_app(
     app.add_middleware(
         ManagementRequestBodyLimitMiddleware,
         max_bytes=settings.max_management_request_bytes,
+        max_album_upload_bytes=settings.max_album_upload_bytes,
     )
     app.add_middleware(MCPAcceptShim)
     app.add_middleware(

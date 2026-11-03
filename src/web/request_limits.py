@@ -70,13 +70,20 @@ class MCPRequestBodyLimitMiddleware:
         self.max_bytes = max(0, int(max_bytes))
         self.path_matcher = path_matcher
 
+    def limit_for_path(self, path: object) -> int:
+        """Per-request byte ceiling; subclasses may widen it for specific routes."""
+        return self.max_bytes
+
     async def __call__(self, scope: dict, receive: _Receive, send: _Send) -> None:
         if (
-            self.max_bytes <= 0
-            or scope.get("type") != "http"
+            scope.get("type") != "http"
             or not self.path_matcher(scope.get("path"))
             or str(scope.get("method", "GET")).upper() not in {"POST", "PUT", "PATCH"}
         ):
+            await self.app(scope, receive, send)
+            return
+        max_bytes = self.limit_for_path(scope.get("path"))
+        if max_bytes <= 0:
             await self.app(scope, receive, send)
             return
 
@@ -91,15 +98,15 @@ class MCPRequestBodyLimitMiddleware:
             if declared_length < 0:
                 await self._send_json(send, 400, "invalid Content-Length")
                 return
-            if declared_length > self.max_bytes:
+            if declared_length > max_bytes:
                 # Docker Desktop on Windows may reset the TCP connection when
                 # an ASGI app returns before a modest in-flight request body is
                 # consumed. Drain only a bounded amount, without parsing or
                 # retaining it, so normal oversized clients reliably see 413
                 # while very large/slow attacks are still rejected promptly.
-                if declared_length <= self.max_bytes * _REJECTION_DRAIN_MULTIPLIER:
+                if declared_length <= max_bytes * _REJECTION_DRAIN_MULTIPLIER:
                     await self._drain_request(receive, max_bytes=declared_length)
-                await self._send_too_large(send)
+                await self._send_too_large(send, max_bytes)
                 return
 
         received = 0
@@ -112,10 +119,10 @@ class MCPRequestBodyLimitMiddleware:
                 return
             if message.get("type") == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     if message.get("more_body", False):
-                        await self._drain_request(receive, max_bytes=self.max_bytes)
-                    await self._send_too_large(send)
+                        await self._drain_request(receive, max_bytes=max_bytes)
+                    await self._send_too_large(send, max_bytes)
                     return
                 buffered.append(message)
                 if not message.get("more_body", False):
@@ -151,11 +158,11 @@ class MCPRequestBodyLimitMiddleware:
                 return True
         return False
 
-    async def _send_too_large(self, send: _Send) -> None:
+    async def _send_too_large(self, send: _Send, max_bytes: int) -> None:
         await self._send_json(
             send,
             413,
-            f"MCP request body exceeds {self.max_bytes} bytes",
+            f"MCP request body exceeds {max_bytes} bytes",
         )
 
     @staticmethod
@@ -181,10 +188,26 @@ _LARGE_UPLOAD_PATHS = {
 }
 
 
+# A-1 追加 3(2026-11-03):相册的两条图片上传路径(dashboard 上传 + chatnest ingest)
+# 单独放宽到 12MB(含 multipart 开销),其它管理接口仍是 4MB。相册单图上限 10MB 在
+# web/album.py 另行校验;这里只是让 10MB 的图加上表单字段能进门,不再被 413 挡在外面。
+_ALBUM_UPLOAD_PATHS = {
+    "/api/album",
+    "/api/album/ingest",
+}
+DEFAULT_MAX_ALBUM_UPLOAD_BYTES = 12 * 1024 * 1024
+
+
 class ManagementRequestBodyLimitMiddleware(MCPRequestBodyLimitMiddleware):
     """Bound normal Dashboard/OAuth mutations while preserving large upload APIs."""
 
-    def __init__(self, app, *, max_bytes: int) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        max_bytes: int,
+        max_album_upload_bytes: int = DEFAULT_MAX_ALBUM_UPLOAD_BYTES,
+    ) -> None:
         def should_limit(path: object) -> bool:
             normalized = str(path or "").rstrip("/") or "/"
             return (
@@ -193,10 +216,21 @@ class ManagementRequestBodyLimitMiddleware(MCPRequestBodyLimitMiddleware):
             )
 
         super().__init__(app, max_bytes=max_bytes, path_matcher=should_limit)
+        self.max_album_upload_bytes = max(0, int(max_album_upload_bytes))
 
-    async def _send_too_large(self, send: _Send) -> None:
+    def limit_for_path(self, path: object) -> int:
+        normalized = str(path or "").rstrip("/") or "/"
+        if normalized in _ALBUM_UPLOAD_PATHS:
+            # 永远不比普通管理上限更紧:配置把相册值调小也只是回落到 4MB 那条线;
+            # 管理上限配成 0(不限)时相册也不限。
+            if self.max_bytes <= 0:
+                return 0
+            return max(self.max_bytes, self.max_album_upload_bytes)
+        return self.max_bytes
+
+    async def _send_too_large(self, send: _Send, max_bytes: int) -> None:
         await self._send_json(
             send,
             413,
-            f"management request body exceeds {self.max_bytes} bytes",
+            f"management request body exceeds {max_bytes} bytes",
         )

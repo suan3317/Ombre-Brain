@@ -100,6 +100,24 @@ def test_management_request_limit_is_normalized(raw, expected):
     assert settings.max_management_request_bytes == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 12 * 1024 * 1024),
+        ("16777216", 16777216),
+        (-1, 12 * 1024 * 1024),
+        ("nope", 12 * 1024 * 1024),
+    ],
+)
+def test_album_upload_limit_is_normalized(raw, expected):
+    """A-1 追加 3:limits.max_album_upload_bytes 默认 12MB,坏值回落默认。"""
+    limits = {} if raw is None else {"max_album_upload_bytes": raw}
+
+    settings = HTTPRuntimeSettings.from_config({"limits": limits})
+
+    assert settings.max_album_upload_bytes == expected
+
+
 def test_merge_mcp_tool_registries_keeps_one_public_manifest():
     primary = SimpleNamespace(
         _tool_manager=SimpleNamespace(_tools={"breath": object()})

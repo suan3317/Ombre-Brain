@@ -293,6 +293,34 @@ def test_ingest_uses_mcp_token_not_dashboard_session(api, monkeypatch):
     assert r.status_code == 400 and _body(r)["code"] == "OB-AL01"
 
 
+def _big_png(target_bytes=int(4.5 * 1024 * 1024)) -> bytes:
+    """随机噪声 PNG 压不下去,体积≈原始字节数;做一张 4.5MB~10MB 之间的真图。"""
+    w, h = 1600, 1000
+    while True:
+        buf = io.BytesIO()
+        Image.frombytes("RGB", (w, h), os.urandom(w * h * 3)).save(buf, format="PNG")
+        data = buf.getvalue()
+        if len(data) >= target_bytes:
+            return data
+        h += 200
+
+
+def test_ingest_accepts_4_5mb_image(api, monkeypatch):
+    """A-1 追加 3 回归:4.5MB 的图走 ingest 过(以前被 4MB 管理上限 413)。"""
+    import asyncio
+    big = _big_png()
+    assert int(4.5 * 1024 * 1024) <= len(big) <= album.MAX_IMAGE_BYTES
+    ingest = api[("POST", "/api/album/ingest")]
+    monkeypatch.setattr(sh, "_is_authenticated", lambda request: False)
+    monkeypatch.setenv("OMBRE_MCP_TOKEN", "static-secret-for-chatnest")
+    r = asyncio.run(ingest(FakeRequest(headers={"content-type": "multipart/form-data",
+                                                "authorization": "Bearer static-secret-for-chatnest"},
+                                       form={"file": FakeUpload(big, "big.png"), "title": "大图"})))
+    assert r.status_code == 201, r.body
+    entry = _body(r)["entry"]
+    assert entry["title"] == "大图" and entry.get("bytes", len(big)) >= int(4.5 * 1024 * 1024)
+
+
 # ============================================================ MCP 工具
 
 @pytest.fixture
