@@ -20,6 +20,7 @@ def test_public_tool_contract_accepts_normal_organ_tools(tool_name):
     [
         ("release", "anchor"),
         ("letter_write", "letter"),
+        ("letter_lock_update", "letter"),
         ("letter_read", "letter"),
     ],
 )

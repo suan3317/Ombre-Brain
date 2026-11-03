@@ -50,6 +50,30 @@ def _header_value(request, name: str) -> str:
     return ""
 
 
+def _valid_hook_token(request) -> bool:
+    token = (os.environ.get("OMBRE_HOOK_TOKEN") or str(_hook_setting("token", "") or "")).strip()
+    if not token:
+        return False
+    auth = _header_value(request, "authorization")
+    supplied = [
+        str((getattr(request, "query_params", {}) or {}).get("token", "") or ""),
+        _header_value(request, "x-ombre-hook-token"),
+        auth[7:] if auth.startswith("Bearer ") else "",
+    ]
+    return any(v and hmac.compare_digest(v, token) for v in supplied)
+
+
+def _hook_caller_side(request) -> str | None:
+    """U-1 第 3 条：信件锁要知道读者是谁。hook token = AI 侧的 SessionStart；
+    Dashboard 会话 = 人这一侧；刻意公开的 hook 谁也不是，锁信一律不给。"""
+    if _valid_hook_token(request):
+        return "ai"
+    try:
+        return "human" if sh._is_authenticated(request) else None
+    except Exception:
+        return None
+
+
 def _is_hook_request_authorized(request) -> bool:
     """Protect hook endpoints that can expose memory text.
 
@@ -63,16 +87,8 @@ def _is_hook_request_authorized(request) -> bool:
     if allow_public:
         return True
 
-    token = (os.environ.get("OMBRE_HOOK_TOKEN") or str(_hook_setting("token", "") or "")).strip()
-    if token:
-        auth = _header_value(request, "authorization")
-        supplied = [
-            str((getattr(request, "query_params", {}) or {}).get("token", "") or ""),
-            _header_value(request, "x-ombre-hook-token"),
-            auth[7:] if auth.startswith("Bearer ") else "",
-        ]
-        if any(v and hmac.compare_digest(v, token) for v in supplied):
-            return True
+    if _valid_hook_token(request):
+        return True
 
     try:
         return bool(sh._is_authenticated(request))
@@ -135,7 +151,18 @@ def register(mcp) -> None:
             # --- Append latest letter from each side (iter 1.4) ---
             # --- 附带双方各最新一封 letter ---
             try:
+                from tools.plan.lock import letter_lock_state, locked_summary
+                caller_side = _hook_caller_side(request)
                 letters = [b for b in all_buckets if b["metadata"].get("type") == "letter"]
+                lock_states = {b["id"]: letter_lock_state(b, caller_side) for b in letters}
+                for _lb in letters:
+                    if lock_states[_lb["id"]]["expired"]:
+                        try:
+                            await sh.bucket_mgr.update(_lb["id"], lock_type="none", unlock_date=None)
+                        except Exception:
+                            pass
+                locked_letters = [b for b in letters if lock_states[b["id"]]["locked"]]
+                letters = [b for b in letters if not lock_states[b["id"]]["locked"]]
                 if letters:
                     def _latest(*authors: str) -> dict | None:
                         wanted = set(authors)
@@ -159,6 +186,11 @@ def register(mcp) -> None:
                         )
                     if letter_lines:
                         body_text += "\n\n=== 最近的信 ===\n" + "\n\n".join(letter_lines)
+                # 锁着的信是独立的存在感：只说有、锁到几号，不给标题正文。
+                if locked_letters and caller_side is not None:
+                    body_text += "\n\n=== 还锁着的信 ===\n" + "\n".join(
+                        locked_summary(b, lock_states[b["id"]]) for b in locked_letters
+                    )
             except Exception as e:
                 logger.warning(f"breath_hook letter section failed: {e}")
 

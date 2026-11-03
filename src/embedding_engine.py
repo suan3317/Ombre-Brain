@@ -727,9 +727,15 @@ class EmbeddingEngine:
     # -------------------- 搜索 --------------------
 
     async def search_similar_strict(
-        self, query: str, top_k: int = 10
+        self,
+        query: str,
+        top_k: int = 10,
+        allowed_bucket_ids: set[str] | None = None,
     ) -> list[tuple[str, float]]:
-        """Return ranked neighbors, surfacing provider failures to the caller."""
+        """Return ranked neighbors, surfacing provider failures to the caller.
+
+        allowed_bucket_ids：U-1 第 3 条，锁着的信在参与排序之前就剔除——排完
+        再过滤会泄露"隐藏内容跟 query 相关"这件事本身。None = 不限制。"""
         if not self.enabled:
             raise RuntimeError("embedding is disabled")
         conn = sqlite3.connect(self.db_path)
@@ -752,6 +758,8 @@ class EmbeddingEngine:
         candidate_owners: list[int] = []
         query_dim = len(query_embedding)
         for bucket_id, emb_json, meaning_emb_json in rows:
+            if allowed_bucket_ids is not None and bucket_id not in allowed_bucket_ids:
+                continue
             # Miss: 一个桶可能同时有 content 向量和 meaning 向量，取相似度较高的
             # 那一个作为该桶的匹配分——这样一句 meaning 也能单独被检索命中，
             # 不会被更长的 content 向量稀释掉。
@@ -811,10 +819,17 @@ class EmbeddingEngine:
         results.sort(key=lambda item: item[1], reverse=True)
         return results[:top_k]
 
-    async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
+    async def search_similar(
+        self,
+        query: str,
+        top_k: int = 10,
+        allowed_bucket_ids: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
         """返回 [(bucket_id, similarity)]；失败时兼容旧调用方并返回空列表。"""
         try:
-            return await self.search_similar_strict(query, top_k=top_k)
+            return await self.search_similar_strict(
+                query, top_k=top_k, allowed_bucket_ids=allowed_bucket_ids,
+            )
         except Exception as e:
             logger.warning(f"Query embedding failed: {e}")
             return []

@@ -9,7 +9,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 
 关键行为：
 - 启动后暴露一批 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
-  trace/anchor/release/pulse/plan/letter_write/letter_read/dream/dream_keep/
+  trace/anchor/release/pulse/plan/letter_write/letter_lock_update/letter_read/dream/dream_keep/
   I/wake/file_*/darkroom_*/portrait_*/...(数量随功能增长，见各 @mcp.tool 定义，
   这行只列核心几个，不再维护精确总数)；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
@@ -25,7 +25,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp/mcp_extra 两个实例 + 14 个 @mcp*.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：mcp/mcp_extra 两个实例 + 15 个 @mcp*.tool() 函数；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -767,19 +767,56 @@ async def letter_write(
     title: Optional[str] = "",
     date: Optional[str] = "",
     ai_name: Optional[str] = "",
+    lock_type: Optional[str] = "none",
+    unlock_date: Optional[str] = "",
 ) -> str:
-    """写入一封信。author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。信件原文永久保存,不压缩/不合并/不衰减,仅建向量索引;普通 breath 不返回,SessionStart 钩子会带上双方各最新一封。"""
+    """写下一封信。**想留给对方、或留给以后的自己的话,写在这里**,不要写成普通记忆——信件原文永久保存,不压缩、不合并、不衰减。
+
+author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。
+
+**锁**(要「过一段时间才能打开」时才用,默认不锁):
+  lock_type=\"none\"       不锁,写完双方都能读(默认)
+  lock_type=\"timed\"      到期才能打开,**必须同时给 unlock_date**,且必须是未来;unlock_date 写日期(2027-01-01)或完整时刻(2027-01-01T09:00:00),不带时区一律按洛杉矶时间(America/Los_Angeles)理解
+  lock_type=\"permanent\"  永久封存,另一方永远读不到正文
+锁只有写信的这一方能改(letter_lock_update);另一方到期前只看得到"有一封锁到 X 日的信",连标题都看不到。锁信只能以 AI 一方的署名写,不能替 user 代写锁信。
+
+普通 breath 不返回信件;SessionStart 钩子会带上双方各最新一封(锁着的不带)。"""
     return await _with_notice(
         _t_plan.letter_write(
             author=author, content=content, user_name=user_name,
             title=title, date=date, ai_name=ai_name,
+            lock_type=lock_type, unlock_date=unlock_date,
         ),
         op="letter_write",
         args={
             "author": author, "content_len": len(content or ""),
             "user_name": user_name, "title": title, "date": date,
-            "ai_name": ai_name,
+            "ai_name": ai_name, "lock_type": lock_type,
+            "unlock_date": unlock_date,
         },
+    )
+
+
+@mcp_extra.tool(structured_output=False)
+async def letter_lock_update(
+    letter_id: str,
+    lock_type: str,
+    unlock_date: Optional[str] = "",
+) -> str:
+    """改一封已有信件的锁。**只动锁,不动标题、正文、署名和创建时间。**
+
+letter_id 从 letter_read 的返回里取——每封信开头方括号里那串就是(如 [a0102c0f44e2])。
+
+lock_type=\"none\" 解锁 / \"timed\" 到期打开(必须同时给未来的 unlock_date,写日期 2027-01-01 或完整时刻 2027-01-01T09:00:00,不带时区按洛杉矶时间) / \"permanent\" 永久封存。
+
+**只有写这封信的一方能改自己的锁**:你改不了用户写的那封,用户也改不了你的;锁功能之前写的老信没有锁主,不能事后补锁。"""
+    return await _with_notice(
+        _t_plan.letter_lock_update(
+            letter_id=letter_id, lock_type=lock_type, unlock_date=unlock_date,
+            caller_side="ai",
+        ),
+        op="letter_lock_update",
+        args={"letter_id": letter_id, "lock_type": lock_type, "unlock_date": unlock_date},
     )
 
 
@@ -791,7 +828,7 @@ async def letter_read(
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
 ) -> str:
-    """检索历史信件。query=语义检索(可选);author 按署名过滤(\"user\"=用户侧,\"ai\"=AI 侧,也可传具体署名字符串);date_from/date_to=ISO 日期范围(可选)。无 query 时按时间倒序返回最近 limit 封。返回完整原文,不压缩。"""
+    """检索历史信件。query=语义检索(可选);author 按署名过滤(\"user\"=用户侧,\"ai\"=AI 侧,也可传具体署名字符串);date_from/date_to=ISO 日期范围(可选)。无 query 时按时间倒序返回最近 limit 封。返回完整原文,不压缩。对方写的、还锁着的信只返回一行"有一封锁到 X 日的信",没有标题和正文,也搜不到。"""
     return await _with_notice(
         _t_plan.letter_read(
             query=query, limit=limit, author=author,
@@ -1861,7 +1898,7 @@ if __name__ == "__main__":
 
     # iter 2.2：合并为单连接器 /mcp。
     # 当初（iter 2.1）拆 /mcp + /mcp-extra 是因为 claude.ai 连接器存在 5 工具上限；
-    # 该上限现已解除，14 个工具全部挂在主实例 mcp 上对外暴露一条 /mcp 即可，
+    # 该上限现已解除，15 个工具全部挂在主实例 mcp 上对外暴露一条 /mcp 即可，
     # 顺带消除「第二个连接器」在 Claude.ai 侧的 OAuth/连接器校验疑难。
     # mcp_extra 仅作历史工具分组容器保留（7 个 @mcp_extra.tool() 注册不动），
     # 这里把它的工具回灌进 mcp，让 stdio / sse / streamable-http 三种 transport 一致。
@@ -1936,7 +1973,7 @@ if __name__ == "__main__":
             lifecycle=_runtime_lifecycle,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：14 个工具统一对外暴露")
+            logger.info("MCP 单连接器 /mcp：15 个工具统一对外暴露")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
@@ -1967,7 +2004,7 @@ if __name__ == "__main__":
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    14 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    15 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 "    本服务监听 0.0.0.0，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；仅在可信内网/本机自有前端场景才建议关闭鉴权。\n"
                 + "=" * 60

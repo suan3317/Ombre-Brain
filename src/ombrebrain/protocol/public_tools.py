@@ -102,6 +102,7 @@ class PublicToolDesignContract:
             compatibility_public_names={
                 "release": "anchor",
                 "letter_write": "letter",
+                "letter_lock_update": "letter",
                 "letter_read": "letter",
             },
             engineering_public_aliases={

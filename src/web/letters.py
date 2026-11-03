@@ -8,6 +8,10 @@ web/letters.py — 信件（letter）读写
 - /letters：信件页（兼容入口）
 - /api/letter/{id} (PATCH/DELETE)：编辑 / 删除信件
 
+U-1 第 3 条（信件时间锁）：Dashboard 这一侧的读者是人（caller_side="human"）。
+AI 写的、还锁着的信在列表里只给元数据，不给标题正文；Dashboard 写信可以上锁
+（锁主 human），PATCH 把"改内容"和"改锁"分成两类请求，不能混在一次里。
+
 对外暴露：register(mcp)。
 ========================================
 """
@@ -17,11 +21,19 @@ from starlette.responses import Response
 
 from . import _shared as sh
 from tools._common import check_content_size, check_metadata_size
+from tools.plan.lock import (
+    author_side,
+    letter_lock_state,
+    normalize_lock_type,
+    normalize_unlock_date,
+    resolve_writer_name,
+    safe_letter_metadata,
+)
 
 try:
-    from utils import strip_wikilinks, get_ai_name  # type: ignore
+    from utils import get_ai_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks, get_ai_name  # type: ignore
+    from ..utils import get_ai_name  # type: ignore
 
 
 def _normalize_author(raw: str) -> str:
@@ -70,16 +82,13 @@ def register(mcp) -> None:
             )
             result = []
             for b in letters:
-                m = b["metadata"]
-                result.append({
-                    "id": b["id"],
-                    "author": m.get("author", ""),
-                    "user_name": m.get("user_name", ""),
-                    "title": m.get("title", "") or m.get("name", ""),
-                    "date": m.get("letter_date") or m.get("created", "")[:10],
-                    "created": m.get("created", ""),
-                    "content": strip_wikilinks(b.get("content", "")),
-                })
+                state = letter_lock_state(b, "human")
+                if state["expired"]:
+                    try:
+                        await sh.bucket_mgr.update(b["id"], lock_type="none", unlock_date=None)
+                    except Exception:
+                        pass
+                result.append(safe_letter_metadata(b, "human"))
             return JSONResponse({"letters": result, "total": len(result)})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -96,7 +105,10 @@ def register(mcp) -> None:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        string_fields = ("author", "content", "user_name", "title", "date", "ai_name")
+        string_fields = (
+            "author", "content", "user_name", "title", "date", "ai_name",
+            "lock_type", "unlock_date",
+        )
         if any(key in body and not isinstance(body[key], str) for key in string_fields):
             return JSONResponse({"error": "letter fields must be strings"}, status_code=400)
         raw_author = (body.get("author") or "").strip()
@@ -129,6 +141,19 @@ def register(mcp) -> None:
         user_name = (body.get("user_name") or "").strip()
         title = (body.get("title") or "").strip()[:120]
         date = (body.get("date") or "").strip()
+        try:
+            lock_type = normalize_lock_type(body.get("lock_type", "none"))
+            unlock_date = normalize_unlock_date(lock_type, body.get("unlock_date", ""))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        # 锁属于写信的一方。Dashboard 的调用者是人，所以署名成 AI 的代存信不能上锁。
+        if lock_type != "none" and author_side(raw_author, ai_name=ai) == "ai":
+            return JSONResponse({
+                "error": "Dashboard 不能替 AI 写锁信（无锁代存照常可用）。"
+            }, status_code=400)
+        writer_name = resolve_writer_name(
+            "human", author=raw_author, user_name=user_name, ai_name=body.get("ai_name", ""),
+        ) or (user_name or author)
         extra = {"author": author}
         if user_name:
             extra["user_name"] = user_name
@@ -147,9 +172,18 @@ def register(mcp) -> None:
                 name=(title[:60] or f"{author}_{date or 'letter'}"),
                 bucket_type="letter",
                 source_tool="letter",
+                lock_type=lock_type,
+                unlock_date=unlock_date,
+                locked_by="human",
+                writer_name=writer_name,
             )
             await sh.bucket_mgr.update(bid, **extra)
-            return JSONResponse({"ok": True, "id": bid})
+            return JSONResponse({
+                "ok": True,
+                "id": bid,
+                "lock_type": lock_type,
+                "unlock_date": unlock_date,
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -167,7 +201,8 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/letter/{letter_id}", methods=["PATCH"])
     async def api_letter_edit(request: Request) -> Response:
-        """Edit an existing letter (content / title / author / date / user_name)."""
+        """Edit letter fields (content / title / author / date / user_name) or
+        its lock (lock_type / unlock_date) — never both in one request."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -181,42 +216,86 @@ def register(mcp) -> None:
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
-        editable_string_fields = ("content", "title", "author", "user_name", "date")
-        if any(
-            key in body and not isinstance(body[key], str)
-            for key in editable_string_fields
-        ):
-            return JSONResponse({"error": "letter fields must be strings"}, status_code=400)
-        updates: dict = {}
-        if "content" in body and isinstance(body["content"], str) and body["content"].strip():
-            size_err = check_content_size(body["content"])
-            if size_err:
-                return JSONResponse({"error": size_err}, status_code=400)
-            updates["content"] = body["content"].strip()
-        if "title" in body and isinstance(body["title"], str):
-            updates["title"] = body["title"].strip()[:120]
-        if "author" in body:
-            a = _normalize_author(str(body["author"]))
-            if a:
-                updates["author"] = a
-        if "user_name" in body and isinstance(body["user_name"], str):
-            updates["user_name"] = body["user_name"].strip()
-        if "date" in body and isinstance(body["date"], str):
-            updates["letter_date"] = body["date"].strip()
-
-        if not updates:
+        content_fields = ("content", "title", "author", "user_name", "date")
+        lock_fields = ("lock_type", "unlock_date")
+        has_content_edit = any(key in body for key in content_fields)
+        has_lock_edit = any(key in body for key in lock_fields)
+        if has_content_edit and has_lock_edit:
+            return JSONResponse({"error": "正文编辑与锁管理要分开提交"}, status_code=400)
+        if not has_content_edit and not has_lock_edit:
             return JSONResponse({"error": "nothing to update"}, status_code=400)
 
+        state = letter_lock_state(bucket, "human")
+
+        if has_content_edit:
+            # 老行为不变；唯一新增的边界：对方写的、还锁着的信不能读也不能改。
+            if state["locked"]:
+                return JSONResponse({
+                    "error": "这封信还没向你开放，不能读取或修改它的内容"
+                }, status_code=403)
+            if any(
+                key in body and not isinstance(body[key], str)
+                for key in content_fields
+            ):
+                return JSONResponse({"error": "letter fields must be strings"}, status_code=400)
+            updates: dict = {}
+            if "content" in body and body["content"].strip():
+                size_err = check_content_size(body["content"])
+                if size_err:
+                    return JSONResponse({"error": size_err}, status_code=400)
+                updates["content"] = body["content"].strip()
+            if "title" in body:
+                updates["title"] = body["title"].strip()[:120]
+            if "author" in body:
+                a = _normalize_author(body["author"])
+                if a:
+                    updates["author"] = a
+            if "user_name" in body:
+                updates["user_name"] = body["user_name"].strip()
+            if "date" in body:
+                updates["letter_date"] = body["date"].strip()
+            if not updates:
+                return JSONResponse({"error": "nothing to update"}, status_code=400)
+            try:
+                ok = await sh.bucket_mgr.update(letter_id, **updates)
+                if not ok:
+                    return JSONResponse({"error": "update failed"}, status_code=500)
+                if "content" in updates:
+                    try:
+                        sh.dehydrator.invalidate_cache(bucket["content"])
+                    except Exception:
+                        pass
+                return JSONResponse({"ok": True, "id": letter_id, "updated": list(updates.keys())})
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        # --- 锁管理：只动锁，不动原稿 ---
+        if "lock_type" not in body or not isinstance(body.get("lock_type"), str):
+            return JSONResponse({"error": "lock_type required"}, status_code=400)
+        if "unlock_date" in body and not isinstance(body["unlock_date"], str):
+            return JSONResponse({"error": "unlock_date must be a string"}, status_code=400)
+        if not state["locked_by"]:
+            return JSONResponse({
+                "error": "这是一封没有锁主的老信（锁功能之前写的），不能事后补锁；要锁请新写一封"
+            }, status_code=403)
+        if not state["owner"]:
+            return JSONResponse({"error": "只有写这封信的一方能改它的锁"}, status_code=403)
         try:
-            ok = await sh.bucket_mgr.update(letter_id, **updates)
+            lock_type = normalize_lock_type(body["lock_type"])
+            unlock_date = normalize_unlock_date(lock_type, body.get("unlock_date", ""))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            ok = await sh.bucket_mgr.update(letter_id, lock_type=lock_type, unlock_date=unlock_date)
             if not ok:
                 return JSONResponse({"error": "update failed"}, status_code=500)
-            if "content" in updates:
-                try:
-                    sh.dehydrator.invalidate_cache(bucket["content"])
-                except Exception:
-                    pass
-            return JSONResponse({"ok": True, "id": letter_id, "updated": list(updates.keys())})
+            return JSONResponse({
+                "ok": True,
+                "id": letter_id,
+                "lock_type": lock_type,
+                "unlock_date": unlock_date,
+                "updated": ["lock_type", "unlock_date"],
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 

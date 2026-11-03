@@ -184,6 +184,11 @@ _METADATA_TEXT_LIMITS = {
     "user_name": 120,
     "title": 120,
     "letter_date": 64,
+    # U-1 第 3 条：信件时间锁四件套
+    "lock_type": 16,
+    "unlock_date": 64,
+    "locked_by": 16,
+    "writer_name": 120,
     "why_remembered": _WHY_REMEMBERED_MAX,
     "triggered_by": _TRIGGERED_BY_MAX,
     "source_tool": _SOURCE_TOOL_MAX,
@@ -987,6 +992,10 @@ class BucketManager:
         meaning: str = "",
         media: Optional[list[dict]] = None,
         test_data: bool = False,
+        lock_type: str = "",
+        unlock_date: Optional[str] = None,
+        locked_by: str = "",
+        writer_name: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1088,6 +1097,15 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+        # U-1 第 3 条：信件锁元数据跟正文一起原子落盘。create→update 之间
+        # 有窗口，并发读或向量检索可能在窗口里拿到一封本该锁着的信的裸正文。
+        if bucket_type == "letter" and locked_by:
+            metadata["lock_type"] = str(lock_type or "none")[:16]
+            if unlock_date:
+                metadata["unlock_date"] = str(unlock_date)[:64]
+            metadata["locked_by"] = str(locked_by)[:16]
+            if writer_name:
+                metadata["writer_name"] = self._sanitize_text(str(writer_name)).strip()[:120]
         if bucket_type == "permanent" or pinned:
             metadata["type"] = "permanent"
 
@@ -1463,6 +1481,8 @@ class BucketManager:
         # 由 server.py 的 plan() / trace() / /api/plans/{id}/action 维护，bucket_manager 不参与生成。
         for k in ("status", "type", "resolution_reason", "resolved_by",
                   "related_bucket", "author", "user_name", "title", "letter_date",
+                  # U-1 第 3 条：信件时间锁。unlock_date=None 表示删字段（解锁/过期归一）。
+                  "lock_type", "unlock_date", "locked_by", "writer_name",
                   "change_log",
                   # iter 1.8 新增字段。除 weight 外全部透传不转换。
                   # weight 在 plan 上才有意义；这里不在这个循环里校验类型，由上层 server.py 保证传入范围。
