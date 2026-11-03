@@ -392,3 +392,25 @@ async def test_server_album_wrapper_keeps_image_blocks_and_formats_errors(bucket
 
     out = await srv._album_with_notice(boom(), op="album_view", args={})
     assert isinstance(out, str) and "OB-E004" in out and "bad image" in out
+
+
+def test_dashboard_has_album_tab_grid_lightbox_and_bucket_media_strip():
+    html = open(os.path.join(ROOT, "frontend", "dashboard.html"), encoding="utf-8").read()
+    assert 'data-tab="album"' in html
+    assert 'id="album-view"' in html and 'id="album-grid"' in html and 'id="album-lightbox"' in html
+    # 固定每页 12、正序、左右翻页
+    assert "const ALBUM_PAGE_SIZE = 12;" in html
+    assert "/api/album?order=asc&page_size=" in html
+    assert "function albumTurn(" in html and 'id="album-prev"' in html and 'id="album-next"' in html
+    # 外面只露缩略图 + 时间 + 标题；note 在大图层里
+    grid = html[html.index("grid.innerHTML = d.items.map"): html.index("const pager = document.getElementById('album-pager')")]
+    assert "album-when" in grid and "album-title" in grid and "album-lb-note" not in grid
+    assert 'id="album-lb-note"' in html
+    # 切 tab 时加载
+    assert "if (target === 'album') loadAlbum();" in html
+    # 桶页 media 缩略图
+    assert "function renderBucketMedia(" in html
+    assert "var mediaHtml = renderBucketMedia(meta.media);" in html
+    assert "whyHtml +\r\n      mediaHtml +" in html or "whyHtml +\n      mediaHtml +" in html
+    src = open(os.path.join(ROOT, "src", "server.py"), encoding="utf-8").read()
+    assert 'path 写 "album:<album_id>"' in src
