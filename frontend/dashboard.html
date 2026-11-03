@@ -1312,31 +1312,44 @@
     60%  { transform: scaleY(1.02); opacity: 1; }
     100% { transform: scaleY(1); opacity: 1; }
   }
-  /* ====== A-1 相册：像一本能翻的相册 ====== */
-  .album-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(168px, 1fr)); gap:18px; margin-top:14px; }
-  .album-card { background:var(--surface); border:1px solid var(--border); border-radius:2px; padding:10px 10px 12px; cursor:pointer;
-    box-shadow:4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light); transition:transform .18s ease, box-shadow .18s ease; }
-  .album-card:hover { transform:translateY(-2px); box-shadow:6px 6px 14px var(--shadow-dark-subtle), -6px -6px 14px var(--shadow-light); }
-  .album-cover { aspect-ratio:1 / 1; width:100%; background:var(--surface-solid); border:1px solid var(--border); overflow:hidden; display:flex; align-items:center; justify-content:center; }
-  .album-cover img { width:100%; height:100%; object-fit:cover; display:block; }
-  .album-cover .album-noimg { font-family:'Cormorant Garamond','Noto Serif SC',serif; font-style:italic; color:var(--text-dim); font-size:13px; padding:10px; text-align:center; line-height:1.6; }
-  .album-when { font-size:10px; letter-spacing:.14em; color:var(--text-dim); margin-top:9px; }
-  .album-title { font-family:'Cormorant Garamond','Noto Serif SC',serif; font-size:15px; font-weight:600; color:var(--text); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .album-pager { display:flex; align-items:center; justify-content:center; gap:14px; margin:22px 0 4px; font-size:12px; color:var(--text-dim); letter-spacing:.12em; font-variant-numeric:tabular-nums; }
-  .album-pager button { width:34px; height:34px; border-radius:50%; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; font-size:18px; line-height:1; display:inline-flex; align-items:center; justify-content:center;
-    box-shadow:3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light); }
-  .album-pager button:disabled { opacity:.3; cursor:default; box-shadow:none; }
+  /* ====== A-1 相册(追加 2 重做):整页就是相册——封面网格、一行小字、留白;表单收进"+"弹层 ====== */
+  .album-bar { display:flex; align-items:center; gap:10px; padding:6px 2px 2px; }
+  .album-bar .album-count { font-size:11px; letter-spacing:.14em; color:var(--text-dim); }
+  .album-bar .album-spacer { flex:1; }
+  .album-iconbtn { width:36px; height:36px; border-radius:50%; border:1px solid var(--border); background:var(--surface); color:var(--text-dim); cursor:pointer; display:inline-flex; align-items:center; justify-content:center; padding:0;
+    box-shadow:3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light); transition:color .15s ease, transform .15s ease; }
+  .album-iconbtn:hover { color:var(--accent); }
+  .album-iconbtn:active { transform:scale(.96); box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light); }
+  .album-iconbtn i, .album-iconbtn svg { width:16px; height:16px; }
+  .album-iconbtn.album-plus { color:var(--accent); font-size:22px; line-height:1; font-family:'Cormorant Garamond', serif; }
+  .album-search { display:none; align-items:center; }
+  .album-search.open { display:inline-flex; }
+  .album-search input { width:220px; max-width:52vw; background:transparent; border:none; border-bottom:1px solid var(--border); color:var(--text); padding:6px 4px; font-family:inherit; font-size:13px; outline:none; }
+  .album-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:26px 22px; margin-top:22px; }
+  .album-card { background:none; border:none; box-shadow:none; padding:0; cursor:pointer; min-width:0; }
+  .album-card:hover .album-cover img { transform:scale(1.02); }
+  .album-cover { aspect-ratio:1 / 1; width:100%; overflow:hidden; border-radius:3px; background:var(--surface-solid); display:flex; align-items:center; justify-content:center; }
+  .album-cover img { width:100%; height:100%; object-fit:cover; display:block; transition:transform .35s ease; }
+  .album-cover .album-noimg { font-family:'Cormorant Garamond','Noto Serif SC',serif; font-style:italic; color:var(--text-dim); font-size:13px; padding:14px; text-align:center; line-height:1.6; }
+  .album-caption { margin-top:8px; font-size:11px; letter-spacing:.06em; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .album-caption b { font-weight:500; color:var(--text); font-family:'Cormorant Garamond','Noto Serif SC',serif; font-size:13px; letter-spacing:0; }
+  .album-empty { grid-column:1/-1; display:flex; flex-direction:column; align-items:center; gap:16px; padding:72px 0 56px; color:var(--text-dim); font-family:'Cormorant Garamond','Noto Serif SC',serif; font-style:italic; font-size:15px; }
+  .album-empty .album-iconbtn { width:44px; height:44px; font-size:26px; }
+  .album-pager { display:flex; align-items:center; justify-content:center; gap:14px; margin:30px 0 6px; font-size:12px; color:var(--text-dim); letter-spacing:.18em; font-variant-numeric:tabular-nums; }
+  .album-pager button { background:none; border:none; box-shadow:none; width:auto; height:auto; padding:4px 8px; color:var(--text-dim); cursor:pointer; font-size:20px; line-height:1; font-family:'Cormorant Garamond', serif; }
+  .album-pager button:hover { color:var(--accent); }
+  .album-pager button:disabled { opacity:.25; cursor:default; }
   .album-lightbox { position:fixed; inset:0; z-index:9000; background:rgba(20,16,12,.82); display:none; align-items:center; justify-content:center; padding:24px; }
   .album-lightbox.open { display:flex; }
-  .album-sheet { background:var(--surface-solid); color:var(--text); border:1px solid var(--border); border-radius:2px; max-width:1100px; width:100%; max-height:100%; overflow:auto; display:grid; grid-template-columns:minmax(0, 1.6fr) minmax(260px, 1fr); box-shadow:10px 10px 30px rgba(0,0,0,.35); }
+  .album-sheet { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:2px; max-width:1100px; width:100%; max-height:100%; overflow:auto; display:grid; grid-template-columns:minmax(0, 1.6fr) minmax(280px, 1fr); box-shadow:4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light); }
   .album-stage { background:#0f0d0b; display:flex; align-items:center; justify-content:center; min-height:320px; position:relative; }
   .album-stage img { max-width:100%; max-height:78vh; object-fit:contain; display:block; }
   .album-stage .album-noimg { color:#cfc6b8; font-family:'Cormorant Garamond','Noto Serif SC',serif; font-style:italic; font-size:16px; padding:40px; text-align:center; }
-  .album-side { padding:22px 22px 18px; display:flex; flex-direction:column; gap:12px; font-size:13px; line-height:1.7; }
-  .album-side h3 { margin:0; font-family:'Cormorant Garamond','Noto Serif SC',serif; font-size:22px; font-weight:600; }
-  .album-side .album-when { margin-top:0; }
+  .album-side { padding:22px 24px 18px; display:flex; flex-direction:column; gap:12px; font-size:13px; line-height:1.7; }
+  .album-side h3 { margin:0; font-family:'Cormorant Garamond','Noto Serif SC',serif; font-size:22px; font-weight:600; color:var(--text); }
+  .album-side .album-when { font-size:11px; letter-spacing:.15em; color:var(--text-dim); }
   .album-side label { display:block; font-size:10px; letter-spacing:.14em; color:var(--text-dim); margin-bottom:4px; }
-  .album-side input, .album-side textarea { width:100%; box-sizing:border-box; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px 10px; border-radius:2px; font-family:inherit; font-size:13px; line-height:1.6; }
+  .album-side input, .album-side textarea { width:100%; box-sizing:border-box; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px 10px; border-radius:2px; font-family:inherit; font-size:13px; line-height:1.6; box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light); }
   .album-side textarea { min-height:110px; resize:vertical; }
   .album-side .album-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:auto; padding-top:8px; font-size:11px; flex-wrap:wrap; }
   .album-side .album-actions button { padding:5px 10px; background:transparent; border:1px solid var(--border); color:var(--text-dim); border-radius:2px; cursor:pointer; display:inline-flex; align-items:center; gap:4px; }
@@ -1345,13 +1358,28 @@
   .album-nav.prev { left:10px; } .album-nav.next { right:10px; }
   .album-nav:disabled { opacity:.2; cursor:default; }
   .album-close { position:absolute; top:10px; right:10px; width:34px; height:34px; border-radius:50%; border:none; background:rgba(255,255,255,.12); color:#fff; font-size:20px; cursor:pointer; }
+  /* "+" 弹层:选图 / 标题 / 标签 / 说明,样式对齐信件页的表单 */
+  .album-add-sheet { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:2px; width:100%; max-width:560px; max-height:100%; overflow:auto; padding:22px 26px 20px; position:relative; box-shadow:4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light); }
+  .album-add-sheet h3 { margin:0 0 14px; font-family:'Cormorant Garamond','Noto Serif SC',serif; font-size:20px; font-weight:600; }
+  .album-add-sheet h3 .en { font-weight:400; color:var(--text-dim); font-size:13px; margin-left:8px; letter-spacing:.08em; }
+  .album-add-sheet .album-close { background:transparent; color:var(--text-dim); }
+  .album-drop { border:1px dashed var(--border); border-radius:3px; padding:18px; text-align:center; color:var(--text-dim); font-size:12px; cursor:pointer; background:var(--bg); margin-bottom:12px; position:relative; min-height:88px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .album-drop img { max-height:220px; max-width:100%; object-fit:contain; display:block; }
+  .album-drop input[type=file] { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .album-add-sheet label { display:block; font-size:10px; letter-spacing:.14em; color:var(--text-dim); margin:10px 0 4px; }
+  .album-add-sheet input[type=text], .album-add-sheet textarea { width:100%; box-sizing:border-box; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:8px 10px; border-radius:2px; font-family:inherit; font-size:13px; line-height:1.6; box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light); }
+  .album-add-sheet textarea { min-height:90px; resize:vertical; }
+  .album-add-foot { display:flex; align-items:center; gap:12px; margin-top:16px; }
+  .album-add-foot .album-status { font-size:12px; color:var(--text-dim); flex:1; }
   .bucket-media-strip { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 16px; }
   .bucket-media-strip .bucket-media-thumb { width:96px; height:96px; object-fit:cover; border:1px solid var(--border); border-radius:2px; cursor:pointer; background:var(--surface-solid); box-shadow:3px 3px 8px var(--shadow-dark-subtle), -3px -3px 8px var(--shadow-light); }
   .bucket-media-strip .bucket-media-other { font-size:11px; color:var(--text-dim); border:1px dashed var(--border); padding:6px 10px; border-radius:2px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  @media (max-width: 1000px) { .album-grid { grid-template-columns:repeat(3, 1fr); gap:20px 16px; } }
   @media (max-width: 768px) {
     .album-sheet { grid-template-columns:1fr; }
     .album-stage img { max-height:50vh; }
-    .album-grid { grid-template-columns:repeat(auto-fill, minmax(132px, 1fr)); gap:12px; }
+    .album-grid { grid-template-columns:repeat(2, 1fr); gap:16px 12px; }
+    .album-search input { width:150px; }
   }
   .detail-panel.letter-mode .detail-content { transform-origin: top center; animation: ob-unfold .5s cubic-bezier(.2,.7,.3,1) both; }
   .detail-panel.letter-mode h2::before { content:'✉ '; color: var(--accent); }
@@ -2284,50 +2312,25 @@
   </div>
 </div>
 
-<!-- ====== A-1 相册 tab：各存各的，手动存。网格只露缩略图+时间+标题，点开才看详情 ====== -->
+<!-- ====== A-1 相册 tab(追加 2 重做):进来就是相册。顶栏只有张数 / 放大镜 / "+";表单在弹层里 ====== -->
 <div class="content" id="album-view" style="display:none">
-  <div style="max-width:1100px;margin:0 auto;">
-    <div class="config-section">
-      <h3>存一张 <span class="en">Add to Album</span></h3>
-      <div class="config-row">
-        <label>图片 <span class="en">Image</span></label>
-        <input type="file" id="album-file" accept="image/jpeg,image/png,image/webp,image/gif" style="flex:1;" />
-        <span style="font-size:11px;color:var(--text-dim);">jpg / png / webp / gif，10MB 以内；不选图就只记字</span>
-      </div>
-      <div class="config-row">
-        <label>标题 <span class="en">Title</span></label>
-        <input type="text" id="album-title" maxlength="120" placeholder="一行短标题（可选，空则用时间）" />
-      </div>
-      <div class="config-row">
-        <label>标签 <span class="en">Tags</span></label>
-        <input type="text" id="album-tags" placeholder="逗号分隔（可选）" />
-      </div>
-      <div class="config-row" style="align-items:flex-start;">
-        <label style="padding-top:10px;">说明 <span class="en">Note</span></label>
-        <textarea id="album-note" placeholder="点开大图才看得到的话（可选）" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:2px;font-family:inherit;font-size:13px;line-height:1.7;min-height:90px;resize:vertical;box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);"></textarea>
-      </div>
-      <div style="display:flex;gap:14px;align-items:center;margin-top:6px;">
-        <button class="btn-primary" onclick="uploadAlbum()" title="存入相册" style="padding:0 16px;height:36px;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="image-plus"></i> 存入 Save</button>
-        <span id="album-status" style="font-size:12px;color:var(--text-dim);"></span>
-      </div>
+  <div style="max-width:1100px;margin:0 auto;padding:4px 0 24px;">
+    <div class="album-bar">
+      <span class="album-count" id="album-count"></span>
+      <span class="album-spacer"></span>
+      <span class="album-search" id="album-search">
+        <input type="text" id="album-q" placeholder="按标题 / 说明 / 标签找…" onkeydown="if(event.key==='Enter'){_albumPage=1;loadAlbum();}else if(event.key==='Escape'){toggleAlbumSearch(false);}" />
+      </span>
+      <button type="button" class="album-iconbtn" id="album-search-btn" onclick="toggleAlbumSearch()" title="找"><i data-lucide="search"></i></button>
+      <button type="button" class="album-iconbtn album-plus" onclick="openAlbumAdd()" title="存一张">+</button>
     </div>
-
-    <div class="config-section">
-      <h3>相册 <span class="en">Album</span></h3>
-      <div class="config-row">
-        <label>找</label>
-        <input type="text" id="album-q" placeholder="按标题 / 说明 / 标签找" onkeydown="if(event.key==='Enter'){_albumPage=1;loadAlbum();}" />
-        <button class="btn-secondary" onclick="_albumPage=1;loadAlbum()" title="刷新" style="padding:8px 14px;font-size:12px;"><i data-lucide="refresh-cw"></i></button>
-        <span id="album-count" style="font-size:11px;color:var(--text-dim);margin-left:auto;"></span>
-      </div>
-      <div id="album-grid" class="album-grid">
-        <div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:36px 0;font-size:13px;">加载中…</div>
-      </div>
-      <div class="album-pager" id="album-pager" style="display:none;">
-        <button type="button" id="album-prev" onclick="albumTurn(-1)" title="上一页">‹</button>
-        <span id="album-page-label">1 / 1</span>
-        <button type="button" id="album-next" onclick="albumTurn(1)" title="下一页">›</button>
-      </div>
+    <div id="album-grid" class="album-grid">
+      <div class="album-empty">加载中…</div>
+    </div>
+    <div class="album-pager" id="album-pager" style="display:none;">
+      <button type="button" id="album-prev" onclick="albumTurn(-1)" title="上一页">‹</button>
+      <span id="album-page-label">1 / 1</span>
+      <button type="button" id="album-next" onclick="albumTurn(1)" title="下一页">›</button>
     </div>
   </div>
 </div>
@@ -2335,6 +2338,27 @@
   <div class="album-sheet" role="dialog" aria-modal="true">
     <div class="album-stage" id="album-stage"></div>
     <div class="album-side" id="album-side"></div>
+  </div>
+</div>
+<div class="album-lightbox" id="album-add-modal" onclick="if(event.target===this)closeAlbumAdd()">
+  <div class="album-add-sheet" role="dialog" aria-modal="true">
+    <button type="button" class="album-close" onclick="closeAlbumAdd()" title="关闭">×</button>
+    <h3>存一张 <span class="en">Add to Album</span></h3>
+    <div class="album-drop" id="album-drop">
+      <span id="album-drop-hint">点这里选图，或拖进来<br><span style="font-size:11px;">jpg / png / webp / gif，10MB 以内；不选图就只记字</span></span>
+      <img id="album-drop-preview" style="display:none;" alt="">
+      <input type="file" id="album-file" accept="image/jpeg,image/png,image/webp,image/gif" onchange="previewAlbumFile()" />
+    </div>
+    <label>标题 <span class="en">Title</span></label>
+    <input type="text" id="album-title" maxlength="120" placeholder="一行短标题（可选，空则用时间）" />
+    <label>标签 <span class="en">Tags</span></label>
+    <input type="text" id="album-tags" placeholder="逗号分隔（可选）" />
+    <label>说明 <span class="en">Note</span></label>
+    <textarea id="album-note" placeholder="点开大图才看得到的话（可选）"></textarea>
+    <div class="album-add-foot">
+      <span class="album-status" id="album-status"></span>
+      <button class="btn-primary" onclick="uploadAlbum()" style="padding:0 16px;height:36px;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="image-plus"></i> 存入 Save</button>
+    </div>
   </div>
 </div>
 
@@ -9159,8 +9183,9 @@ pollCriticalErrors();
 _errorAlertTimer = setInterval(pollCriticalErrors, 60000);
 maybeShowOnboarding();
 // =============================================================
-// A-1 相册 tab：固定每页 12 张，按时间正序，左右翻页；网格只露缩略图+时间+标题，
-// 点开大图才显示 note / tags / 谁存的 / 关联桶。全部手动，没有自动存。
+// A-1 相册 tab(追加 2 重做):整页是相册。固定每页 12 张,按时间正序,"‹ 3 / 7 ›"翻页;
+// 卡片只有图 + 一行小字(时间 · 标题);"+"弹层里才是选图/标题/标签/说明;放大镜点开才有搜索框。
+// 点开大图才显示 note / tags / 谁存的 / 关联桶。全部手动,没有自动存。
 // =============================================================
 const ALBUM_PAGE_SIZE = 12;
 let _albumPage = 1;
@@ -9183,14 +9208,15 @@ async function loadAlbum() {
     if (!r.ok) throw new Error(d.error || r.status);
     if (d.pages && _albumPage > d.pages) { _albumPage = d.pages; return loadAlbum(); }
     _albumData = d;
-    document.getElementById('album-count').textContent = d.total + ' 张';
+    document.getElementById('album-count').textContent = d.total ? (d.total + ' 张') : '';
     if (!d.items.length) {
-      grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-dim);padding:36px 0;font-size:13px;">' + (q ? '没有找到。' : '相册还是空的。上面存第一张。') + '</div>';
+      grid.innerHTML = q
+        ? '<div class="album-empty">没有找到。</div>'
+        : '<div class="album-empty"><span>还没有照片。</span><button type="button" class="album-iconbtn album-plus" onclick="openAlbumAdd()" title="存一张">+</button></div>';
     } else {
       grid.innerHTML = d.items.map((e, i) => `<div class="album-card" data-idx="${i}" onclick="openAlbumLightbox(${i})">
         <div class="album-cover">${e.has_image ? `<img loading="lazy" src="${BASE}${escAttr(e.thumb_url)}" alt="">` : `<div class="album-noimg">${esc((e.note || e.title || '只有字').slice(0, 60))}</div>`}</div>
-        <div class="album-when">${esc(albumWhen(e))}</div>
-        <div class="album-title" title="${escAttr(albumTitle(e))}">${esc(albumTitle(e))}</div>
+        <div class="album-caption" title="${escAttr(albumTitle(e))}"><span class="album-when">${esc(albumWhen(e))}</span>${e.title ? ' · <b class="album-title">' + esc(e.title) + '</b>' : ''}</div>
       </div>`).join('');
     }
     const pager = document.getElementById('album-pager');
@@ -9199,7 +9225,7 @@ async function loadAlbum() {
     document.getElementById('album-prev').disabled = d.page <= 1;
     document.getElementById('album-next').disabled = d.page >= d.pages;
   } catch (e) {
-    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--accent);padding:36px 0;font-size:13px;">加载失败：' + esc(e.message || e) + '</div>';
+    grid.innerHTML = '<div class="album-empty" style="color:var(--accent);">加载失败：' + esc(e.message || e) + '</div>';
   }
 }
 
@@ -9208,6 +9234,44 @@ function albumTurn(delta) {
   if (next < 1 || next > (_albumData.pages || 1)) return;
   _albumPage = next;
   loadAlbum();
+}
+
+function toggleAlbumSearch(force) {
+  const box = document.getElementById('album-search');
+  const open = typeof force === 'boolean' ? force : !box.classList.contains('open');
+  box.classList.toggle('open', open);
+  const input = document.getElementById('album-q');
+  if (open) { input.focus(); }
+  else if (input.value) { input.value = ''; _albumPage = 1; loadAlbum(); }
+}
+
+// ---- "+" 弹层 ----
+function openAlbumAdd() {
+  document.getElementById('album-status').textContent = '';
+  document.getElementById('album-add-modal').classList.add('open');
+  if (window.lucide) lucide.createIcons({ nodes: [document.getElementById('album-add-modal')] });
+  setTimeout(() => document.getElementById('album-title').focus(), 30);
+}
+function closeAlbumAdd() {
+  document.getElementById('album-add-modal').classList.remove('open');
+}
+function _resetAlbumAddForm() {
+  document.getElementById('album-file').value = '';
+  document.getElementById('album-title').value = '';
+  document.getElementById('album-note').value = '';
+  document.getElementById('album-tags').value = '';
+  const pv = document.getElementById('album-drop-preview');
+  if (pv.src && pv.src.startsWith('blob:')) URL.revokeObjectURL(pv.src);
+  pv.removeAttribute('src'); pv.style.display = 'none';
+  document.getElementById('album-drop-hint').style.display = '';
+}
+function previewAlbumFile() {
+  const file = document.getElementById('album-file').files[0];
+  const pv = document.getElementById('album-drop-preview');
+  const hint = document.getElementById('album-drop-hint');
+  if (pv.src && pv.src.startsWith('blob:')) URL.revokeObjectURL(pv.src);
+  if (!file) { pv.removeAttribute('src'); pv.style.display = 'none'; hint.style.display = ''; return; }
+  pv.src = URL.createObjectURL(file); pv.style.display = ''; hint.style.display = 'none';
 }
 
 async function uploadAlbum() {
@@ -9232,11 +9296,9 @@ async function uploadAlbum() {
     }
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
-    status.textContent = d.entry && d.entry.duplicate ? '这张已经在相册里了（' + d.entry.id + '）。' : '存好了。';
-    fileEl.value = '';
-    document.getElementById('album-title').value = '';
-    document.getElementById('album-note').value = '';
-    document.getElementById('album-tags').value = '';
+    _resetAlbumAddForm();
+    closeAlbumAdd();
+    if (d.entry && d.entry.duplicate) alert('这张已经在相册里了（' + d.entry.id + '）。');
     // 正序排：新存的在最后一页
     _albumPage = 9999;
     loadAlbum();
@@ -9245,6 +9307,7 @@ async function uploadAlbum() {
   }
 }
 
+// ---- 大图层 ----
 function openAlbumLightbox(idx) {
   const e = _albumData.items[idx];
   if (!e) return;
@@ -9303,10 +9366,12 @@ function closeAlbumLightbox() {
 }
 
 document.addEventListener('keydown', (ev) => {
-  if (!document.getElementById('album-lightbox').classList.contains('open')) return;
-  if (ev.target && /^(INPUT|TEXTAREA)$/.test(ev.target.tagName)) return;
-  if (ev.key === 'Escape') closeAlbumLightbox();
-  else if (ev.key === 'ArrowLeft') albumStep(-1);
+  const addOpen = document.getElementById('album-add-modal').classList.contains('open');
+  const lbOpen = document.getElementById('album-lightbox').classList.contains('open');
+  if (!addOpen && !lbOpen) return;
+  if (ev.key === 'Escape') { if (addOpen) closeAlbumAdd(); else closeAlbumLightbox(); return; }
+  if (!lbOpen || (ev.target && /^(INPUT|TEXTAREA)$/.test(ev.target.tagName))) return;
+  if (ev.key === 'ArrowLeft') albumStep(-1);
   else if (ev.key === 'ArrowRight') albumStep(1);
 });
 
