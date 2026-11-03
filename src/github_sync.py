@@ -29,6 +29,8 @@ logger = logging.getLogger("ombre_brain.github_sync")
 _API = "https://api.github.com"
 _TIMEOUT = 60.0
 _MAX_FILE_BYTES = 5 * 1024 * 1024  # GitHub single blob 上限 ~100MB，这里保守限 5MB
+# .md 之外也要进 GitHub 同步的文件（相对 buckets_dir）：相册索引
+_SYNC_EXTRA_FILES = frozenset({"album/index.jsonl"})
 _TREE_CHUNK = 200                  # 每个 /git/trees 请求最多内联多少文件，避免单请求过大
 _MANIFEST_FILENAME = "_ombre_backup_manifest.json"
 
@@ -253,22 +255,27 @@ class GitHubSync:
     # --------------------------------------------------------
 
     def _collect_files(self, buckets_dir: str) -> dict[str, bytes]:
-        """遍历 buckets_dir，收集所有 .md 文件。"""
+        """遍历 buckets_dir，收集所有 .md 文件。
+
+        A-1 相册（2026-11-03 裁定）：图片不进 GitHub 同步（大、且只进 Vultr 自动备份），
+        但 album/index.jsonl 这份索引要进——这是 .md 之外唯一的例外。
+        """
         result: dict[str, bytes] = {}
         if not os.path.isdir(buckets_dir):
             return result
         for root, _, filenames in os.walk(buckets_dir):
             for fn in filenames:
-                if not fn.endswith(".md"):
-                    continue
                 full = os.path.join(root, fn)
+                rel = os.path.relpath(full, buckets_dir).replace("\\", "/")
+                if not fn.endswith(".md") and rel not in _SYNC_EXTRA_FILES:
+                    continue
                 try:
                     size = os.path.getsize(full)
                     if size > _MAX_FILE_BYTES:
                         logger.warning(f"[github_sync] skip {fn}: too large ({size} bytes)")
                         continue
                     with open(full, "rb") as f:
-                        result[os.path.relpath(full, buckets_dir).replace("\\", "/")] = f.read()
+                        result[rel] = f.read()
                 except OSError as e:
                     logger.warning(f"[github_sync] skip {fn}: {e}")
         return result

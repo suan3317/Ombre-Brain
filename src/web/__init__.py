@@ -35,6 +35,7 @@ from . import v3_debug
 from . import files_api
 from . import portrait_api
 from . import dream_book_api
+from . import album
 
 
 _WEB_MODULES = (
@@ -59,6 +60,7 @@ _WEB_MODULES = (
     ("web.files_api", files_api.register),
     ("web.portrait_api", portrait_api.register),
     ("web.dream_book_api", dream_book_api.register),
+    ("web.album", album.register),
 )
 
 

@@ -66,6 +66,7 @@ from tools import grow as _t_grow
 from tools import trace as _t_trace
 from tools import anchor as _t_anchor
 from tools import plan as _t_plan
+from tools import album as _t_album
 from tools import dream as _t_dream
 from tools import i as _t_i
 from tools._common import resolve_citations as _resolve_citations
@@ -1111,6 +1112,88 @@ async def file_delete(
     )
 
 # =============================================================
+# 相册（A-1）：album_add / album_list / album_view —— 实现在 tools/album.py。
+# 图只能从 Dashboard 上传或由 chatnest 推进 /api/album/ingest；MCP 侧不收图像数据。
+# album_list(with_thumbs) / album_view 返回 list[ContentBlock]（图片块 + 文本块），
+# 文本部分照常过 _with_notice；图片块不进通知拼接。
+# =============================================================
+async def _album_with_notice(coro, op: str, args: dict):
+    """带图工具的包装：整个工具体仍在 _with_notice 里跑（异常→OB-E004、W/I 通道、
+    删除通知、结构化日志一个不少）；结果是 list 时把包装后的文本写回第一个文本块，
+    图片块原样保留。"""
+    from mcp.types import TextContent as _TC
+
+    holder: dict = {}
+
+    async def _run():
+        result = await coro
+        holder["result"] = result
+        if isinstance(result, str):
+            return result
+        for block in result:
+            if isinstance(block, _TC):
+                return block.text
+        return ""
+
+    text = await _with_notice(_run(), op=op, args=args)
+    result = holder.get("result")
+    if result is None or isinstance(result, str):
+        return text
+    blocks = list(result)
+    for idx, block in enumerate(blocks):
+        if isinstance(block, _TC):
+            blocks[idx] = _TC(type="text", text=text)
+            break
+    else:
+        blocks.append(_TC(type="text", text=text))
+    return blocks
+
+
+@mcp.tool(structured_output=False)
+async def album_add(
+    title: Optional[str] = "",
+    note: Optional[str] = "",
+    tags: Optional[str] = "",
+    linked_buckets: Optional[str] = "",
+) -> str:
+    """album_add:往相册里记一条**只有字、没有图**的条目(add a text-only album entry)。title=一行短标题;note=详情说明;tags=逗号分隔;linked_buckets=逗号分隔的 bucket_id。
+这条通道传不了图像数据,Ombre 也不会去拉任何 URL——在 Everlight 房间里要把她发的图存进相册,用那边的 save_to_album 工具。全部手动:她发的图你觉得值得留才存,不值得就不存。"""
+    return await _with_notice(
+        _t_album.album_add(title=title or "", note=note or "", tags=tags, linked_buckets=linked_buckets),
+        op="album_add",
+        args={"title": title, "note": note, "tags": tags, "linked_buckets": linked_buckets},
+    )
+
+
+@mcp.tool(structured_output=False)
+async def album_list(
+    query: Optional[str] = "",
+    date_from: Optional[str] = "",
+    date_to: Optional[str] = "",
+    limit: Optional[int] = 20,
+    with_thumbs: Optional[bool] = False,
+) -> list:
+    """album_list:翻相册(list album entries)。按存入时间倒序,返回 id、时间、标题、note 摘要、tags、关联桶。query 按标题/note/tags 子串过滤;date_from/date_to=YYYY-MM-DD。默认**不带图**;with_thumbs=True 每条附一张 256 缩略图(每张约 100 token)。要看清楚某一张用 album_view(id)。"""
+    return await _album_with_notice(
+        _t_album.album_list(query=query, date_from=date_from, date_to=date_to, limit=limit, with_thumbs=with_thumbs),
+        op="album_list",
+        args={"query": query, "date_from": date_from, "date_to": date_to, "limit": limit, "with_thumbs": with_thumbs},
+    )
+
+
+@mcp.tool(structured_output=False)
+async def album_view(
+    album_id: str,
+) -> list:
+    """album_view:看相册里的一张(view one album image)。返回这张图本身(长边 1024 的 jpeg,约 1500 token)加上标题、时间、note、tags、谁存的、关联桶。album_id 从 album_list 返回的方括号里取。只有字没有图的条目只返回文字。"""
+    return await _album_with_notice(
+        _t_album.album_view(album_id),
+        op="album_view",
+        args={"album_id": album_id},
+    )
+
+
+# =============================================================
 # xhs_read —— 小红书笔记读取。移植自 usubamayoi/xhs-read-mcp(js snippet)。
 # 原理:移动端 UA 请求页面 → 提取 window.__INITIAL_STATE__ JSON → 解析笔记。
 # 免登录免 Cookie。视频帖只返回文字+封面。小红书改版需跟修解析。
@@ -1898,7 +1981,7 @@ if __name__ == "__main__":
 
     # iter 2.2：合并为单连接器 /mcp。
     # 当初（iter 2.1）拆 /mcp + /mcp-extra 是因为 claude.ai 连接器存在 5 工具上限；
-    # 该上限现已解除，15 个工具全部挂在主实例 mcp 上对外暴露一条 /mcp 即可，
+    # 该上限现已解除，18 个工具全部挂在主实例 mcp 上对外暴露一条 /mcp 即可，
     # 顺带消除「第二个连接器」在 Claude.ai 侧的 OAuth/连接器校验疑难。
     # mcp_extra 仅作历史工具分组容器保留（7 个 @mcp_extra.tool() 注册不动），
     # 这里把它的工具回灌进 mcp，让 stdio / sse / streamable-http 三种 transport 一致。
@@ -1973,7 +2056,7 @@ if __name__ == "__main__":
             lifecycle=_runtime_lifecycle,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：15 个工具统一对外暴露")
+            logger.info("MCP 单连接器 /mcp：18 个工具统一对外暴露")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",

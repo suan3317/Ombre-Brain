@@ -19,6 +19,9 @@ pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration serv
 
 EXPECTED_TOOLS = {
     "I",
+    "album_add",
+    "album_list",
+    "album_view",
     "anchor",
     "breath",
     "breath_advanced",
@@ -34,6 +37,7 @@ EXPECTED_TOOLS = {
     "file_save",
     "grow",
     "hold",
+    "letter_lock_update",
     "letter_read",
     "letter_write",
     "plan",
