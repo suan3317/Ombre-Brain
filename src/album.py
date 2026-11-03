@@ -213,7 +213,46 @@ def _rewrite_index(buckets_dir: str, entries: Iterable[dict]) -> None:
 
 # ---------------------------------------------------------------- 图片解码
 
+# A-1 追加 4（2026-11-03，Rio 查出来的）：iPhone 照片（HEIC 转出的 jpg，带 HDR 增益图
+# 或人像景深图）是多帧 JPEG，Pillow 识别为 MPO，以前走到 _FORMATS 就被拒。处理：只取
+# 第 0 帧，存成普通 jpg（量化表/采样跟原图一致，分辨率画质不变），EXIF 原样带走，只丢
+# 增益层。gif/webp 的多帧是动画，不在这条路上，照旧原样存。
+_MULTI_FRAME_JPEG = {"MPO"}
+
+
+def _first_frame_jpeg(img) -> bytes:
+    """多帧 JPEG（MPO）→ 第 0 帧的普通 jpg 字节。"""
+    from PIL import JpegImagePlugin
+    try:
+        img.seek(0)
+    except Exception:
+        pass
+    frame = img.copy()
+    if frame.mode not in ("RGB", "L"):
+        frame = frame.convert("RGB")
+    kw: dict = {"format": "JPEG"}
+    exif = img.info.get("exif")
+    if exif:
+        kw["exif"] = exif
+    icc = img.info.get("icc_profile")
+    if icc:
+        kw["icc_profile"] = icc
+    out = io.BytesIO()
+    try:
+        frame.save(
+            out,
+            qtables=getattr(img, "quantization", None),
+            subsampling=JpegImagePlugin.get_sampling(img),
+            **kw,
+        )
+    except Exception:
+        out = io.BytesIO()
+        frame.save(out, quality=95, **kw)
+    return out.getvalue()
+
+
 def _open_image(data: bytes):
+    """→ (img, fmt, data)。MPO 会在这里被换成第 0 帧的 jpg，调用方要用返回的 data 落盘。"""
     from PIL import Image, UnidentifiedImageError
     try:
         img = Image.open(io.BytesIO(data))
@@ -221,9 +260,14 @@ def _open_image(data: bytes):
     except (UnidentifiedImageError, OSError, ValueError) as e:
         raise AlbumError("OB-AL02", f"不是能识别的图片（只收 jpg/png/webp/gif）：{e}") from None
     fmt = (img.format or "").upper()
+    if fmt in _MULTI_FRAME_JPEG:
+        data = _first_frame_jpeg(img)
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        fmt = "JPEG"
     if fmt not in _FORMATS:
         raise AlbumError("OB-AL02", f"不收 {fmt or '未知'} 格式，只收 jpg/png/webp/gif")
-    return img, fmt
+    return img, fmt, data
 
 
 def _sha256(data: bytes) -> str:
@@ -284,7 +328,7 @@ def add_entry(
                 dup = dict(old)
                 dup["duplicate"] = True
                 return dup
-        img, fmt = _open_image(data)
+        img, fmt, data = _open_image(data)   # MPO 在这里已换成第 0 帧 jpg
         ext, mime = _FORMATS[fmt]
         year = entry["added_at"][:4]
         rel = f"{year}/{entry['id']}.{ext}"

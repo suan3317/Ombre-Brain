@@ -37,6 +37,20 @@ def _jpeg_with_exif(w=400, h=300) -> bytes:
     return buf.getvalue()
 
 
+def _iphone_mpo(w=640, h=480) -> bytes:
+    """仿 iPhone jpg：主图 + 一张小的 HDR 增益图，Pillow 读出来 format=MPO、n_frames=2。"""
+    buf = io.BytesIO()
+    main = Image.new("RGB", (w, h), (30, 90, 200))
+    gain = Image.new("L", (w // 2, h // 2), 128).convert("RGB")
+    exif = main.getexif()
+    exif[36867] = "2026:11:01 09:15:00"
+    main.save(buf, format="MPO", append_images=[gain], quality=92, exif=exif.tobytes())
+    data = buf.getvalue()
+    probe = Image.open(io.BytesIO(data))
+    assert probe.format == "MPO" and probe.n_frames == 2
+    return data
+
+
 @pytest.fixture
 def buckets(tmp_path):
     return str(tmp_path / "buckets")
@@ -82,6 +96,20 @@ def test_non_image_and_oversize_rejected(buckets):
         album.add_entry(buckets, b"\0" * (album.MAX_IMAGE_BYTES + 1))
     assert ei.value.code == "OB-AL03"
     assert not os.path.exists(album.index_path(buckets))
+
+
+def test_iphone_mpo_is_stored_as_first_frame_jpeg(buckets):
+    """A-1 追加 4：iPhone jpg（MPO 多帧）不再拒收——只存第 0 帧的普通 jpg，EXIF 拍摄时间保留。"""
+    e = album.add_entry(buckets, _iphone_mpo(), title="iPhone")
+    assert e["file"].endswith(".jpg") and e["mime"] == "image/jpeg"
+    assert (e["width"], e["height"]) == (640, 480)
+    assert e["taken_at"].startswith("2026-11-01")
+    with open(os.path.join(album.album_root(buckets), e["file"]), "rb") as f:
+        stored = Image.open(io.BytesIO(f.read()))
+    assert stored.format == "JPEG" and getattr(stored, "n_frames", 1) == 1
+    assert stored.size == (640, 480)
+    # 同一张再传一次仍按原始字节去重
+    assert album.add_entry(buckets, _iphone_mpo()).get("duplicate") is True
 
 
 def test_exif_taken_at_is_recorded(buckets):
@@ -305,6 +333,20 @@ def _big_png(target_bytes=int(4.5 * 1024 * 1024)) -> bytes:
         h += 200
 
 
+def test_ingest_accepts_iphone_mpo(api, monkeypatch):
+    """A-1 追加 4 回归：带增益图的 iPhone jpg 走 ingest 过。"""
+    import asyncio
+    ingest = api[("POST", "/api/album/ingest")]
+    monkeypatch.setattr(sh, "_is_authenticated", lambda request: False)
+    monkeypatch.setenv("OMBRE_MCP_TOKEN", "static-secret-for-chatnest")
+    r = asyncio.run(ingest(FakeRequest(headers={"content-type": "multipart/form-data",
+                                                "authorization": "Bearer static-secret-for-chatnest"},
+                                       form={"file": FakeUpload(_iphone_mpo(), "IMG_0001.jpg"), "title": "她的照片"})))
+    assert r.status_code == 201, r.body
+    entry = _body(r)["entry"]
+    assert entry["title"] == "她的照片" and entry["mime"] == "image/jpeg" and entry["taken_at"].startswith("2026-11-01")
+
+
 def test_ingest_accepts_4_5mb_image(api, monkeypatch):
     """A-1 追加 3 回归:4.5MB 的图走 ingest 过(以前被 4MB 管理上限 413)。"""
     import asyncio
@@ -387,9 +429,39 @@ def test_github_sync_includes_index_but_not_images(buckets):
     assert e["file"] not in files
 
 
+@pytest.mark.asyncio
+async def test_tool_album_edit_changes_only_given_fields(tools, buckets):
+    """追加 5：空串不改；图、时间、added_by 不动；她存的也能改 note。"""
+    e = album.add_entry(buckets, _png(), title="旧题", note="旧 note", tags="a", added_by="user")
+    out = await tool_album.album_edit(e["id"], note="改过的 note")
+    assert out.startswith("✏️ album→") and "改了 note" in out
+    u = album.get_entry(buckets, e["id"])
+    assert u["note"] == "改过的 note" and u["title"] == "旧题" and u["tags"] == ["a"]
+    assert u["file"] == e["file"] and u["added_at"] == e["added_at"] and u["added_by"] == "user"
+    out = await tool_album.album_edit(e["id"], title="新题", tags="b,c", linked_buckets="bk9")
+    u = album.get_entry(buckets, e["id"])
+    assert (u["title"], u["tags"], u["linked_buckets"], u["note"]) == ("新题", ["b", "c"], ["bk9"], "改过的 note")
+    assert "OB-AL05" in await tool_album.album_edit(e["id"])
+    assert "OB-AL04" in await tool_album.album_edit("0" * 12, title="x")
+
+
+@pytest.mark.asyncio
+async def test_tool_album_delete_only_own_entries(tools, buckets):
+    """追加 5：AI 删自己存的；她存的（added_by=user）拒。"""
+    hers = album.add_entry(buckets, _png(), title="她的", added_by="user")
+    mine = album.add_entry(buckets, _png(640, 400, (1, 2, 3)), title="我存错的", added_by="ai")
+    out = await tool_album.album_delete(hers["id"])
+    assert out.startswith("❌ [OB-AL06]") and album.get_entry(buckets, hers["id"]) is not None
+    path = album.file_path(buckets, mine)
+    out = await tool_album.album_delete(mine["id"])
+    assert out.startswith("🗑️ 已删 album→") and album.get_entry(buckets, mine["id"]) is None
+    assert not os.path.exists(path)
+    assert "OB-AL04" in await tool_album.album_delete(mine["id"])
+
+
 def test_server_registers_three_album_tools_and_web_module():
     src = open(os.path.join(ROOT, "src", "server.py"), encoding="utf-8").read()
-    for name in ("album_add", "album_list", "album_view"):
+    for name in ("album_add", "album_list", "album_view", "album_edit", "album_delete"):
         assert re.search(r"@mcp\.tool\(structured_output=False\)\s*\r?\nasync def " + name + r"\(", src), name
     assert "from tools import album as _t_album" in src
     web_init = open(os.path.join(ROOT, "src", "web", "__init__.py"), encoding="utf-8").read()

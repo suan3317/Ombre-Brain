@@ -10,11 +10,13 @@ tools/album.py — 相册的三个 MCP 工具（A-1）
                with_thumbs=True 时每条附一张 256 缩略的 ImageContent。
 - album_view ：看一张——返回 1024 长边 jpeg q80 的 ImageContent + 文字元数据。
                一张约 1500 token，要看再调。
+- album_edit ：（追加 5）只改传了的字段，空串不改；不动图、时间、added_by。谁存的都能改。
+- album_delete：（追加 5）AI 删自己存错的；她存的（added_by=user）拒，只能她在 dashboard 删。
 
 返回形态：纯文本工具返回 str；带图的返回 list[ContentBlock]（文本块 + 图片块），
 FastMCP 原样下发。server.py 负责 _with_notice 包装文本部分。
 
-对外暴露：album_add / album_list / album_view / image_block
+对外暴露：album_add / album_list / album_view / album_edit / album_delete / image_block
 ========================================
 """
 
@@ -160,3 +162,39 @@ async def album_view(album_id: str):
     if not data:
         return text + "\n（原图文件丢了，只剩索引）"
     return [image_block(data), text_block(text)]
+
+
+async def album_edit(
+    album_id: str,
+    title: Optional[str] = "",
+    note: Optional[str] = "",
+    tags: Optional[str] = "",
+    linked_buckets: Optional[str] = "",
+) -> str:
+    """只改传了的字段（空串=不改）；图、时间、added_by 一律不动。"""
+    fields = {}
+    for key, value in (("title", title), ("note", note), ("tags", tags), ("linked_buckets", linked_buckets)):
+        if value is not None and str(value).strip() != "":
+            fields[key] = value
+    if not fields:
+        return "❌ [OB-AL05] 没传要改的字段（title/note/tags/linked_buckets 至少给一个，空串=不改）"
+    try:
+        entry = _album.update_entry(_buckets_dir(), album_id, **fields)
+    except _album.AlbumError as e:
+        return f"❌ [{e.code}] {e}"
+    return f"✏️ album→{entry['id']} 改了 {', '.join(fields)}\n{_detail(entry)}"
+
+
+async def album_delete(album_id: str) -> str:
+    """AI 只能删自己存的（added_by=ai）；她存的拒掉，让她在 dashboard 删。"""
+    entry = _album.get_entry(_buckets_dir(), album_id)
+    if not entry:
+        return f"❌ [OB-AL04] 相册里没有 {album_id}"
+    if entry.get("added_by") == "user":
+        return f"❌ [OB-AL06] [{entry['id']}] 是她存的，我不能删；她要删在 dashboard 相册页点删除"
+    try:
+        removed = _album.delete_entry(_buckets_dir(), album_id)
+    except _album.AlbumError as e:
+        return f"❌ [{e.code}] {e}"
+    return f"🗑️ 已删 album→{removed['id']} · {removed.get('title') or '（无题）'}"
+

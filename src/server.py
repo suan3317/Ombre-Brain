@@ -1112,7 +1112,7 @@ async def file_delete(
     )
 
 # =============================================================
-# 相册（A-1）：album_add / album_list / album_view —— 实现在 tools/album.py。
+# 相册（A-1）：album_add / album_list / album_view / album_edit / album_delete —— 实现在 tools/album.py。
 # 图只能从 Dashboard 上传或由 chatnest 推进 /api/album/ingest；MCP 侧不收图像数据。
 # album_list(with_thumbs) / album_view 返回 list[ContentBlock]（图片块 + 文本块），
 # 文本部分照常过 _with_notice；图片块不进通知拼接。
@@ -1189,6 +1189,34 @@ async def album_view(
     return await _album_with_notice(
         _t_album.album_view(album_id),
         op="album_view",
+        args={"album_id": album_id},
+    )
+
+
+@mcp.tool(structured_output=False)
+async def album_edit(
+    album_id: str,
+    title: Optional[str] = "",
+    note: Optional[str] = "",
+    tags: Optional[str] = "",
+    linked_buckets: Optional[str] = "",
+) -> str:
+    """album_edit:改相册里一条的字(edit an album entry's text)。写错了不用删掉重存——只改传了的字段,空串=不改;tags/linked_buckets 传的是整份新值(逗号分隔),不是追加。图、时间、谁存的一律不动。她存的和我存的都能改。album_id 从 album_list 的方括号里取。"""
+    return await _with_notice(
+        _t_album.album_edit(album_id, title=title, note=note, tags=tags, linked_buckets=linked_buckets),
+        op="album_edit",
+        args={"album_id": album_id, "title": title, "note": note, "tags": tags, "linked_buckets": linked_buckets},
+    )
+
+
+@mcp.tool(structured_output=False)
+async def album_delete(
+    album_id: str,
+) -> str:
+    """album_delete:删掉相册里我自己存错的一条(delete an album entry I added)。只能删 added_by=ai 的;她存的会被拒,她要删自己在 dashboard 相册页删。连图一起删,不可恢复——先 album_view 确认再删。"""
+    return await _with_notice(
+        _t_album.album_delete(album_id),
+        op="album_delete",
         args={"album_id": album_id},
     )
 
