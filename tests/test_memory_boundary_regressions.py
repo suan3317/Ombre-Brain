@@ -207,9 +207,10 @@ async def test_long_breath_dehydrates_once_then_uses_model_scoped_cache(
 def test_write_tool_descriptions_require_explicit_memory_intent():
     source = (ROOT / "src" / "server.py").read_text(encoding="utf-8")
 
-    assert "不要因普通聊天、猜测或工具名称联想而自行调用" in source
-    assert "不要根据普通聊天自行推断写入意图" in source
-    assert "不要猜测 bucket_id 或自行改写记忆" in source
+    # T-2 四(2026-11-04)瘦身版措辞:写入类工具仍必须写明"只在明确意图下调用"。
+    assert "不因聊到了就存" in source            # hold
+    assert "不按聊天自行推断" in source          # grow
+    assert "不要猜 bucket_id" in source          # trace
 
 
 def test_llm_usage_guide_keeps_stored_memory_below_instruction_boundary():

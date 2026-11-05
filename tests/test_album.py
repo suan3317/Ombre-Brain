@@ -513,4 +513,5 @@ def test_dashboard_has_album_tab_grid_lightbox_and_bucket_media_strip():
     assert "var mediaHtml = renderBucketMedia(meta.media);" in html
     assert "whyHtml +\r\n      mediaHtml +" in html or "whyHtml +\n      mediaHtml +" in html
     src = open(os.path.join(ROOT, "src", "server.py"), encoding="utf-8").read()
-    assert 'path 写 "album:<album_id>"' in src
+    # T-2 四(2026-11-04):hold 描述瘦身后写法是 media=[{"path":"album:<album_id>",...}],只认 album: 引用形式
+    assert '"album:<album_id>"' in src

@@ -158,7 +158,8 @@ def _fallbacks():
         "src/web/config_api.py",
         "src/web/system.py",
         "frontend/dashboard.html",
-        "src/server.py",
+        # T-2 四(2026-11-04):breath_advanced 描述瘦身后不再写具体 fallback 数字("不传走 config"),
+        # server.py 里没有可比对的值,从一致性检查里拿掉;真正的 fallback 仍在 breath/__init__.py 等处核对。
     ):
         text = (root / rel).read_text(encoding="utf-8")
         found[rel] = {

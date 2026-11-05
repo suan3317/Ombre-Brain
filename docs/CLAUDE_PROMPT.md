@@ -268,6 +268,42 @@
 | `[语义关联]` | 向量召回的旁证，不一定关键词命中 | 它和当前查询有语义近似，可以参考 |
 | `=== 久未浮现 ===` | 被动联想，从冷桶里随机抽 1~2 条 | 突然想起来的感觉，是真的——这是设计 |
 
+## 工具细则（五个工具的完整说明）
+
+T-2（2026-11-04）把 `trace` / `hold` / `breath_advanced` / `letter_write` / `grow` 五个工具的 schema 描述砍到几句，省每轮带进上下文的 token。原来写在描述里的完整说明整段搬到这里，一字未改；参数名、默认值、行为都没有变。要查某个参数到底怎么用，看这一节。
+
+### `trace`
+
+仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传"\clear"清空。superseded_by=可选,标记这条桶已被另一条 bucket_id 取代(旧正文不改,只加元数据),必须同时传 supersede_type(contradiction矛盾/state_transition状态变化/plan_completed计划完成/plan_abandoned计划放弃 之一);会自动核对所有引用过这条桶的文件/桶,标记待核实(derived_freshness,渲染时提示)。supersede_effective_at=可选,新事实的生效时刻(ISO 8601)。只传需要修改的字段,-1 或空串表示不改。
+
+### `hold`
+
+仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。meaning=可选,这条记忆为什么值得被想起——不是摘要,是我自己的话,只在真正觉得有重量时才写,不必每次都写。每次传入的是新增的一条,系统自动追加到该桶的 meaning 列表,不会覆盖已有的(同一条记忆可能在不同时刻被反复触动)。media=可选,本次要新增的媒体引用列表,每项至少含 path,如 [{"path": "...", "title": "...", "type": "image", "note": "..."}]；要挂相册里的一张,path 写 "album:<album_id>"(Dashboard 桶页会显示缩略图)；同样是追加,不覆盖已有 media；只存引用,不解析/不存储文件本身。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次)；只在真的用上了才传,不要每次都带。
+
+### `breath_advanced`
+
+breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆(浮现模式);传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索——检索命中的桶逐字返回当前 content，不调用 LLM 摘要/改写，max_tokens 不足时整桶省略，绝不做桶内截断。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 20000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 10,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags="feel" 或 "__feel__" 等价于 domain="feel",返回所有 feel 类记忆。full_text 仅在无 query 的浮现模式下生效(检索模式一律逐字,不受此参数影响):full_text=False(默认)时,核心准则段全部是目录行,超过 300 字的浮现条目只给 meaning+正文首段(不做生成式摘要,是机械截段),要逐字正文用 breath_search(query=...) 单独拉取;full_text=True 时浮现条目恢复逐字全文,核心准则段保证至少 3 条给全文、其余仍是目录行。
+
+### `letter_write`
+
+写下一封信。**想留给对方、或留给以后的自己的话,写在这里**,不要写成普通记忆——信件原文永久保存,不压缩、不合并、不衰减。
+
+author 必填:"user"=用户一方写的,"ai"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 "AI");title/date 可选。
+
+**锁**(要「过一段时间才能打开」时才用,默认不锁):
+  lock_type="none"       不锁,写完双方都能读(默认)
+  lock_type="timed"      到期才能打开,**必须同时给 unlock_date**,且必须是未来;unlock_date 写日期(2027-01-01)或完整时刻(2027-01-01T09:00:00),不带时区一律按洛杉矶时间(America/Los_Angeles)理解
+  lock_type="permanent"  永久封存,另一方永远读不到正文
+锁只有写信的这一方能改(letter_lock_update);另一方到期前只看得到"有一封锁到 X 日的信",连标题都看不到。锁信只能以 AI 一方的署名写,不能替 user 代写锁信。
+
+普通 breath 不返回信件;SessionStart 钩子会带上双方各最新一封(锁着的不带)。
+
+### `grow`
+
+仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
+
+    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次整理输出(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。
+
 ---
 
 ## 最后

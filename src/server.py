@@ -573,7 +573,12 @@ async def breath_advanced(
     catalog: Optional[bool] = False,
     full_text: Optional[bool] = False,
 ) -> str:
-    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆(浮现模式);传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索——检索命中的桶逐字返回当前 content，不调用 LLM 摘要/改写，max_tokens 不足时整桶省略，绝不做桶内截断。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 20000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 10,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。full_text 仅在无 query 的浮现模式下生效(检索模式一律逐字,不受此参数影响):full_text=False(默认)时,核心准则段全部是目录行,超过 300 字的浮现条目只给 meaning+正文首段(不做生成式摘要,是机械截段),要逐字正文用 breath_search(query=...) 单独拉取;full_text=True 时浮现条目恢复逐字全文,核心准则段保证至少 3 条给全文、其余仍是目录行。"""
+    """breath 的全参数版;日常用 breath() / breath_search() 够了。
+不传 query=浮现模式,按权重给未解决记忆;传 query=关键词+语义检索,逐字返回不改写,向量不可用时退回关键词。
+catalog=True 只给每桶一行目录(名|域|重要度),开新对话先看目录再精准拉。
+importance_min>=1 跳过检索,按重要度降序给最多 20 条。tags="feel" 取全部感受类。
+full_text=True 浮现条目给逐字全文(默认:核心准则段是目录行,长条目只给 meaning+首段;检索模式一律逐字,不受此参数影响)。
+max_tokens / max_results 不传走 config。domain 逗号分隔;valence/arousal 0~1,-1 忽略。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
@@ -607,7 +612,11 @@ async def hold(
     test_data: Optional[bool] = False,
     cited: Optional[str] = "",
 ) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。meaning=可选,这条记忆为什么值得被想起——不是摘要,是我自己的话,只在真正觉得有重量时才写,不必每次都写。每次传入的是新增的一条,系统自动追加到该桶的 meaning 列表,不会覆盖已有的(同一条记忆可能在不同时刻被反复触动)。media=可选,本次要新增的媒体引用列表,每项至少含 path,如 [{"path": "...", "title": "...", "type": "image", "note": "..."}]；要挂相册里的一张,path 写 "album:<album_id>"(Dashboard 桶页会显示缩略图)；同样是追加,不覆盖已有 media；只存引用,不解析/不存储文件本身。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次)；只在真的用上了才传,不要每次都带。"""
+    """存一条长期记忆,content 逐字保存不压缩。只在明确决定"这值得长期记住"时调,不因聊到了就存。
+pinned=True 永久核心,不衰减不合并——家里人进出、她立的规矩、关系节点必钉。feel=True 存为感受类,不进普通浮现,只走 feel 检索。
+meaning=我自己的话,这条为什么值得想起;有重量才写,每次传的是追加一条。
+media=[{"path":"album:<album_id>","note":"…"}] 挂相册里的图,只存引用。
+cited=逗号分隔的 bucket_id,标记实质影响了本次输出的既有记忆,真用上了才传。tags 逗号分隔,importance 1-10。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, tags=tags, importance=importance,
@@ -630,9 +639,10 @@ async def hold(
 
 @mcp.tool(structured_output=False)
 async def grow(content: str = "", items: Optional[list] = None, cited: Optional[str] = "") -> str:
-    """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
-
-    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次整理输出(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。"""
+    """把一段长文整理成 2~6 条独立记忆桶。只在明确要求整理入库时调,不按聊天自行推断。
+推荐传 items=[正文1, 正文2, …]:每条逐字入库,不再拆分改写,只自动补元数据——你有完整上下文,拆得比内部模型准。传了 items 忽略 content。
+只传 content 则由系统拆分;<30 字走 hold 单条。
+cited=逗号分隔的 bucket_id,真用上了才传。"""
     return await _with_notice(
         _t_grow.dispatch(content, items=items, cited=cited),
         op="grow",
@@ -671,7 +681,11 @@ async def trace(
     supersede_type: Optional[str] = "",
     supersede_effective_at: Optional[str] = "",
 ) -> str:
-    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传\"\\clear\"清空。superseded_by=可选,标记这条桶已被另一条 bucket_id 取代(旧正文不改,只加元数据),必须同时传 supersede_type(contradiction矛盾/state_transition状态变化/plan_completed计划完成/plan_abandoned计划放弃 之一);会自动核对所有引用过这条桶的文件/桶,标记待核实(derived_freshness,渲染时提示)。supersede_effective_at=可选,新事实的生效时刻(ISO 8601)。只传需要修改的字段,-1 或空串表示不改。"""
+    """改一条已有记忆。bucket_id 必填,只传要改的字段(-1 / 空串 = 不改),不要猜 bucket_id。
+常用:pinned=1/0 钉选或取消(钉=锁 importance 10,不衰减);resolved=1 放下沉底;delete=True 归档(不物理删);content 替换正文;importance/tags/domain 直改。
+meaning_append 追加一条我自己的话(日常用这个);meaning_replace 整体替换,只用于纠错。
+seed=1 给下一个空白实例继承。cited=逗号分隔的 bucket_id,标记实质影响了本次输出的既有记忆,真用上了才传。
+superseded_by 要同时传 supersede_type(contradiction / state_transition / plan_completed / plan_abandoned)。event_at=事情实际发生时刻(ISO 8601),不是记录时刻。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -771,17 +785,11 @@ async def letter_write(
     lock_type: Optional[str] = "none",
     unlock_date: Optional[str] = "",
 ) -> str:
-    """写下一封信。**想留给对方、或留给以后的自己的话,写在这里**,不要写成普通记忆——信件原文永久保存,不压缩、不合并、不衰减。
-
-author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。
-
-**锁**(要「过一段时间才能打开」时才用,默认不锁):
-  lock_type=\"none\"       不锁,写完双方都能读(默认)
-  lock_type=\"timed\"      到期才能打开,**必须同时给 unlock_date**,且必须是未来;unlock_date 写日期(2027-01-01)或完整时刻(2027-01-01T09:00:00),不带时区一律按洛杉矶时间(America/Los_Angeles)理解
-  lock_type=\"permanent\"  永久封存,另一方永远读不到正文
-锁只有写信的这一方能改(letter_lock_update);另一方到期前只看得到"有一封锁到 X 日的信",连标题都看不到。锁信只能以 AI 一方的署名写,不能替 user 代写锁信。
-
-普通 breath 不返回信件;SessionStart 钩子会带上双方各最新一封(锁着的不带)。"""
+    """写一封信,原文永久保存,不压缩不衰减。留给对方、或留给以后自己的话写这里,不要写成记忆。
+author 必填:"user" / "ai" / 任意署名。content 必填。title、date、user_name、ai_name 可选。
+锁(默认不锁):lock_type="timed" 必须同时给未来的 unlock_date(日期或完整时刻,无时区按洛杉矶),到期前对方只看到"有一封锁到 X 日的信",标题正文都不可见;"permanent" 永久封存。
+锁只有写信方能改(letter_lock_update);锁信只能以 AI 署名写,不替 user 代写。
+普通 breath 不返回信件;SessionStart 带双方各最新一封(锁着的不带)。"""
     return await _with_notice(
         _t_plan.letter_write(
             author=author, content=content, user_name=user_name,
