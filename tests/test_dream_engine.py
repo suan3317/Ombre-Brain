@@ -1009,7 +1009,8 @@ def test_detect_source_leak_ignores_noise_words(tmp_path):
 
 @pytest.mark.asyncio
 async def test_validate_generation_leak_logs_only_length_not_content(tmp_path, caplog):
-    engine = make_engine(tmp_path)
+    # D-5(2026-11-10):诊断开关默认开;关掉(leak_log_overlap=False)即恢复 R4 原样。
+    engine = make_engine(tmp_path, leak_log_overlap=False)
     secret = "记忆md明文存放在GitHub备份仓库的私有目录里绝密"
     materials = [{"kind": "bucket", "id": "b1", "text": secret}]
     leaked_output = "我梦见" + secret + "然后醒了"
@@ -1020,6 +1021,50 @@ async def test_validate_generation_leak_logs_only_length_not_content(tmp_path, c
     assert reason == "leak"
     assert "泄漏拦截" in caplog.text
     assert secret not in caplog.text, "R4：日志只能记重合长度，不能记重合内容本身"
+    assert "overlap=" not in caplog.text and "source=" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_validate_generation_leak_diag_logs_overlap_and_source_by_default(tmp_path, caplog):
+    """D-5 诊断(F 裁定 2026-11-10):默认把重合的那串字和来源素材桶记进日志。
+    只记重合段,不记整篇生成稿;命中的是第二个素材,日志里就是第二个的 id。"""
+    engine = make_engine(tmp_path)
+    assert engine.leak_log_overlap is True
+    secret = "记忆md明文存放在GitHub备份仓库的私有目录里绝密"
+    materials = [
+        {"kind": "bucket", "id": "aaa111", "text": "完全无关的一段话,讲的是晾衣服和下雨天。"},
+        {"kind": "bucket", "id": "bbb222", "text": "前面还有别的字。" + secret + "后面也有。"},
+    ]
+    leaked_output = "我梦见" + secret + "然后醒了,窗外一片白"
+
+    with caplog.at_level("WARNING"):
+        reason = engine._validate_generation(leaked_output, materials)
+
+    assert reason == "leak"
+    assert f"重合长度={len(secret)}" in caplog.text
+    assert "source=bucket:bbb222" in caplog.text
+    assert f"overlap={secret!r}" in caplog.text
+    assert "然后醒了" not in caplog.text, "只记重合段,不记整篇"
+
+
+def test_find_source_leak_returns_exact_overlap_and_darkroom_label(tmp_path):
+    engine = make_engine(tmp_path)
+    shared = "楼道里的声控灯坏了三盏没人修"
+    materials = [{"kind": "darkroom", "id": "darkroom", "text": "底片:" + shared + "。"}]
+    n, text, source = engine._find_source_leak("我数着" + shared + "一直往上走", materials)
+    assert (n, text, source) == (len(shared), shared, "darkroom:darkroom")
+    assert engine._find_source_leak("我在河边走了很久什么也没看见", materials) == (0, "", "")
+
+
+def test_leak_diag_overlap_is_capped_in_log(tmp_path, caplog):
+    from dream_engine import _LEAK_LOG_OVERLAP_MAX_CHARS
+    engine = make_engine(tmp_path)
+    long_secret = "".join(chr(0x4E00 + i) for i in range(200))
+    materials = [{"kind": "bucket", "id": "b1", "text": long_secret}]
+    with caplog.at_level("WARNING"):
+        assert engine._validate_generation("我看见" + long_secret, materials) == "leak"
+    assert long_secret[:_LEAK_LOG_OVERLAP_MAX_CHARS] in caplog.text
+    assert long_secret[:_LEAK_LOG_OVERLAP_MAX_CHARS + 1] not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1091,10 +1136,32 @@ def test_has_first_person_pov_rejects_too_few_first_person():
     assert _has_first_person_pov(text) is False  # 全文 0 个"我"
 
 
-def test_has_first_person_pov_rejects_third_person_opening():
+def test_has_first_person_pov_accepts_third_person_opening_when_first_person_dense():
+    """D-5(2026-11-10):不再因首句以"她"开头判废,按"我"的占比判。"""
     from dream_engine import _has_first_person_pov
     text = "她看着我，我也看着她，我们都没说话，我心里想了很多。"
-    assert _has_first_person_pov(text) is False  # 首句主语是"她"
+    assert _has_first_person_pov(text) is True
+
+
+def test_has_first_person_pov_rejects_low_first_person_ratio():
+    """"我"出现了 2 次(过了次数下限),但通篇在写她——占比不到 1%,判违规。"""
+    from dream_engine import _first_person_stats, _has_first_person_pov
+    text = "她站在院子里，风从巷口吹过来，把晾着的床单掀起一个角。" * 12 + "我看着。我没动。"
+    count, ratio = _first_person_stats(text)
+    assert count == 2 and ratio < 0.01
+    assert _has_first_person_pov(text) is False
+    assert _has_first_person_pov(text, min_ratio=0.001) is True
+
+
+def test_first_person_stats_ignores_whitespace():
+    from dream_engine import _first_person_stats
+    assert _first_person_stats("我 看见\n\n她。我 走") == (2, 2 / 7)
+
+
+def test_pov_min_ratio_is_configurable(tmp_path):
+    text = "她站在院子里，风从巷口吹过来，把晾着的床单掀起一个角。" * 12 + "我看着窗外的雨。我没动也没说话。"
+    assert make_engine(tmp_path)._validate_generation(text, []) == "pov"
+    assert make_engine(tmp_path, pov_min_first_person_ratio=0.001)._validate_generation(text, []) is None
 
 
 def test_has_first_person_pov_accepts_valid_text():
@@ -1135,8 +1202,10 @@ def test_pov_reject_log_flags_third_person_opening_despite_high_first_person_cou
     assert text.count("我") >= 12
     with caplog.at_level("WARNING"):
         reason = engine._validate_generation(text, [])
-    assert reason == "pov"
-    assert "首句她/他开头=True" in caplog.text
+    # D-5(2026-11-10):这正是 11-09 Flint 被整夜判废的形态(我=36,首句她开头)。
+    # 现在按占比判,这种稿子放行。
+    assert reason is None
+    assert "第一人称视角校验未通过" not in caplog.text
 
 
 def test_pov_reject_log_flags_false_when_opening_is_not_third_person(tmp_path, caplog):
@@ -1146,6 +1215,7 @@ def test_pov_reject_log_flags_false_when_opening_is_not_third_person(tmp_path, c
         reason = engine._validate_generation(text, [])
     assert reason == "pov"
     assert "首句她/他开头=False" in caplog.text
+    assert "我=0, 占比=0.000" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1426,19 +1496,28 @@ def test_pov_gate_en_negative_case_too_few_first_person_words(monkeypatch):
     assert _has_first_person_pov(text) is False
 
 
-def test_pov_gate_en_negative_case_third_person_opening(monkeypatch):
+def test_pov_gate_en_third_person_opening_no_longer_rejected(monkeypatch):
+    """D-5(2026-11-10):英文分支同样去掉首句规则,按第一人称词占比判。"""
     from dream_engine import _has_first_person_pov
     monkeypatch.setenv("OMBRE_LANG", "en")
     text = "She walks into the hallway. I follow her and my hand finds the door."
+    assert _has_first_person_pov(text) is True
+
+
+def test_pov_gate_en_rejects_low_first_person_ratio(monkeypatch):
+    from dream_engine import _has_first_person_pov
+    monkeypatch.setenv("OMBRE_LANG", "en")
+    text = "She walks down the long hallway and the doors keep opening. " * 20 + "I watch. I wait."
     assert _has_first_person_pov(text) is False
 
 
 @pytest.mark.parametrize("opener", ["He", "They", "she", "HE"])
-def test_pov_gate_en_negative_case_third_person_opening_case_insensitive(monkeypatch, opener):
-    from dream_engine import _has_first_person_pov
+def test_pov_gate_en_third_person_opening_any_case_accepted(monkeypatch, opener):
+    from dream_engine import _has_first_person_pov, _pov_first_sentence_opens_third_person
     monkeypatch.setenv("OMBRE_LANG", "en")
     text = f"{opener} stands in the hallway. I watch, my hand still on the door, me unable to move."
-    assert _has_first_person_pov(text) is False
+    assert _has_first_person_pov(text) is True
+    assert _pov_first_sentence_opens_third_person(text) is True  # 日志布尔位还在,只是不参与判定
 
 
 def test_pov_gate_zh_path_unaffected_by_en_regex(monkeypatch):
@@ -2163,7 +2242,7 @@ def test_detect_source_leak_zh_path_unaffected_by_en_branch(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_validate_generation_leak_en_uses_word_threshold_and_logs_word_count(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("OMBRE_LANG", "en")
-    engine = make_engine(tmp_path)
+    engine = make_engine(tmp_path, leak_log_overlap=False)  # D-5:关掉诊断开关即 R4 原样
     secret = "the memory md file lives in the private github backup folder forever hidden"
     materials = [{"kind": "bucket", "id": "b1", "text": secret}]
     leaked_output = "I dreamed that " + secret + " and then I woke up."

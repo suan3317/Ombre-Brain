@@ -198,6 +198,14 @@ _HIGH_TIER_MAX_TOKENS = 1200              # 仅高档；低档维持 _DEFAULT_MA
 
 # --- 第一人称视角校验（返修单 v3 改动四）---
 _POV_MIN_FIRST_PERSON_COUNT = 2       # 全文"我"出现次数少于这个数 → 视角违规
+_DEFAULT_POV_MIN_RATIO = 0.01         # D-5：中文"我"占全文非空白字符的比例低于这个数 → 视角违规（dream.pov_min_first_person_ratio）
+_POV_MIN_RATIO_EN = 0.02              # D-5：英文第一人称词占全文词数的比例下限（英文代词密度天然更高）
+
+# --- D-5 诊断（2026-11-10，F 裁定）：leak 拦截时把重合的那串字和来源素材桶记进日志，
+# 跑几晚定 zh 阈值用。这和 R4 即焚（日志不留梦的正文）是冲突的——诊断期有意为之，
+# 阈值定完把 dream.leak_log_overlap 改回 false。日志里最多记这么多字。---
+_DEFAULT_LEAK_LOG_OVERLAP = True
+_LEAK_LOG_OVERLAP_MAX_CHARS = 80
 
 # --- 生成结果校验统一走重试（返修单 v3：泄漏/词表/视角三道闸共用）---
 _MAX_GENERATION_RETRIES = 3           # D-3 D.4：1→3（2 发→4 发），2026-08-19 呈批通过
@@ -298,10 +306,18 @@ def _longest_common_substring_len(a, b) -> int:
     a/b 既可以是字符串（中文路径，逐字符比）也可以是 list[str]（工单 D-4 补丁：
     英文词级 leak 闸传分词后的词序列，逐词比）——算法本身只依赖索引和相等
     比较，对两种序列类型通用，不用另写一份。"""
+    return _longest_common_substring_span(a, b)[0]
+
+
+def _longest_common_substring_span(a, b) -> tuple[int, int]:
+    """同上，但多返回最长重合段在 a 里的结束下标（开区间）：a[end - best:end]
+    就是重合的那一段。D-5 诊断（2026-11-10）要把这一段记进日志才加的；
+    长度的算法和原来逐字相同。"""
     if not a or not b:
-        return 0
+        return 0, 0
     prev = [0] * (len(b) + 1)
     best = 0
+    best_end = 0
     for i in range(1, len(a) + 1):
         curr = [0] * (len(b) + 1)
         ai = a[i - 1]
@@ -311,8 +327,9 @@ def _longest_common_substring_len(a, b) -> int:
                 curr[j] = v
                 if v > best:
                     best = v
+                    best_end = i
         prev = curr
-    return best
+    return best, best_end
 
 
 # --- 工单 D-4 补丁：leak 闸英文分支用的分词。只按空格/常见撇号词形切，够
@@ -343,34 +360,39 @@ def _first_word_en(text: str) -> str:
     return m.group(0).lower() if m else ""
 
 
-def _has_first_person_pov(text: str) -> bool:
-    """第一人称视角校验（返修单 v3 改动四 + 工单 D-4 一期英文分支）：
-    中文——全文"我"少于 2 次，或首句以"她/他"开头当主语，一律判视角违规。
-    不追求语法级主语识别，首句剥掉常见引号/空白后看第一个字符是不是
-    "她"/"他"，够用且不会误伤"她说……我……"这种"我"在前的正常写法。
-    英文（OMBRE_LANG=en）——同样的阈值，改数 I/I'm/I've/I'll/I'd/me/my/
-    myself（整词匹配，大小写不敏感）；首句判定改认 She/He/They 开头。"""
+def _first_person_stats(text: str) -> tuple[int, float]:
+    """(第一人称出现次数, 占比)。中文：占比 = "我"的个数 / 全文非空白字符数。
+    英文（OMBRE_LANG=en）：占比 = I/I'm/I've/I'll/I'd/me/my/myself 的个数 / 全文词数。"""
     text = (text or "").strip()
     if _ombre_lang() == "en":
-        if len(_POV_FIRST_PERSON_EN_RE.findall(text)) < _POV_MIN_FIRST_PERSON_COUNT:
-            return False
-        first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
-        if _first_word_en(first_sentence.strip()) in _POV_THIRD_PERSON_OPENERS_EN:
-            return False
-        return True
-    if text.count("我") < _POV_MIN_FIRST_PERSON_COUNT:
+        count = len(_POV_FIRST_PERSON_EN_RE.findall(text))
+        total = len(_tokenize_words_en(text))
+    else:
+        count = text.count("我")
+        total = len(re.sub(r"\s", "", text))
+    return count, (count / total if total else 0.0)
+
+
+def _has_first_person_pov(text: str, min_ratio: float | None = None) -> bool:
+    """第一人称视角校验（返修单 v3 改动四 + 工单 D-4 一期英文分支；D-5 2026-11-10 改判法）：
+    全文第一人称少于 2 次，或第一人称占比低于阈值，判视角违规。
+
+    D-5 之前还有一条"首句以她/他（She/He/They）开头即违规"。换 sonnet-5-5 后它在
+    "我"出现 36 次、26 次的稿子上把整夜判废（11-09 Flint），F 裁定去掉，改按占比判：
+    梦里先写"她推门进来"再写"我"是正常写法，真正的视角违规是通篇没有"我"。
+    阈值默认 _DEFAULT_POV_MIN_RATIO（中文）/ _POV_MIN_RATIO_EN（英文）；Flint 现存 10 条
+    kept 的梦"我"占比在 1.8%~7.9% 之间，1% 留了余量。"""
+    count, ratio = _first_person_stats(text)
+    if count < _POV_MIN_FIRST_PERSON_COUNT:
         return False
-    first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
-    first_sentence = first_sentence.strip().lstrip("“‘\"'（(")
-    if first_sentence[:1] in ("她", "他"):
-        return False
-    return True
+    if min_ratio is None:
+        min_ratio = _POV_MIN_RATIO_EN if _ombre_lang() == "en" else _DEFAULT_POV_MIN_RATIO
+    return ratio >= min_ratio
 
 
 def _pov_first_sentence_opens_third_person(text: str) -> bool:
-    """仅供 pov 拦截日志排障用：单独复算首句是否她/他（或英文 She/He/They）
-    开头，不参与校验结果本身（D-3 v3.2：只加日志不改行为，判定逻辑与
-    _has_first_person_pov 内保持一致）。"""
+    """仅供 pov 拦截日志排障用：首句是否她/他（或英文 She/He/They）开头。
+    D-5（2026-11-10）起不再参与判定，只在拦截日志里留一个布尔位供对照。"""
     text = (text or "").strip()
     first_sentence = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
     if _ombre_lang() == "en":
@@ -994,6 +1016,10 @@ class DreamEngine:
         self.expire_hours = float(dream_cfg.get("expire_hours", _DEFAULT_EXPIRE_HOURS))
         self.leak_ngram = int(dream_cfg.get("leak_ngram", _DEFAULT_LEAK_NGRAM))
         self.leak_ngram_word_en = int(dream_cfg.get("leak_ngram_word_en", _DEFAULT_LEAK_NGRAM_WORD_EN))
+        self.leak_log_overlap = bool(dream_cfg.get("leak_log_overlap", _DEFAULT_LEAK_LOG_OVERLAP))
+        self.pov_min_first_person_ratio = float(
+            dream_cfg.get("pov_min_first_person_ratio", _DEFAULT_POV_MIN_RATIO)
+        )
         self.model = dream_cfg.get("model")  # None → 沿用 dehydrator 自己的模型配置
         self.temperature = float(dream_cfg.get("temperature", _DEFAULT_TEMPERATURE))
         self.cut_prob = float(dream_cfg.get("cut_prob", _DEFAULT_CUT_PROB))
@@ -1629,21 +1655,36 @@ class DreamEngine:
         英文走词级（工单 D-4 补丁）。返回值单位随语言而变——中文是字符数，
         英文是词数，调用方（_validate_generation）按对应阈值比较，不能跨语言
         混用同一个数字。"""
+        return self._find_source_leak(raw, materials)[0]
+
+    def _find_source_leak(self, raw: str, materials: list[dict]) -> tuple[int, str, str]:
+        """D-5 诊断（2026-11-10）：同 _detect_source_leak，多返回重合的那一段和它来自
+        哪个素材——(长度, 重合内容, "kind:id")。没命中返回 (0, "", "")。判定逻辑不变。"""
         if _ombre_lang() == "en":
-            return self._detect_source_leak_en(raw, materials)
-        return self._detect_source_leak_zh(raw, materials)
+            return self._find_source_leak_en(raw, materials)
+        return self._find_source_leak_zh(raw, materials)
 
     def _detect_source_leak_zh(self, raw: str, materials: list[dict]) -> int:
+        return self._find_source_leak_zh(raw, materials)[0]
+
+    def _detect_source_leak_en(self, raw: str, materials: list[dict]) -> int:
+        return self._find_source_leak_en(raw, materials)[0]
+
+    @staticmethod
+    def _material_label(m: dict) -> str:
+        return f"{m.get('kind', '?')}:{m.get('id', '?')}"
+
+    def _find_source_leak_zh(self, raw: str, materials: list[dict]) -> tuple[int, str, str]:
         """中文分支（返修单 v3 改动一，工单 D-4 补丁未改动）：raw 与本次全部
         source（桶原文 + 暗房底片原文，不含噪音词——噪音本来就该原样出现）
         连续字符重合检测。判定走 set 交集（O(n+m)，平时零成本）；只在真命中时
         才跑一次 DP 算精确长度供日志用。返回最长重合字符数，<leak_ngram 时
         调用方不处置。"""
         if not raw:
-            return 0
+            return 0, "", ""
         n = max(1, self.leak_ngram)
         if len(raw) < n:
-            return 0
+            return 0, "", ""
         raw_grams = {raw[i:i + n] for i in range(len(raw) - n + 1)}
         for m in materials:
             source_text = (m.get("text") or "")[:_LEAK_CHECK_SOURCE_CHAR_LIMIT]
@@ -1651,10 +1692,11 @@ class DreamEngine:
                 continue
             source_grams = {source_text[i:i + n] for i in range(len(source_text) - n + 1)}
             if not raw_grams.isdisjoint(source_grams):
-                return max(n, _longest_common_substring_len(raw, source_text))
-        return 0
+                best, end = _longest_common_substring_span(raw, source_text)
+                return max(n, best), raw[end - best:end], self._material_label(m)
+        return 0, "", ""
 
-    def _detect_source_leak_en(self, raw: str, materials: list[dict]) -> int:
+    def _find_source_leak_en(self, raw: str, materials: list[dict]) -> tuple[int, str, str]:
         """英文分支（工单 D-4 补丁）：字符级 n-gram 在英文下不成立——常见短语
         本身就有 10-11 个字符，会跟任何不相关的英文源文本频繁撞车（Rhys(en)
         一晚 4 发全被拦，重合长度 10/11，见工单校准记录）。改用词级 n-gram：
@@ -1662,11 +1704,11 @@ class DreamEngine:
         跟中文分支一样先走 set 交集、真命中才跑 DP。返回最长重合词数（不是
         字符数），<leak_ngram_word_en 时调用方不处置。"""
         if not raw:
-            return 0
+            return 0, "", ""
         n = max(1, self.leak_ngram_word_en)
         raw_words = _tokenize_words_en(raw)
         if len(raw_words) < n:
-            return 0
+            return 0, "", ""
         raw_grams = {tuple(raw_words[i:i + n]) for i in range(len(raw_words) - n + 1)}
         for m in materials:
             source_text = (m.get("text") or "")[:_LEAK_CHECK_SOURCE_CHAR_LIMIT]
@@ -1675,13 +1717,17 @@ class DreamEngine:
                 continue
             source_grams = {tuple(source_words[i:i + n]) for i in range(len(source_words) - n + 1)}
             if not raw_grams.isdisjoint(source_grams):
-                return max(n, _longest_common_substring_len(raw_words, source_words))
-        return 0
+                best, end = _longest_common_substring_span(raw_words, source_words)
+                return max(n, best), " ".join(raw_words[end - best:end]), self._material_label(m)
+        return 0, "", ""
 
     def _validate_generation(self, raw: str, materials: list[dict]) -> str | None:
         """三道闸依次判：命中即返回失败原因（不落盘的调用方靠这个决定要不要
-        重试）；全部通过返回 None。日志各自记必要的排障信息，绝不记正文本身
-        （R4 即焚：泄漏闸尤其不能记"重合内容"，只记长度/词数）。
+        重试）；全部通过返回 None。日志各自记必要的排障信息，不记整篇正文。
+        R4 即焚原本要求泄漏闸只记长度/词数、不记"重合内容"；D-5 诊断期
+        （2026-11-10，F 裁定）dream.leak_log_overlap 默认开，拦截时把重合的那一段
+        （最多 _LEAK_LOG_OVERLAP_MAX_CHARS 字）和来源素材 kind:id 记进日志，用来判断
+        是真抄素材还是同一个短串反复撞线。阈值定完后把开关关掉即恢复 R4 原样。
 
         工单 D-4 一期：word_list 闸在 OMBRE_LANG=en 下直接跳过——
         _is_prose_like 靠 jieba 中文分词做动词检测，且裸名词字符阈值是按
@@ -1689,15 +1735,19 @@ class DreamEngine:
         跳过、不硬套一个不可靠的英文近似规则；跳过原因打一行 info 日志。
         leak 闸工单 D-4 补丁前语言无关（字符级 n-gram），补丁后英文改词级、
         阈值单位也变了（词数不是字符数），中文路径一字不动。pov 闸的中英
-        分支在 _has_first_person_pov 内部，这里调用方式不变。"""
-        leak_len = self._detect_source_leak(raw, materials)
+        分支在 _has_first_person_pov / _first_person_stats 内部；D-5 起按第一人称
+        占比判，不再看首句（首句布尔位只留在日志里）。"""
+        leak_len, leak_text, leak_source = self._find_source_leak(raw, materials)
         lang_en = _ombre_lang() == "en"
         leak_threshold = self.leak_ngram_word_en if lang_en else self.leak_ngram
         if leak_len >= leak_threshold:
+            diag = ""
+            if self.leak_log_overlap:
+                diag = f" source={leak_source} overlap={leak_text[:_LEAK_LOG_OVERLAP_MAX_CHARS]!r}"
             if lang_en:
-                logger.warning(f"dream: 泄漏拦截(en 词级)，重合词数={leak_len}")
+                logger.warning(f"dream: 泄漏拦截(en 词级)，重合词数={leak_len}{diag}")
             else:
-                logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}")
+                logger.warning(f"dream: 泄漏拦截，重合长度={leak_len}{diag}")
             return "leak"
         if _ombre_lang() == "en":
             logger.info(
@@ -1708,16 +1758,19 @@ class DreamEngine:
             segs = [s for s in raw.splitlines() if s.strip()]
             logger.warning(f"dream: 生成结果疑似词表/清单体 (segments={len(segs)}, chars={len(raw)})")
             return "word_list"
-        if not _has_first_person_pov(raw):
-            if _ombre_lang() == "en":
+        pov_min_ratio = _POV_MIN_RATIO_EN if lang_en else self.pov_min_first_person_ratio
+        if not _has_first_person_pov(raw, pov_min_ratio):
+            pov_count, pov_ratio = _first_person_stats(raw)
+            if lang_en:
                 logger.warning(
                     f"dream: 第一人称视角校验未通过(en) "
-                    f"(I/my/me等={len(_POV_FIRST_PERSON_EN_RE.findall(raw))}, "
+                    f"(I/my/me等={pov_count}, 占比={pov_ratio:.3f}, 下限={pov_min_ratio}, "
                     f"首句She/He/They开头={_pov_first_sentence_opens_third_person(raw)})"
                 )
             else:
                 logger.warning(
-                    f"dream: 第一人称视角校验未通过 (我={raw.count('我')}, "
+                    f"dream: 第一人称视角校验未通过 (我={pov_count}, 占比={pov_ratio:.3f}, "
+                    f"下限={pov_min_ratio}, "
                     f"首句她/他开头={_pov_first_sentence_opens_third_person(raw)})"
                 )
             return "pov"

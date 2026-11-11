@@ -148,6 +148,8 @@ dream:
   dreamer_aliases: []
   leak_ngram: 10                  # n-gram 防泄漏闸（中文，字符级）：与 source 原文连续重合≥此字数即判泄漏
   leak_ngram_word_en: 6           # 工单 D-4 补丁：leak 闸英文分支（OMBRE_LANG=en，词级）：连续重合≥此词数即判泄漏
+  leak_log_overlap: true          # D-5 诊断期（2026-11-10）：leak 拦截时把重合的那串字和来源素材桶记进日志；阈值定完改 false（恢复"日志不留正文"）
+  pov_min_first_person_ratio: 0.01  # D-5："我"占全文非空白字符的比例低于此值判视角违规（另有至少 2 次的下限）；不再看首句是否她/他开头
 
 # --- Embedding / 向量化配置 ---
 # 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。
