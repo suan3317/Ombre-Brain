@@ -79,21 +79,23 @@
 
 唯一的元数据写入入口。**只传你要改的字段**，`-1` / `""` 表示不动。
 
+参数分两层（2026-11-10 收口，省每轮的 schema token）：`content` / `importance` / `pinned` / `resolved` / `delete` / `meaning_append` 六个直接传；其余字段放进 `changes={键: 值}`，键名见下表和工具描述。旧写法（直接传 `domain=...` 这类）仍然生效，但新调用请用 `changes`。`changes` 里写了不认识的键、或和直接传的参数给了不同的值，整次调用会被拒绝、什么都不改。
+
 | 你想做的事 | 怎么调 |
 |---|---|
 | 这件事我已经放下了 | `trace(id, resolved=1)` — 排序大幅降权，关键词命中仍可达 |
 | 这件事其实没结案 | `trace(id, resolved=0)` |
 | 我想钉它为永久核心 | `trace(id, pinned=1)` — 自动锁 importance=10，移到 permanent/ |
 | 取消钉选 | `trace(id, pinned=0)` |
-| 我想让它彻底安静下去 | `trace(id, dont_surface=1)` — 不再出现在无参 breath，关键词搜还能找到 |
-| 我对当时的判断改主意了 | `trace(id, valence=0.7, arousal=0.4)` — 改情感坐标 |
+| 我想让它彻底安静下去 | `trace(id, changes={"dont_surface": 1})` — 不再出现在无参 breath，关键词搜还能找到 |
+| 我对当时的判断改主意了 | `trace(id, changes={"valence": 0.7, "arousal": 0.4})` — 改情感坐标 |
 | 内容写错了 | `trace(id, content="新版本")` — 替换正文并重建 embedding |
 | 放入删除档案 | `trace(id, delete=True)` — 从日常召回中隐藏并清理 embedding；Markdown 仍保留在 `archive/` |
 | 创建可清理的虚假测试桶 | `hold(content="...", test_data=True)` — 创建时写入不可后补的测试来源标记，且不会合并进真实记忆 |
-| 永久删除虚假测试桶 | `trace(id, hard_delete=True, delete_reason="...")` — 仅限创建时已标记 `test_data=True` 的桶；真实记忆一律拒绝 |
-| 改 plan 状态 | `trace(plan_id, status="resolved")` — 仅对 plan 桶 |
-| 调 plan 重量 | `trace(plan_id, weight=0.8)` |
-| 改/补「为什么记得」 | `trace(id, why_remembered="...")` |
+| 永久删除虚假测试桶 | `trace(id, changes={"hard_delete": True, "delete_reason": "..."})` — 仅限创建时已标记 `test_data=True` 的桶；真实记忆一律拒绝 |
+| 改 plan 状态 | `trace(plan_id, changes={"status": "resolved"})` — 仅对 plan 桶 |
+| 调 plan 重量 | `trace(plan_id, changes={"weight": 0.8})` |
+| 改/补「为什么记得」 | `trace(id, changes={"why_remembered": "..."})` |
 
 **`anchor` 字段不在 trace 里**——切换 anchor 必须走专门的 `anchor()` / `release()`，受 24 上限保护。
 
@@ -273,6 +275,8 @@
 T-2（2026-11-04）把 `trace` / `hold` / `breath_advanced` / `letter_write` / `grow` 五个工具的 schema 描述砍到几句，省每轮带进上下文的 token。原来写在描述里的完整说明整段搬到这里，一字未改；参数名、默认值、行为都没有变。要查某个参数到底怎么用，看这一节。
 
 ### `trace`
+
+（2026-11-10：下面这段是 T-2 搬来的原文，字段含义不变；其中除 content / importance / pinned / resolved / delete / meaning_append 之外的字段，现在写在 `changes={...}` 里。）
 
 仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并在落盘后排队重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。meaning_append=追加一条新 meaning(不覆盖已有的,日常用这个);meaning_replace=整体替换 meaning 列表(仅用于纠错/清理,会丢弃所有旧条目);media_append=追加媒体引用列表(不覆盖已有的);media_replace=整体替换 media 列表(仅用于删除失效引用)。seed=1=标记为种子(给下一个空白实例继承,不占浮现配额,显式进入 wake 的继承区,不受 importance 阈值限制,硬上限见 config.seed.max_count 默认 30),0=取消。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了本次输出(引用信号,同桶滚动48小时至多计一次);可以单独传(不改其它字段,只记引用)。event_at=可选,这条记忆描述的事情实际发生的时刻(ISO 8601),不是记下这条记忆的时刻(那是 created,不可改);不影响衰减排序,仅供以后 supersede 时序判断等用途;传"\clear"清空。superseded_by=可选,标记这条桶已被另一条 bucket_id 取代(旧正文不改,只加元数据),必须同时传 supersede_type(contradiction矛盾/state_transition状态变化/plan_completed计划完成/plan_abandoned计划放弃 之一);会自动核对所有引用过这条桶的文件/桶,标记待核实(derived_freshness,渲染时提示)。supersede_effective_at=可选,新事实的生效时刻(ISO 8601)。只传需要修改的字段,-1 或空串表示不改。
 

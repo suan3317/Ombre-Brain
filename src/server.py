@@ -64,6 +64,7 @@ from tools import breath as _t_breath
 from tools import hold as _t_hold
 from tools import grow as _t_grow
 from tools import trace as _t_trace
+from tools.trace.changes import merge_changes as _merge_trace_changes, slim_schema as _slim_trace_schema
 from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import album as _t_album
@@ -680,45 +681,73 @@ async def trace(
     superseded_by: Optional[str] = "",
     supersede_type: Optional[str] = "",
     supersede_effective_at: Optional[str] = "",
+    changes: Optional[dict] = None,
 ) -> str:
     """改一条已有记忆。bucket_id 必填,只传要改的字段(-1 / 空串 = 不改),不要猜 bucket_id。
-常用:pinned=1/0 钉选或取消(钉=锁 importance 10,不衰减);resolved=1 放下沉底;delete=True 归档(不物理删);content 替换正文;importance/tags/domain 直改。
-meaning_append 追加一条我自己的话(日常用这个);meaning_replace 整体替换,只用于纠错。
-seed=1 给下一个空白实例继承。cited=逗号分隔的 bucket_id,标记实质影响了本次输出的既有记忆,真用上了才传。
-superseded_by 要同时传 supersede_type(contradiction / state_transition / plan_completed / plan_abandoned)。event_at=事情实际发生时刻(ISO 8601),不是记录时刻。"""
+常用:pinned=1/0 钉选或取消(钉=锁 importance 10,不衰减);resolved=1 放下沉底;delete=True 归档(不物理删);content 替换正文;importance 直改。
+meaning_append 追加一条我自己的话(日常用这个)。
+其余字段放 changes={键: 值}:name / domain / tags(逗号分隔)/ valence / arousal(0~1)/ digested / status / weight / dont_surface / why_remembered / meaning_replace(列表,整体替换,只用于纠错)/ media_append / media_replace(列表)/ hard_delete + delete_reason / seed(1=给下一个空白实例继承)/ cited(逗号分隔 bucket_id,真用上了才传)/ event_at(事情实际发生时刻,ISO 8601)/ superseded_by + supersede_type(contradiction / state_transition / plan_completed / plan_abandoned)+ supersede_effective_at。"""
+    # N-1 #4(2026-11-10):签名保留全部显式参数(旧写法照样生效),对外公布的 schema
+    # 只列 bucket_id + 六个常用 + changes(见本函数下方的 schema 替换)。changes 在这里
+    # 摊平并进显式参数,之后和以前一样走 trace_core。
+    fields, changes_error = _merge_trace_changes(
+        {
+            "name": name, "domain": domain, "valence": valence, "arousal": arousal,
+            "importance": importance, "tags": tags, "resolved": resolved, "pinned": pinned,
+            "digested": digested, "content": content, "delete": delete, "status": status,
+            "weight": weight, "dont_surface": dont_surface, "why_remembered": why_remembered,
+            "meaning_append": meaning_append, "meaning_replace": meaning_replace,
+            "media_append": media_append, "media_replace": media_replace,
+            "hard_delete": hard_delete, "delete_reason": delete_reason,
+            "seed": seed, "cited": cited, "event_at": event_at,
+            "superseded_by": superseded_by, "supersede_type": supersede_type,
+            "supersede_effective_at": supersede_effective_at,
+        },
+        changes,
+    )
+    if changes_error:
+        logger.info(f"op=trace phase=rejected bucket_id={bucket_id} reason=changes")
+        return changes_error
+
+    def _n(value) -> int:
+        return len(value) if isinstance(value, (str, list, tuple, dict)) else 0
+
     return await _with_notice(
-        _t_trace.dispatch(
-            bucket_id=bucket_id, name=name, domain=domain,
-            valence=valence, arousal=arousal, importance=importance,
-            tags=tags, resolved=resolved, pinned=pinned, digested=digested,
-            content=content, delete=delete, status=status, weight=weight,
-            dont_surface=dont_surface, why_remembered=why_remembered,
-            meaning_append=meaning_append, meaning_replace=meaning_replace,
-            media_append=media_append, media_replace=media_replace,
-            hard_delete=hard_delete, delete_reason=delete_reason,
-            seed=seed, cited=cited, event_at=event_at,
-            superseded_by=superseded_by, supersede_type=supersede_type,
-            supersede_effective_at=supersede_effective_at,
-        ),
+        _t_trace.dispatch(bucket_id=bucket_id, **fields),
         op="trace",
         args={
-            "bucket_id": bucket_id, "name": name, "domain": domain,
-            "valence": valence, "arousal": arousal, "importance": importance,
-            "tags": tags, "resolved": resolved, "pinned": pinned, "digested": digested,
-            "content_len": len(content or ""), "delete": delete, "status": status,
-            "weight": weight, "dont_surface": dont_surface,
-            "why_len": len(why_remembered or ""),
-            "meaning_append_len": len(meaning_append or ""),
-            "cited": cited,
-            "meaning_replace_count": len(meaning_replace or []),
-            "media_append_count": len(media_append or []),
-            "media_replace_count": len(media_replace or []),
-            "seed": seed,
-            "superseded_by": superseded_by,
-            "supersede_type": supersede_type,
-            "event_at": event_at,
+            "bucket_id": bucket_id, "name": fields["name"], "domain": fields["domain"],
+            "valence": fields["valence"], "arousal": fields["arousal"],
+            "importance": fields["importance"],
+            "tags": fields["tags"], "resolved": fields["resolved"], "pinned": fields["pinned"],
+            "digested": fields["digested"],
+            "content_len": _n(fields["content"]), "delete": fields["delete"],
+            "status": fields["status"],
+            "weight": fields["weight"], "dont_surface": fields["dont_surface"],
+            "why_len": _n(fields["why_remembered"]),
+            "meaning_append_len": _n(fields["meaning_append"]),
+            "cited": fields["cited"],
+            "meaning_replace_count": _n(fields["meaning_replace"]),
+            "media_append_count": _n(fields["media_append"]),
+            "media_replace_count": _n(fields["media_replace"]),
+            "seed": fields["seed"],
+            "superseded_by": fields["superseded_by"],
+            "supersede_type": fields["supersede_type"],
+            "event_at": fields["event_at"],
+            "via_changes": _n(changes) if isinstance(changes, dict) else 0,
         },
     )
+
+
+# N-1 #4:把 trace 对外公布的 inputSchema 换成瘦的(946 → 273 token,tiktoken)。
+# FastMCP 的 tools/list 吐的是 Tool.parameters;入参校验用的是函数签名生成的模型,
+# 不看这个字段——所以这里只影响"模型看到哪些参数",不影响"哪些参数能传进来"。
+# 依赖 FastMCP._tool_manager 私有结构;取不到就保持完整 schema,功能不受影响。
+try:
+    _trace_tool = mcp._tool_manager.get_tool("trace")
+    _trace_tool.parameters = _slim_trace_schema(_trace_tool.parameters)
+except (AttributeError, KeyError) as _trace_schema_exc:
+    logger.warning(f"trace 公布 schema 收口失败,保持完整 schema(不影响功能):{_trace_schema_exc}")
 
 
 @mcp_extra.tool(structured_output=False)
