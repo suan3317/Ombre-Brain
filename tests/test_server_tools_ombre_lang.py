@@ -63,17 +63,20 @@ async def test_en_file_save_and_read_have_no_chinese_characters(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_en_fz_safe_invalid_filename_has_no_chinese_characters(tmp_path, monkeypatch):
+async def test_en_fz_escape_name_saved_inside_files_has_no_chinese_characters(tmp_path, monkeypatch):
+    # FZ-1:"../escape.md" 不再报错拒收,修成 files/_/escape.md 存进去;回执仍须全英文。
     monkeypatch.setenv("OMBRE_LANG", "en")
     import server as srv
 
     monkeypatch.setattr(srv, "config", {"buckets_dir": str(tmp_path)}, raising=False)
 
-    with pytest.raises(ValueError) as exc_info:
-        srv._fz_safe("../escape.md")
+    saved = await srv._fz_save("../escape.md", "x", append=False)
 
-    assert not _CJK_RE.search(str(exc_info.value))
-    assert "Invalid filename" in str(exc_info.value)
+    assert not _CJK_RE.search(saved)
+    assert "created files/_/escape.md" in saved
+    files_root = os.path.realpath(os.path.join(str(tmp_path), "files"))
+    assert os.path.isfile(os.path.join(files_root, "_", "escape.md"))
+    assert sorted(os.listdir(str(tmp_path))) == ["files"]
 
 
 # ============================================================

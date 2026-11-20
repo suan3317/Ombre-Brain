@@ -14,7 +14,6 @@
 """
 
 import os
-import re
 import datetime as _dt
 
 from starlette.requests import Request
@@ -22,6 +21,11 @@ from starlette.responses import Response, JSONResponse, HTMLResponse, RedirectRe
 
 from . import _shared as sh
 from . import _ui
+
+try:
+    import file_zone as _fz  # type: ignore
+except ImportError:  # pragma: no cover
+    from .. import file_zone as _fz  # type: ignore
 
 _MAX_UPLOAD = 10 * 1024 * 1024  # 网页上传上限 10MB
 _BOARD = "留言板.md"              # 留言板文件,与 MCP 端 file_save/file_read 共用
@@ -34,16 +38,12 @@ def _root() -> str:
 
 
 def _safe(name: str) -> str:
-    name = (name or "").strip().replace("\\", "/")
-    if not name or name.startswith("/") or ".." in name:
+    """原名或实际名 → files/ 下的绝对路径。和 MCP 端 _fz_safe 走同一套 file_zone 规则(FZ-1)。"""
+    root = _root()
+    try:
+        return _fz.abs_path(root, _fz.resolve_for_read(root, name))
+    except _fz.FileNameError:
         raise ValueError(f"非法文件名: {name!r}")
-    parts = [p for p in name.split("/") if p]
-    if len(parts) > 2:
-        raise ValueError(f"最多一层子文件夹: {name}")
-    for p in parts:
-        if not re.match(r"^[\w\u4e00-\u9fff.\- ]{1,80}$", p) or p.startswith("."):
-            raise ValueError(f"文件名含非法字符: {p!r}")
-    return os.path.join(_root(), *parts)
 
 
 def _listing() -> list[dict]:
@@ -149,6 +149,7 @@ async function up() {
   const folder = document.getElementById('folder').value.trim();
   const msg = document.getElementById('msg');
   if (!files.length) { msg.textContent = '先选文件。'; return; }
+  const notes = [];
   for (const file of files) {
     const name = (folder ? folder + '/' : '') + file.name;
     msg.textContent = '上传中: ' + name;
@@ -156,8 +157,10 @@ async function up() {
                           {method:'PUT', body:file});
     const j = await r.json();
     if (!r.ok) { msg.textContent = '失败: ' + (j.error || r.status); return; }
+    if (j.collided_with) notes.push(j.collided_with + ' 已经有一个不同的文件,' + name + ' 另存为 ' + j.name);
+    else if (j.renamed) notes.push(name + ' 存成了 ' + j.name);
   }
-  msg.textContent = '全部上传完成。';
+  msg.textContent = '全部上传完成。' + (notes.length ? ' ' + notes.join(';') : '');
   document.getElementById('f').value = '';
   refresh();
 }
@@ -206,17 +209,26 @@ def register(mcp) -> None:
         if err:
             return err
         name = request.query_params.get("name", "")
-        try:
-            path = _safe(name)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
         body = await request.body()
         if len(body) > _MAX_UPLOAD:
             return JSONResponse({"error": "文件超过 10MB 上限"}, status_code=413)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
+        root = _root()
+        try:
+            target = _fz.resolve_for_write(root, name)
+        except ValueError as e:
+            return JSONResponse({"error": f"非法文件名: {name!r} ({e})"}, status_code=400)
+        os.makedirs(os.path.dirname(target.path), exist_ok=True)
+        with open(target.path, "wb") as f:
             f.write(body)
-        return JSONResponse({"ok": True, "name": name, "size": len(body)})
+        target.commit()
+        return JSONResponse({
+            "ok": True,
+            "name": target.rel,
+            "original": target.original,
+            "renamed": target.renamed,
+            "collided_with": target.collided_with,
+            "size": len(body),
+        })
 
     # v3 Commit D（F 裁定 2026-08-09）：这个端点是 Dashboard 的独立文件查看器
     # ——纯字节流下发，没有任何 HTML 包装层可以注入 derived_freshness 陈旧
@@ -287,11 +299,14 @@ def register(mcp) -> None:
         if err:
             return err
         name = request.query_params.get("name", "")
+        root = _root()
         try:
-            path = _safe(name)
+            rel = _fz.resolve_for_read(root, name)
+            path = _fz.abs_path(root, rel)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         if not os.path.isfile(path):
             return JSONResponse({"error": "文件不存在"}, status_code=404)
         os.remove(path)
-        return JSONResponse({"ok": True, "deleted": name})
+        _fz.forget(root, rel)
+        return JSONResponse({"ok": True, "deleted": rel})

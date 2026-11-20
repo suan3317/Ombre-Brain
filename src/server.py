@@ -942,6 +942,7 @@ async def dream_keep(date: str) -> str:
 # =============================================================
 import re as _fz_re
 import datetime as _fz_dt
+import file_zone as _fz
 
 _FZ_MAX_BYTES = 2 * 1024 * 1024   # 单文件上限 2MB
 _FZ_READ_CHUNK = 50000            # file_read 单次最多返回字符数
@@ -954,53 +955,104 @@ def _fz_root() -> str:
 
 
 def _fz_safe(name: str) -> str:
-    """校验文件名,拦路径穿越;允许至多一层子文件夹。返回绝对路径。"""
-    name = (name or "").strip().replace("\\", "/")
-    if not name or name.startswith("/") or ".." in name:
+    """原名或实际名 → files/ 下的绝对路径(FZ-1:不再拒收,按 file_zone 规则规整并查改名索引)。
+    规整完什么都不剩时抛 ValueError。"""
+    root = _fz_root()
+    try:
+        return _fz.abs_path(root, _fz.resolve_for_read(root, name))
+    except _fz.FileNameError:
         raise ValueError(_tr(f"非法文件名: {name!r}", f"Invalid filename: {name!r}"))
-    parts = [p for p in name.split("/") if p]
-    if len(parts) > 2:
-        raise ValueError(_tr(f"最多一层子文件夹: {name}", f"At most one level of subfolder: {name}"))
-    for p in parts:
-        if not _fz_re.match(r"^[\w\u4e00-\u9fff.\- ]{1,80}$", p) or p.startswith("."):
-            raise ValueError(_tr(f"文件名含非法字符: {p!r}", f"Filename has illegal characters: {p!r}"))
-    return os.path.join(_fz_root(), *parts)
+
+
+def _fz_draft_fallback(root: str, name: str, data: str, err: Exception) -> str:
+    """FZ-1:名字修完写入仍失败——先把内容原样存进 files/草稿/,再报错。"""
+    why = f"{type(err).__name__}: {err}"
+    try:
+        draft = _fz.write_draft(root, data)
+    except Exception as e2:
+        logger.error("[file_save] write failed and draft failed: name=%r err=%s draft_err=%s", name, why, e2)
+        return _tr(
+            f"OB-FZ04 写入 files/{name} 失败({why});存草稿也失败了({type(e2).__name__}: {e2})。内容没有保存。",
+            f"OB-FZ04 writing files/{name} failed ({why}); saving a draft also failed "
+            f"({type(e2).__name__}: {e2}). The content was NOT saved.",
+        )
+    logger.warning("[file_save] write failed, content kept as draft: name=%r err=%s draft=%s", name, why, draft)
+    return _tr(
+        f"OB-FZ04 写入 files/{name} 失败({why})。内容已原样存进草稿 files/{draft} ,"
+        "用 file_read 能读回,不用重发。",
+        f"OB-FZ04 writing files/{name} failed ({why}). The content was saved unchanged as a draft "
+        f"at files/{draft}; read it back with file_read, no need to resend.",
+    )
 
 
 async def _fz_save(name: str, content: str, append: bool, cited: str = "") -> str:
-    path = _fz_safe(name)
     data = content or ""
     if len(data.encode("utf-8")) > _FZ_MAX_BYTES:
         return _tr(
             "OB-FZ01 内容超过 2MB 上限,拒绝写入。请拆分后再存。",
             "OB-FZ01 content exceeds the 2MB limit, write refused. Split it and store again.",
         )
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    existed = os.path.exists(path)
-    if append and existed and os.path.getsize(path) > 0:
-        data = "\n\n" + data
-    with open(path, "a" if append else "w", encoding="utf-8") as f:
-        f.write(data)
-    size = os.path.getsize(path)
+    root = _fz_root()
+    try:
+        target = _fz.resolve_for_write(root, name)
+        path = target.path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        existed = os.path.exists(path)
+        payload = data
+        if append and existed and os.path.getsize(path) > 0:
+            payload = "\n\n" + data
+        with open(path, "a" if append else "w", encoding="utf-8") as f:
+            f.write(payload)
+        size = os.path.getsize(path)
+    except Exception as e:
+        return _fz_draft_fallback(root, name, data, e)
+    try:
+        target.commit()
+    except Exception as e:
+        # 文件已经写好了;索引没记上只影响下次拿原名找它,不回滚、不存草稿
+        logger.warning("[file_save] rename index update failed: rel=%s err=%s", target.rel, e)
+    rel = target.rel
     if append and existed:
         verb = _tr("追加到", "appended to")
     elif existed:
         verb = _tr("覆盖", "overwrote")
     else:
         verb = _tr("创建", "created")
-    result = _tr(f"已{verb} files/{name} (当前 {size} 字节)。", f"{verb} files/{name} ({size} bytes now).")
+    if not target.renamed:
+        result = _tr(f"已{verb} files/{rel} (当前 {size} 字节)。", f"{verb} files/{rel} ({size} bytes now).")
+    else:
+        orig = target.original
+        note_zh = _fz.rename_note(orig, lang_en=False)
+        note_en = _fz.rename_note(orig, lang_en=True)
+        result = ""
+        if target.collided_with:
+            result = _tr(
+                f"files/{target.collided_with} 已经有一个不同的文件,这篇另存为 files/{rel} 。",
+                f"files/{target.collided_with} already holds a different file; this one was saved as files/{rel}. ",
+            )
+        result += _tr(
+            f"已{verb} files/{rel}(原名 {orig},{note_zh})(当前 {size} 字节)。"
+            f"之后用实际名 {rel} 或原名都能 file_read。",
+            f"{verb} files/{rel} (original name {orig}; {note_en}) ({size} bytes now). "
+            f"file_read works with either the actual name {rel} or the original name.",
+        )
     if cited:
         # v3 Commit B：file_save 没有 bucket_id 可当 source，用文件路径本身
-        # 标识"是这份文件用到了这些记忆"。
-        recorded = await _resolve_citations(cited, source=f"file:{name}", location="file_save")
+        # 标识"是这份文件用到了这些记忆"。FZ-1:用实际落盘的名字。
+        recorded = await _resolve_citations(cited, source=f"file:{rel}", location="file_save")
         if recorded:
             result += _tr(f" 已记引用: {','.join(recorded)}。", f" Citations recorded: {','.join(recorded)}.")
     return result
 
 
 async def _fz_read(name: str, offset: int) -> str:
-    path = _fz_safe(name)
-    if not os.path.isfile(path):
+    root = _fz_root()
+    try:
+        rel = _fz.resolve_for_read(root, name)
+        path = _fz.abs_path(root, rel)
+    except _fz.FileNameError:
+        rel, path = name, ""
+    if not path or not os.path.isfile(path):
         return _tr(
             f"OB-FZ02 文件不存在: files/{name} 。用 file_list 查看现有文件。",
             f"OB-FZ02 file does not exist: files/{name}. Use file_list to see existing files.",
@@ -1011,8 +1063,8 @@ async def _fz_read(name: str, offset: int) -> str:
     start = max(0, int(offset or 0))
     chunk = text[start:start + _FZ_READ_CHUNK]
     head = _tr(
-        f"[files/{name} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]",
-        f"[files/{name} has {total} chars total, returning {start}~{start + len(chunk)} this time]",
+        f"[files/{rel} 共 {total} 字符,本次返回 {start}~{start + len(chunk)}]",
+        f"[files/{rel} has {total} chars total, returning {start}~{start + len(chunk)} this time]",
     )
     tail = ""
     if start + len(chunk) < total:
@@ -1025,7 +1077,7 @@ async def _fz_read(name: str, offset: int) -> str:
     # 提示（精确到"哪一次引用/哪一行"，不是整份文档级模糊警示）。
     warning = ""
     try:
-        stale_entries = await bucket_mgr.get_derived_stale(f"file:{name}")
+        stale_entries = await bucket_mgr.get_derived_stale(f"file:{rel}")
     except Exception:
         stale_entries = []
     if stale_entries:
@@ -1064,8 +1116,13 @@ def _fz_format_rows(entries: list) -> list:
 
 async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", keyword: str = "") -> str:
     root = _fz_root()
-    base = _fz_safe(folder) if (folder or "").strip() else root
-    if not os.path.isdir(base):
+    base = root
+    if (folder or "").strip():
+        try:
+            base = _fz.abs_path(root, _fz.normalize_rel(folder))
+        except _fz.FileNameError:
+            base = ""
+    if not base or not os.path.isdir(base):
         return _tr(f"OB-FZ03 文件夹不存在: files/{folder}", f"OB-FZ03 folder does not exist: files/{folder}")
     kw = (keyword or "").strip().lower()
     entries = _fz_list_entries(base, root, kw)
@@ -1084,13 +1141,19 @@ async def _fz_list(folder: str, sort_by: str = "mtime", order: str = "desc", key
 
 
 async def _fz_delete(name: str) -> str:
-    path = _fz_safe(name)
-    if not os.path.isfile(path):
+    root = _fz_root()
+    try:
+        rel = _fz.resolve_for_read(root, name)
+        path = _fz.abs_path(root, rel)
+    except _fz.FileNameError:
+        rel, path = name, ""
+    if not path or not os.path.isfile(path):
         return _tr(f"OB-FZ02 文件不存在: files/{name}", f"OB-FZ02 file does not exist: files/{name}")
     os.remove(path)
+    _fz.forget(root, rel)
     return _tr(
-        f"已删除 files/{name} 。GitHub 备份里的历史版本仍可找回。",
-        f"Deleted files/{name}. Historical versions can still be recovered from the GitHub backup.",
+        f"已删除 files/{rel} 。GitHub 备份里的历史版本仍可找回。",
+        f"Deleted files/{rel}. Historical versions can still be recovered from the GitHub backup.",
     )
 
 
@@ -1101,7 +1164,7 @@ async def file_save(
     append: Optional[bool] = False,
     cited: Optional[str] = "",
 ) -> str:
-    """file_save:文件区存文件(save file to file zone)。写入日记 diary、交接文件 handoff、留言板 message board、文档 document。name=文件名,可带一层子文件夹如 diary/20260702.md,建议 .md 后缀(自动随 GitHub 备份)。append=True 在文件末尾追加(留言板用),默认覆盖写。单文件上限 2MB。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了这份文件的内容(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。"""
+    """file_save:文件区存文件(save file to file zone)。写入日记 diary、交接文件 handoff、留言板 message board、文档 document。name=文件名,可带一层子文件夹如 diary/20260702.md,建议 .md 后缀(自动随 GitHub 备份)。append=True 在文件末尾追加(留言板用),默认覆盖写。单文件上限 2MB。文件名可以带中文标点和空格,不能用的字符会自动换成 _,回执里会写实际文件名。cited=可选,逗号分隔的 bucket_id 列表,标记这些既有记忆实质改变了这份文件的内容(引用信号,同桶滚动48小时至多计一次);只在真的用上了才传。"""
     return await _with_notice(
         _fz_save(name, content, bool(append), cited or ""),
         op="file_save",
