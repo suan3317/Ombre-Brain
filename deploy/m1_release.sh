@@ -233,6 +233,15 @@ case "$MODE" in
     echo "源码已换到 /srv/m1/build/$IMAGE(旧目录改名留着)"
 
     PREV_ID="$(D image inspect -f '{{.Id}}' $IMAGE:m1 2>/dev/null || true)"
+    # 同一个 commit 再 build 一次(比如只改了 env、要重建生效)::<commit> 和 :m1 两个标签都会挪到
+    # 新镜像上,旧镜像一个标签都不剩,按 ID 也找不到了,后面给它打 rollback 就失败、整个脚本在重建前
+    # 停下(2026-11-20 chatnest 5c82f97 踩到)。所以 build 前先给旧镜像挂一个临时标签保住它;
+    # 同一个 commit 的话 rollback 标签不动(还指着上一个 commit 那版,退回才有意义)。
+    SAME_COMMIT=0
+    if [ -n "$PREV_ID" ] && [ "$(D image inspect -f '{{.Id}}' "$IMAGE:$TAG" 2>/dev/null || true)" = "$PREV_ID" ]; then
+      SAME_COMMIT=1
+    fi
+    [ -z "$PREV_ID" ] || D tag "$PREV_ID" "$IMAGE:prev-build"
     echo "开始 build(几分钟)…"
     if ! (cd "$IMAGE" && D build -t "$IMAGE:$TAG" -t $IMAGE:m1 . 2>&1) | sudo -n tee "$LOG" >/dev/null; then
       tail -20 "$LOG"
@@ -241,12 +250,18 @@ case "$MODE" in
     NEW_ID="$(D image inspect -f '{{.Id}}' $IMAGE:m1)"
     echo "✅ build 完成: $IMAGE:$TAG"
     if [ -n "$PREV_ID" ] && [ "$PREV_ID" != "$NEW_ID" ]; then
-      D tag "$PREV_ID" $IMAGE:rollback
-      echo "上一版镜像已标为 $IMAGE:rollback(出问题用 rollback 退回)"
+      if [ "$SAME_COMMIT" = 1 ]; then
+        echo "同一个 commit 重新 build:rollback 标签不动(还是上一个 commit 那版:$(img_short $IMAGE:rollback))"
+      else
+        D tag "$IMAGE:prev-build" $IMAGE:rollback
+        echo "上一版镜像已标为 $IMAGE:rollback(出问题用 rollback 退回)"
+      fi
     fi
 
     cd /srv/m1
     sudo -n docker compose up -d --force-recreate "$@"
+    # 临时标签用完摘掉(只摘标签;rollback 指着的镜像不受影响)
+    [ -z "$PREV_ID" ] || D rmi "$IMAGE:prev-build" >/dev/null 2>&1 || true
     echo "核对中(ombre 每台最多等 90 秒,chatnest 最多 150 秒)…"
     verify "$NEW_ID" "$VER" "$@" || fail "有容器没通过核对。要退回就跑 rollback。"
     echo "✅ 发布完成: v$VER ($SHA) → $*"
