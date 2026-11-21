@@ -19,6 +19,11 @@
 #   bash deploy/m1_release.sh [chatnest] run <commit> [容器...]   发布;ombre 默认 ombre-flint ombre-kieran ombre-rio,
 #                                                                chatnest 只有 chatnest-home
 #   bash deploy/m1_release.sh [chatnest] rollback [容器...]       退回上一次发布前的镜像
+#   bash deploy/m1_release.sh [chatnest] build <commit>           只打包上传 + build 镜像(打 :<commit> 和 :m1 标签),
+#                                                                不重建容器、不核对(M-2 搬家:新机器上先备好镜像)
+#
+# 发往哪台机器:默认读 ~/.ombre-m1-deploy;设 OMBRE_M1_DEPLOY_CONF=<另一份配置> 就发往别的机器
+# (M-2:~/.ombre-m2-deploy 指向 m2)。脚本开头会打印这次的目标机器。
 # ============================================================
 set -euo pipefail
 
@@ -60,6 +65,7 @@ DEPLOY_KEY="${DEPLOY_KEY/#\~/$HOME}"
 [ -n "$DEPLOY_HOST" ] || die "$CONF 里没有 DEPLOY_HOST"
 [ -f "$DEPLOY_KEY" ] || die "私钥不存在: $DEPLOY_KEY"
 SSH=(ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$DEPLOY_HOST")
+echo "目标机器: $DEPLOY_HOST(配置 $CONF)"
 SCP=(scp -q -i "$DEPLOY_KEY" -o BatchMode=yes -o ConnectTimeout=15)
 
 [ -d "$REPO" ] || die "找不到仓库: $REPO"
@@ -211,7 +217,7 @@ case "$MODE" in
     verify "$(D image inspect -f '{{.Id}}' $IMAGE:m1 2>/dev/null || true)" "" "$@" || true
     ;;
 
-  run)
+  run|build)
     SHA="$1"; VER="$2"; SUM="$3"; shift 3
     PKG="${IMAGE}_${SHA}.tar.gz"
     if [ "$KIND" = chatnest ]; then TAG="$SHA"; LOG="chatnest-home.build.log.$SHA"; else TAG="$VER-$SHA"; LOG="build-$SHA.log"; fi
@@ -258,6 +264,11 @@ case "$MODE" in
       fi
     fi
 
+    if [ "$MODE" = build ]; then
+      [ -z "$PREV_ID" ] || D rmi "$IMAGE:prev-build" >/dev/null 2>&1 || true
+      echo "✅ 只 build:$IMAGE:$TAG(= $IMAGE:m1,$(img_short $IMAGE:m1))。没有重建任何容器。"
+      exit 0
+    fi
     cd /srv/m1
     sudo -n docker compose up -d --force-recreate "$@"
     # 临时标签用完摘掉(只摘标签;rollback 指着的镜像不受影响)
@@ -317,6 +328,17 @@ case "$MODE" in
     echo "✅ 已上传"
     step "服务器:build → 重建 → 核对"
     remote run "$SHA" "$VER" "$SUM" "${CONTAINERS[@]}"
+    ;;
+  build)
+    [ $# -eq 1 ] || usage
+    step "本地打包自检"
+    package "$1"
+    echo "目标: v$VER ($SHA) → 只 build 镜像,不重建容器"
+    step "上传"
+    "${SCP[@]}" "$WORK/$PKG" "$DEPLOY_HOST:"
+    echo "✅ 已上传"
+    step "服务器:只 build"
+    remote build "$SHA" "$VER" "$SUM"
     ;;
   rollback)
     CONTAINERS=("${DEFAULT_CONTAINERS[@]}")
