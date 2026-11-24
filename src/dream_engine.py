@@ -805,6 +805,8 @@ def _tzinfo(tz_name: str):
 #                  兜底：vault_health.inspect_vault 按 id（缺省 stem）去重
 #                  统计 duplicate_id_count，dreams/ 旧址跟 diary/ 同名日期
 #                  文件撞过 id，迁出后要真正消失这个 id 就必须唯一。
+#                  （2026-11-24 起体检只扫桶目录，dream_book/ 已不进体检；
+#                  显式 id 保留不动。）
 #   date        —— 梦所属日期（belongs_date，通常是"昨夜"）
 #   tone/level/sources/noise —— 沿用 dream_engine 原有的生成元信息
 #   created_at  —— 生成时刻（原 generated_at 改名，对齐工单用词）

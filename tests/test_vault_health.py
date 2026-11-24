@@ -1,6 +1,7 @@
 import sqlite3
 
 import frontmatter
+import pytest
 
 from vault_health import inspect_vault
 
@@ -75,18 +76,83 @@ def test_vault_health_reports_parse_errors_and_duplicate_ids(tmp_path):
     assert report["markdown"]["parse_error_count"] == 1
 
 
-def test_diary_and_old_dreams_same_date_filename_collide_without_explicit_id(tmp_path):
-    """施工单·工程二附加验收的取证:复现根因。diary/ 与旧 files/dreams/ 各自
-    用日期当文件名、都不写 id，post.get("id") 兜底成 path.stem，两边文件名
-    一样（同一天）就撞了同一个 id——这是迁移前的病，dream_book 的显式 id
-    要解决的正是这个。"""
+def test_diary_and_old_dreams_same_date_filename_no_longer_scanned(tmp_path):
+    """原先这条复现的是：diary/ 与旧 files/dreams/ 同日期文件名、都不写 id，
+    stem 兜底撞成同一个 id（duplicate_id_count == 1）。2026-11-24 起体检只扫
+    桶目录，files/ 整个不进体检，同名文件不再计数，也不再撞 id。"""
     vault = tmp_path / "vault"
     _write_no_id(vault / "files" / "diary" / "2026-07-31.md", "日记正文")
     _write_no_id(vault / "files" / "dreams" / "2026-07-31.md", "旧梦正文")
 
     report = inspect_vault(str(vault), str(vault / "missing.db"))
 
-    assert report["markdown"]["duplicate_id_count"] == 1
+    assert report["markdown"]["file_count"] == 0
+    assert report["markdown"]["duplicate_id_count"] == 0
+
+
+def test_file_zone_markdown_with_rule_and_star_is_not_parsed(tmp_path):
+    """Rio 体检报错的复现：文件区普通 .md 第一行是 "---"、第二行 "*" 开头，
+    按头信息解析会报 YAML alias 错。体检不扫 files/，不报错、不计数。"""
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "one.md", "one")
+    board = vault / "files" / "留言板.md"
+    board.parent.mkdir(parents=True, exist_ok=True)
+    board.write_text("---\n*加粗* 第二行\n---\n正文\n", encoding="utf-8")
+    # 前提：这份文本按头信息解析确实会炸（line 2, column 1 的 alias 错）
+    with pytest.raises(Exception, match="alias"):
+        frontmatter.loads(board.read_text(encoding="utf-8"))
+    db = vault / "embeddings.db"
+    _db(db, ["one"])
+
+    report = inspect_vault(str(vault), str(db))
+
+    assert report["status"] == "ok"
+    assert report["markdown"]["file_count"] == 1
+    assert report["markdown"]["parse_error_count"] == 0
+
+
+def test_dream_book_and_hidden_dirs_are_not_scanned(tmp_path):
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "one.md", "one")
+    for rel in ("dream_book/2026-07-31.md", ".import_backups/x.md", "files/a/b.md"):
+        bad = vault / rel
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_bytes(b"\xff\xfe")
+
+    report = inspect_vault(str(vault), str(vault / "missing.db"))
+
+    assert report["markdown"]["file_count"] == 1
+    assert report["markdown"]["parse_error_count"] == 0
+
+
+def test_broken_header_in_bucket_dir_still_reports_error(tmp_path):
+    """桶目录里真有坏头信息的，照旧报 error。"""
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "one.md", "one")
+    bad = vault / "dynamic" / "general" / "bad.md"
+    bad.write_text("---\n*坏头信息\n---\n正文\n", encoding="utf-8")
+    (vault / "files").mkdir(parents=True, exist_ok=True)
+    (vault / "files" / "留言板.md").write_text("---\n*加粗*\n---\n", encoding="utf-8")
+
+    report = inspect_vault(str(vault), str(vault / "missing.db"))
+
+    assert report["status"] == "error"
+    assert report["markdown"]["file_count"] == 2
+    assert report["markdown"]["parse_error_count"] == 1
+    assert report["markdown"]["parse_errors"][0]["path"].endswith("bad.md")
+
+
+def test_scan_list_matches_bucket_manager_dirs(bucket_mgr):
+    """体检的目录名单必须与 BucketManager 遍历的（活跃目录 + archive）一致。"""
+    import os
+
+    from vault_health import _BUCKET_TOP_LEVELS
+
+    expected = {
+        os.path.basename(path)
+        for path in list(bucket_mgr._active_dirs) + [bucket_mgr.archive_dir]
+    }
+    assert set(_BUCKET_TOP_LEVELS) == expected
 
 
 def test_dream_book_explicit_id_does_not_collide_with_diary(tmp_path):

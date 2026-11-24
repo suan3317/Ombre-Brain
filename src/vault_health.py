@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable
@@ -10,6 +11,26 @@ import frontmatter
 
 
 _ACTIVE_TOP_LEVELS = {"dynamic", "permanent", "feel", "plans", "letters"}
+
+# 体检只扫桶目录：与 BucketManager._active_dirs + archive_dir 同一份名单
+# （tests/test_vault_health.py 有一条断言两边一致）。files/（文件区）、
+# dream_book/、点开头的隐藏目录等都不是桶，不进体检——以前 rglob 整个
+# buckets_dir，文件区里 "---" 开头的普通 .md 会被当头信息解析而报 error。
+_BUCKET_TOP_LEVELS = ("permanent", "dynamic", "feel", "plans", "letters", "archive")
+
+
+def _iter_bucket_markdown(root: Path):
+    """与 BucketManager._iter_md_files 同样的遍历：各桶目录递归，只取 *.md。"""
+    for top in _BUCKET_TOP_LEVELS:
+        top_dir = root / top
+        if not top_dir.is_dir():
+            continue
+        found = []
+        for dirpath, _dirs, filenames in os.walk(top_dir):
+            for fname in filenames:
+                if fname.endswith(".md"):
+                    found.append(Path(dirpath) / fname)
+        yield from sorted(found)
 
 
 def _limited(items: list[Any], limit: int = 20) -> list[Any]:
@@ -31,7 +52,7 @@ def inspect_vault(
     markdown_count = 0
 
     if root.is_dir():
-        for path in sorted(root.rglob("*.md")):
+        for path in _iter_bucket_markdown(root):
             markdown_count += 1
             try:
                 resolved = path.resolve()
