@@ -8,7 +8,7 @@
 #   E-10(2026-11-24)起多一件:铺代码镜像 /srv/m1/code/<仓库名>(Ombre-Brain / chatnest-home),
 #     chatnest 容器只读挂 /code 给 Flint 房间读代码。镜像 = 这次发布的同一个 git archive 包,
 #     删掉 handoff/、full-stack/personas/、名叫 .env / *.env 的文件;有符号链接就停下不换;
-#     写 VERSION(仓库、commit、发布时间 LA);整目录替换(旧版删掉的文件镜像里也没了)。
+#     写 MIRROR_VERSION(仓库、commit、发布时间 LA;不碰仓库自己的 VERSION);整目录替换(旧版删掉的文件镜像里也没了)。
 #     run 核对通过后铺;rollback 后按退回那版的包重铺;mirror 模式只铺镜像。
 #   两个项目(2026-11-19 E-6 起加 chatnest-home,Silvia 看过 diff 点头):
 #     ombre    = 本仓库(Ombre-Brain),容器名只允许 ombre-*
@@ -181,14 +181,17 @@ mirror_from_pkg() {
   done
   left="$(sudo -n find "$new" \( -name .env -o -name '*.env' \) | head -3)"
   if [ -n "$left" ]; then sudo -n rm -rf -- "$new"; echo "❌ 还有 env 文件,镜像没换"; return 1; fi
-  # Ombre-Brain 仓库根上本来就有 VERSION(只有版本号):先读出来,镜像的 VERSION 里保留成 version= 一行
+  # 标记文件叫 MIRROR_VERSION,不碰仓库自己的 VERSION(F 2026-11-24:镜像里的代码和 commit 一字不差)
+  if sudo -n test -e "$new/MIRROR_VERSION"; then
+    sudo -n rm -rf -- "$new"; echo "❌ 仓库里自己就有 MIRROR_VERSION,不覆盖,镜像没换"; return 1
+  fi
   if [ -z "$ver" ]; then
     if [ "$KIND" = ombre ]; then ver="$(sudo -n cat "$new/VERSION" 2>/dev/null | head -1 | tr -d '\r\n ')"; else ver="$sha"; fi
   fi
   if ! printf 'repo=%s\ncommit=%s\nversion=%s\npublished_at=%s\n' \
     "$MIRROR" "$sha" "$ver" "$(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M:%S %Z')" \
-    | sudo -n tee "$new/VERSION" >/dev/null; then
-    sudo -n rm -rf -- "$new"; echo "❌ 写不了 VERSION,镜像没换"; return 1
+    | sudo -n tee "$new/MIRROR_VERSION" >/dev/null; then
+    sudo -n rm -rf -- "$new"; echo "❌ 写不了 MIRROR_VERSION,镜像没换"; return 1
   fi
   sudo -n chmod -R u+rwX,go+rX,go-w "$new" || { sudo -n rm -rf -- "$new"; echo "❌ 改权限失败,镜像没换"; return 1; }
   if sudo -n test -e "$MIRROR_ROOT/$MIRROR"; then
@@ -203,8 +206,8 @@ mirror_from_pkg() {
 }
 
 mirror_state() {
-  if sudo -n test -f "$MIRROR_ROOT/$MIRROR/VERSION"; then
-    echo "代码镜像 $MIRROR_ROOT/$MIRROR: $(sudo -n sed -n 's/^commit=//p; s/^published_at=/发布于 /p' "$MIRROR_ROOT/$MIRROR/VERSION" | paste -sd' ')"
+  if sudo -n test -f "$MIRROR_ROOT/$MIRROR/MIRROR_VERSION"; then
+    echo "代码镜像 $MIRROR_ROOT/$MIRROR: $(sudo -n sed -n 's/^commit=//p; s/^published_at=/发布于 /p' "$MIRROR_ROOT/$MIRROR/MIRROR_VERSION" | paste -sd' ')"
   else
     echo "代码镜像 $MIRROR_ROOT/$MIRROR: 无"
   fi
