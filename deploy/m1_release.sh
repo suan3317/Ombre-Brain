@@ -291,8 +291,8 @@ verify() {
 
 case "$MODE" in
   check)
-    echo "$IMAGE:m1       = $(img_short $IMAGE:m1)"
-    echo "$IMAGE:rollback = $(img_short $IMAGE:rollback)"
+    echo "$IMAGE:m1       = $(img_short $IMAGE:m1)  commit $(image_commit $IMAGE:m1 || true)"
+    echo "$IMAGE:rollback = $(img_short $IMAGE:rollback)  commit $(image_commit $IMAGE:rollback || true)"
     echo "磁盘: $(df -h /srv/m1 | tail -1 | awk '{print $4" 可用 / 已用 "$5}')"
     mirror_state
     verify "$(D image inspect -f '{{.Id}}' $IMAGE:m1 2>/dev/null || true)" "" "$@" || true
